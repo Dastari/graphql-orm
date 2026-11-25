@@ -79,6 +79,34 @@ pub struct AiApprovalBinding {
     pub resources: Vec<AiApprovalResourceBinding>,
     /// Hash of the server-generated canonical action preview.
     pub preview_hash: String,
+    /// Broker origin of a generated mutation reached through the fixed
+    /// capability broker; `None` for a direct call.
+    ///
+    /// It is part of the hashed envelope, so an approval granted for a
+    /// broker-routed call matches only while the durable call still records
+    /// that origin and its admitting rules. Absent, it is omitted from the
+    /// hash input, so a direct binding hashes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_origin: Option<AiApprovalBrokerOrigin>,
+}
+
+/// Broker origin and admitting rules of one approval-required generated
+/// mutation reached through the fixed capability broker.
+///
+/// It identifies the provider call the approval answers and the rules that
+/// admitted the mutation. It grants nothing: the approval is still consumed
+/// only for the exact binding, and current rules and resolver authorization
+/// are re-proved at execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiApprovalBrokerOrigin {
+    /// Provider-facing broker execute tool ID.
+    pub provider_tool_id: String,
+    /// Exact offered broker execute definition fingerprint.
+    pub provider_tool_fingerprint: String,
+    /// Canonical hash of the provider's original broker arguments.
+    pub provider_argument_hash: String,
+    /// Fingerprint of the hierarchical rules that admitted the mutation.
+    pub rule_fingerprint: String,
 }
 
 impl AiApprovalBinding {

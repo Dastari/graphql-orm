@@ -153,6 +153,20 @@ impl ResolvedApplicationCall {
         .map_err(|_| AiError::PersistenceFailed)
     }
 
+    /// The broker origin bound into the approval of a brokered call; `None`
+    /// for a direct call.
+    pub(crate) fn approval_broker_origin(&self) -> Option<crate::AiApprovalBrokerOrigin> {
+        if !self.is_brokered() {
+            return None;
+        }
+        Some(crate::AiApprovalBrokerOrigin {
+            provider_tool_id: self.provider_tool_id.as_str().to_owned(),
+            provider_tool_fingerprint: self.provider_tool_fingerprint.clone(),
+            provider_argument_hash: self.provider_argument_hash.clone(),
+            rule_fingerprint: self.rule_fingerprint.clone().unwrap_or_default(),
+        })
+    }
+
     /// Proves this resolution answers exactly `call`: its call ID, offered
     /// definition and fingerprint, and its exact arguments.
     pub(crate) fn bind_provider_call(self, call: &AiProviderToolCall) -> Result<Self, AiError> {
@@ -216,11 +230,16 @@ pub(crate) fn valid_provider_identity(call: &AiToolCallRecord) -> bool {
 /// Splits one row's opened protected arguments into the arguments it runs
 /// with and, for a broker-routed row, its [`BrokeredCallEvidence`].
 ///
-/// The envelope and the clear columns must agree: an envelope with cleared
-/// or different provider columns, or provider columns without an envelope,
-/// is refused, so a broker-routed row cannot be downgraded to a direct one.
-/// The arguments' canonical hash must be the row's argument hash. A legacy
-/// direct row opens to its own arguments, unchanged.
+/// Only the row's clear dual-identity columns claim broker origin. A row
+/// without them is a direct row, and its protected arguments are taken
+/// verbatim, whatever their shape: direct arguments that happen to look like
+/// an envelope stay ordinary arguments. A row with them must open to an
+/// envelope that agrees with the columns, so columns added to a direct row
+/// are refused. Clearing the columns of a broker-routed row leaves an
+/// envelope whose hash is not the row's argument hash, and its approval
+/// binds the broker origin ([`crate::AiApprovalBinding::broker_origin`]), so
+/// such a row is refused rather than run as direct. The arguments' canonical
+/// hash must be the row's argument hash in every case.
 ///
 /// # Errors
 ///
@@ -229,22 +248,19 @@ pub(crate) fn open_call_arguments(
     call: &AiToolCallRecord,
     opened: serde_json::Value,
 ) -> Result<(serde_json::Value, Option<BrokeredCallEvidence>), AiError> {
-    let enveloped = opened
-        .get("format")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|format| format == BROKERED_CALL_EVIDENCE_FORMAT);
     if !valid_provider_identity(call) {
         return Err(AiError::Conflict);
     }
-    if !enveloped {
-        if call.provider_tool_id.is_some() || json_hash(&opened) != call.argument_hash {
+    if call.provider_tool_id.is_none() {
+        if json_hash(&opened) != call.argument_hash {
             return Err(AiError::Conflict);
         }
         return Ok((opened, None));
     }
     let evidence: BrokeredCallEvidence =
         serde_json::from_value(opened).map_err(|_| AiError::Conflict)?;
-    if call.provider_tool_id.as_deref() != Some(evidence.provider_tool_id.as_str())
+    if evidence.format != BROKERED_CALL_EVIDENCE_FORMAT
+        || call.provider_tool_id.as_deref() != Some(evidence.provider_tool_id.as_str())
         || call.provider_tool_fingerprint.as_deref()
             != Some(evidence.provider_tool_fingerprint.as_str())
         || !valid_sha256(&evidence.provider_argument_hash)
@@ -292,6 +308,43 @@ pub(crate) async fn brokered_rules_admit(
 pub(crate) struct BrokeredRuleFence {
     pub(crate) rules: Arc<dyn crate::AiAgentRuleResolver>,
     pub(crate) scope: AiScope,
+}
+
+/// The final admission of one brokered mutation: its rules are re-proved
+/// inside the execution bridge, after principal rehydration, host tool
+/// policy and request-context construction, as the last step before the
+/// executor. The caller's durable lifecycle (the pre-effect checkpoint of
+/// an automatic mutation, or the consumed one-shot approval) proves no
+/// earlier dispatch, so a refusal is attested as not started.
+pub(crate) struct BrokeredRuleAdmission<'a> {
+    pub(crate) rules: &'a dyn crate::AiAgentRuleResolver,
+    pub(crate) lease: &'a AiRunLease,
+    pub(crate) scope: &'a AiScope,
+    pub(crate) resolved: &'a ResolvedApplicationCall,
+    pub(crate) binding: (ToolMaturity, AiApprovalRule),
+}
+
+#[async_trait]
+impl crate::execution::AiFinalAdmission for BrokeredRuleAdmission<'_> {
+    async fn admits(&self) -> bool {
+        let Some(rule_fingerprint) = self.resolved.rule_fingerprint.as_deref() else {
+            return false;
+        };
+        brokered_rules_admit(
+            self.rules,
+            self.lease,
+            self.scope,
+            rule_fingerprint,
+            &self.resolved.tool_fingerprint,
+            self.binding,
+        )
+        .await
+        .is_ok()
+    }
+
+    fn attests_no_effect(&self) -> bool {
+        true
+    }
 }
 
 /// Validates that one broker call names the exact frozen definition this

@@ -3455,6 +3455,7 @@ mod tests {
             authorization_state_digest: "auth-state-v1".to_owned(),
             resources: vec![resource],
             preview_hash: preview.stable_hash(),
+            broker_origin: None,
         };
         (binding, preview)
     }

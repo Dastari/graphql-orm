@@ -964,3 +964,186 @@ async fn brokered_rows_retain_the_exact_provider_request_as_protected_evidence()
     forged.provider_tool_fingerprint = Some("e".repeat(64));
     assert!(crate::orm_tools::open_call_arguments(&forged, value).is_err());
 }
+
+/// Review round 3, item 3: only the clear dual-identity columns claim
+/// broker origin. Direct arguments that collide with the envelope marker
+/// stay ordinary arguments; columns added to a direct row are refused.
+#[test]
+fn only_the_dual_identity_columns_claim_broker_origin() {
+    let collision = json!({
+        "format": crate::orm_tools::BROKERED_CALL_EVIDENCE_FORMAT,
+        "providerToolId": AI_CAPABILITY_EXECUTE_TOOL_ID,
+        "recordId": "record-1"
+    });
+    let direct = AiToolCallRecord {
+        id: Uuid::new_v4(),
+        run_id: Uuid::new_v4(),
+        provider_call_key: "legacy-key".to_owned(),
+        provider_call_id: "legacy-call".to_owned(),
+        provider_kind: None,
+        provider_model: None,
+        provider_response_id: None,
+        budget_reservation_id: None,
+        provider_turn_index: 0,
+        tool_call_index: 0,
+        tool_id: "records.update".to_owned(),
+        tool_fingerprint: "a".repeat(64),
+        provider_tool_id: None,
+        provider_tool_fingerprint: None,
+        execution_provenance: None,
+        protected_arguments: None,
+        argument_hash: crate::canonical_json_hash(&collision),
+        protected_result: None,
+        protected_result_source: None,
+        payload_purged_at: None,
+        risk: "high_impact".to_owned(),
+        authorization_code: None,
+        authorization_policy_version: None,
+        authorization_state_digest: None,
+        disclosure_schema_fingerprint: None,
+        result_classification: None,
+        result_egress_decision_id: None,
+        result_egress_manifest_hash: None,
+        application_audit_ref: None,
+        approval_id: None,
+        idempotency_key: None,
+        correlation_id: None,
+        causation_id: None,
+        delegation_reference: None,
+        lease_generation: 1,
+        state: "waiting_approval".to_owned(),
+        created_at: 1,
+        completed_at: None,
+        row_version: 0,
+    };
+    // A legacy direct row keeps its colliding arguments verbatim.
+    let (arguments, evidence) =
+        crate::orm_tools::open_call_arguments(&direct, collision.clone()).unwrap();
+    assert_eq!(arguments, collision);
+    assert!(evidence.is_none());
+    assert!(
+        crate::orm_tools::protected_arguments_match(
+            &direct,
+            &"a".repeat(64),
+            &collision,
+            &collision
+        )
+        .unwrap()
+    );
+    // Columns added to a direct row: its arguments are no envelope.
+    let mut upgraded = direct.clone();
+    upgraded.provider_tool_id = Some(AI_CAPABILITY_EXECUTE_TOOL_ID.to_owned());
+    upgraded.provider_tool_fingerprint =
+        Some(crate::capability_delivery::fixed_broker_execute_fingerprint().to_owned());
+    assert!(crate::orm_tools::open_call_arguments(&upgraded, collision).is_err());
+}
+
+/// Review round 3, items 2 and 3: the approval binds the broker origin, so
+/// erasing it from the durable call (columns and envelope, which
+/// database-managed protection stores as readable JSON) refuses the
+/// approval instead of running the mutation as a direct call.
+#[tokio::test]
+async fn erasing_the_broker_origin_refuses_the_approval_instead_of_running_it_as_direct() {
+    let fixture = approval_required_mutation_fixture().await;
+    let (service, requested, _) =
+        approved_brokered_mutation(&fixture, "erased-origin-approval-call").await;
+    let call = AiToolCallRecord::find_by_id(&fixture.database, &requested.tool_call_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    let ProtectedContentEnvelope::DatabaseManaged { value } =
+        serde_json::from_value(call.protected_arguments.clone().unwrap()).unwrap()
+    else {
+        panic!("fixture protection mode")
+    };
+    // Rewrite the row as a plausible direct call: bare plan, matching hash,
+    // no provider-facing columns.
+    let plan = value["plan"].clone();
+    assert_eq!(call.argument_hash, crate::canonical_json_hash(&plan));
+    AiToolCallRecord::update_by_id(
+        &fixture.database,
+        &call.id,
+        UpdateAiToolCallRecordInput {
+            provider_tool_id: Some(None),
+            provider_tool_fingerprint: Some(None),
+            protected_arguments: Some(Some(
+                serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged { value: plan })
+                    .unwrap(),
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                automatic_mutation_route(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+}
+
+/// Review round 3, item 3: columns added to a direct approval's call never
+/// make it a broker-routed one.
+#[tokio::test]
+async fn adding_broker_columns_to_a_direct_approval_refuses_it() {
+    let fixture = approval_required_mutation_fixture().await;
+    let result = with_committed_budget(&fixture, automatic_mutation_result(&fixture)).await;
+    let (service, approvals) = consequential_test_service(&fixture);
+    let requested = service
+        .request_approval(
+            &fixture.lease,
+            &result,
+            automatic_mutation_context(&fixture),
+            OffsetDateTime::now_utc() + Duration::minutes(5),
+            false,
+        )
+        .await
+        .unwrap();
+    let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    approvals
+        .decide_approval(
+            &fixture.principal,
+            DecideAiApprovalInput {
+                id: approval.id,
+                decision: AiApprovalDecision::Approve,
+                expected_version: approval.row_version,
+            },
+        )
+        .await
+        .unwrap();
+    AiToolCallRecord::update_by_id(
+        &fixture.database,
+        &requested.tool_call_id().0,
+        UpdateAiToolCallRecordInput {
+            provider_tool_id: Some(Some(AI_CAPABILITY_EXECUTE_TOOL_ID.to_owned())),
+            provider_tool_fingerprint: Some(Some(
+                crate::capability_delivery::fixed_broker_execute_fingerprint().to_owned(),
+            )),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                automatic_mutation_route(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+}

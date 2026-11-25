@@ -195,11 +195,21 @@ hosts.
      `with_rule_resolver`, passing the coordinator's rule resolver. Without
      it, every broker-routed approval is refused at finalization and at
      `execute_approved`. Direct approvals are unaffected.
-   - Current rules are re-proved after broker resolution and again
-     immediately before dispatch, both for automatic mutations and at
-     approved execution. A revocation committed before that last check
-     refuses the mutation as a durable `not_started_authorization_denied`
-     result, with nothing dispatched.
+   - Current rules are re-proved after broker resolution and again inside
+     the execution bridge, as the last step before the executor, both for
+     automatic mutations and at approved execution. A revocation committed
+     before that last check refuses the mutation as a durable
+     `not_started_authorization_denied` result, and the executor never runs.
+   - `AiApprovalBinding` gains `broker_origin:
+     Option<AiApprovalBrokerOrigin>`. Set it to `None` in struct literals.
+     It is omitted from the hash input when absent, so existing direct
+     approvals stay valid. For a brokered approval it binds the broker
+     origin and admitting rules, so erasing them from the call refuses the
+     approval.
+   - With the built-in database-managed content protection, protected values
+     are readable JSON and do not defend against database writers in
+     general. Use an encrypting or authenticating `AiContentProtector` if
+     you need that.
    - Describe does not report operation assurance; it is enforced at
      execution only.
 5. **Approved generated mutations.** `AiRuntime::execute_approved_prepared_mutation`

@@ -37,8 +37,13 @@ supersedes: []
   and re-proves them before consumption and before dispatch. The rule
   binding is per turn: a delivery clone never inherits it. The discover,
   browse and execute broker definitions change, in the same release as
-  broker version 3. New API: `AiToolCatalog::mutation_capability_signature`,
-  `OrmAiConsequentialToolCallService::with_rule_resolver`.
+  broker version 3. The final rule check runs inside the execution bridge,
+  immediately before the executor. `AiApprovalBinding` gains
+  `broker_origin`, which binds a brokered approval to its broker origin and
+  admitting rules; direct bindings hash unchanged. New API:
+  `AiToolCatalog::mutation_capability_signature`,
+  `OrmAiConsequentialToolCallService::with_rule_resolver`,
+  `AiApprovalBrokerOrigin`.
   Subscriptions stay outside the broker.
   [Migration](MIGRATION.md#generated-mutations-through-the-capability-broker-551)
 - **Fixed.** An approved generated mutation now executes. The approval

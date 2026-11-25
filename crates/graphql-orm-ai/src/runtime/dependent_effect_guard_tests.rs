@@ -694,6 +694,7 @@ impl Fixture {
             authorization_state_digest: authority.authorization_state_digest.clone(),
             resources: Vec::new(),
             preview_hash: "6".repeat(64),
+            broker_origin: None,
         };
         let now = OffsetDateTime::now_utc();
         let grant = AiApprovalGrant {
@@ -898,6 +899,7 @@ async fn a_host_that_skips_the_guard_is_detected_after_commit() {
             &prepared.descriptor,
             prepared.request,
             Some(guard.clone()),
+            None,
         )
         .await;
     assert!(

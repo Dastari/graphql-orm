@@ -1031,6 +1031,19 @@ impl AiRuntime {
         principal_reference: &PrincipalReference,
         prepared: AiPreparedGraphqlMutation,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_prepared_automatic_mutation_admitted(principal_reference, prepared, None)
+            .await
+    }
+
+    /// [`Self::execute_prepared_automatic_mutation`] with a final admission
+    /// checked after principal rehydration, host tool policy and request
+    /// context construction, immediately before the executor.
+    pub(crate) async fn execute_prepared_automatic_mutation_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+        final_admission: Option<&dyn crate::execution::AiFinalAdmission>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
         if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
             return Err(AiError::Forbidden);
@@ -1045,6 +1058,7 @@ impl AiRuntime {
                 &prepared.descriptor,
                 prepared.request,
                 effect_guard,
+                final_admission,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1070,6 +1084,27 @@ impl AiRuntime {
         approval: &ConsumedAiApproval,
         binding: &AiApprovalBinding,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_approved_prepared_mutation_admitted(
+            principal_reference,
+            prepared,
+            approval,
+            binding,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::execute_approved_prepared_mutation`] with a final admission
+    /// checked after principal rehydration, bound host tool policy and
+    /// request context construction, immediately before the executor.
+    pub(crate) async fn execute_approved_prepared_mutation_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+        approval: &ConsumedAiApproval,
+        binding: &AiApprovalBinding,
+        final_admission: Option<&dyn crate::execution::AiFinalAdmission>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
         if !approved_prepared_mutation_matches(principal_reference, &prepared, approval, binding) {
             return Err(AiError::Forbidden);
@@ -1093,6 +1128,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 effect_guard,
+                final_admission,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1294,6 +1330,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 escalated_automatic.then_some(AiApprovalRule::OneShot),
+                None,
                 None,
             )
             .await
@@ -2130,6 +2167,7 @@ mod mutation_binding_tests {
             resources: Vec::new(),
             preview_hash: "6666666666666666666666666666666666666666666666666666666666666666"
                 .to_owned(),
+            broker_origin: None,
         }
     }
 

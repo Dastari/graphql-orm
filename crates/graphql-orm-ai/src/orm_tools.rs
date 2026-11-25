@@ -2547,38 +2547,17 @@ impl OrmAiApplicationToolCallService {
         let provenance = provenance
             .map(|origin| origin.with_effect_execution(lease))
             .transpose()?;
-        // The pre-effect rule fence of a brokered mutation: the last step
-        // before dispatch, after every preparation and persistence await. A
-        // rule change or revocation committed before this check refuses the
-        // mutation without dispatch.
-        let rule_refusal = match &fence {
-            Some(fence) => Box::pin(brokered_rules_admit(
-                fence.rules.as_ref(),
-                lease,
-                &fence.scope,
-                resolved.rule_fingerprint.as_deref().unwrap_or_default(),
-                &resolved.tool_fingerprint,
-                (ToolMaturity::AutonomousWrite, AiApprovalRule::None),
-            ))
-            .await
-            .is_err(),
-            None => false,
-        };
-        let (execution, renewed_lease) = if rule_refusal {
-            let proof = crate::execution_rejection::attest(
-                &descriptor.fingerprint,
-                provenance.as_ref(),
-                prepared_mutation
-                    .as_ref()
-                    .map_or(&request, |prepared| prepared.request()),
-                crate::ToolPreExecutionRejectionReason::AuthorizationDenied,
-            )
-            .map_err(|_| AiError::Conflict)?;
-            (
-                Ok(Err(AiError::ToolRejectedBeforeExecution(proof))),
-                lease.clone(),
-            )
-        } else {
+        // The rule fence of a brokered mutation runs inside the bridge, as
+        // the last step before the executor, after principal rehydration,
+        // host tool policy and request-context construction.
+        let admission = fence.as_ref().map(|fence| brokered::BrokeredRuleAdmission {
+            rules: fence.rules.as_ref(),
+            lease,
+            scope: &fence.scope,
+            resolved: &resolved,
+            binding: (ToolMaturity::AutonomousWrite, AiApprovalRule::None),
+        });
+        let (execution, renewed_lease) = {
             Box::pin(self.run_service.run_with_lease_heartbeat(
                 lease,
                 tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
@@ -2594,9 +2573,12 @@ impl OrmAiApplicationToolCallService {
                             .await
                     } else if let Some(prepared) = prepared_mutation {
                         self.runtime
-                            .execute_prepared_automatic_mutation(
+                            .execute_prepared_automatic_mutation_admitted(
                                 lease.principal_reference(),
                                 prepared,
+                                admission.as_ref().map(|admission| {
+                                    admission as &dyn crate::execution::AiFinalAdmission
+                                }),
                             )
                             .await
                     } else {
@@ -3845,6 +3827,7 @@ impl OrmAiConsequentialToolCallService {
             context.delegation_reference.clone(),
             &preauthorization,
             &preview,
+            resolved.approval_broker_origin(),
         )?;
         let protected_arguments = self
             .application_tools
@@ -4438,6 +4421,12 @@ impl OrmAiConsequentialToolCallService {
                 call.delegation_reference.clone(),
                 &preauthorization,
                 &preview,
+                // Recomputed from the durable call: an approval for a
+                // broker-routed call matches only while the call still
+                // records that origin and its admitting rules.
+                brokered
+                    .as_ref()
+                    .and_then(ResolvedApplicationCall::approval_broker_origin),
             )?;
             let provenance: Option<crate::AiToolExecutionProvenance> = call
                 .execution_provenance
@@ -4556,38 +4545,22 @@ impl OrmAiConsequentialToolCallService {
                         .map_err(|_| AiError::Conflict)
                 })
                 .transpose()?;
-            // Rules are re-proved at the pre-effect boundary, after consumption
-            // and cancellation: a broker-routed mutation whose rules changed or
-            // stopped admitting it since its approval is refused without
-            // dispatch, as a durable not-started outcome.
-            let rule_refusal = match &brokered {
-                Some(resolved) => {
-                    Box::pin(self.brokered_approval_rules_admit(&running_lease, &scope, resolved))
-                        .await
-                        .is_err()
-                }
-                None => false,
-            };
-            let refusal_proof = if rule_refusal {
-                let request = prepared
-                    .as_ref()
-                    .map_or(&request, |prepared| prepared.request());
-                Some(
-                    crate::execution_rejection::attest(
-                        &descriptor.fingerprint,
-                        provenance.as_ref(),
-                        request,
-                        crate::ToolPreExecutionRejectionReason::AuthorizationDenied,
-                    )
-                    .map_err(|_| AiError::Conflict)?,
-                )
-            } else {
-                None
+            // A broker-routed mutation's rules are re-proved inside the
+            // bridge, after consumption and every admission await, as the last
+            // step before the executor. A refusal is a durable not-started
+            // outcome. The resolver was required before consumption.
+            let admission = match &brokered {
+                Some(resolved) => Some(brokered::BrokeredRuleAdmission {
+                    rules: self.rule_resolver.as_deref().ok_or(AiError::Forbidden)?,
+                    lease: &running_lease,
+                    scope: &scope,
+                    resolved,
+                    binding: (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot),
+                }),
+                None => None,
             };
             let approved_execution = async {
-                if let Some(proof) = refusal_proof {
-                    Ok(Err(AiError::ToolRejectedBeforeExecution(proof)))
-                } else if let Some(prepared) = prepared {
+                if let Some(prepared) = prepared {
                     tokio::time::timeout(
                         self.application_tools
                             .limits
@@ -4595,11 +4568,14 @@ impl OrmAiConsequentialToolCallService {
                             .unsigned_abs(),
                         self.application_tools
                             .runtime
-                            .execute_approved_prepared_mutation(
+                            .execute_approved_prepared_mutation_admitted(
                                 running_lease.principal_reference(),
                                 prepared,
                                 &approval,
                                 &binding,
+                                admission.as_ref().map(|admission| {
+                                    admission as &dyn crate::execution::AiFinalAdmission
+                                }),
                             ),
                     )
                     .await
@@ -5164,6 +5140,7 @@ fn build_approval_binding(
     delegation_reference: Option<String>,
     preauthorization: &crate::AiToolPreauthorization,
     preview: &AiCanonicalActionPreview,
+    broker_origin: Option<crate::AiApprovalBrokerOrigin>,
 ) -> Result<AiApprovalBinding, AiError> {
     if preauthorization.tool_fingerprint() != descriptor.fingerprint
         || !valid_sha256(binding_fingerprint)
@@ -5189,6 +5166,7 @@ fn build_approval_binding(
         authorization_state_digest: preauthorization.authorization_state_digest().to_owned(),
         resources: preview.targets.clone(),
         preview_hash: preview.stable_hash(),
+        broker_origin,
     };
     binding.validate(preview)?;
     Ok(binding)
