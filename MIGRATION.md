@@ -14,7 +14,17 @@ supersedes: []
 
 **No action.** Upgrade ORM and macros together. The internal engine uses
 `time` 0.3 and preserves existing chrono signatures, canonical UTC strings,
-backup row hashes, and database parameter formats.
+backup row hashes, and database parameter formats. Cargo feature unification
+enables `time`'s `large-dates` feature for consumers as well. The ORM needs it
+to cover chrono's year range. The feature has a small performance cost.
+Under version 1 and 2 format descriptions, a signed `[year]` can consume four
+to six digits.
+
+**Action needed if you parse signed dates without separators using `time`
+format descriptions version 1 or 2.** For example, `[year][month][day]` can
+fail to parse `+20240102` because the year consumes the month digits.
+Use version 3 format descriptions for a four-digit year, or separate the year
+from the next numeric field.
 
 ## 0.215.0 to 0.216.0: PostgreSQL RLS search
 

@@ -2217,8 +2217,15 @@ fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> 
 
     let valid_date = |date: Date| (1..=9999).contains(&date.year());
     match *value.kind() {
-        TemporalKind::Date(date) if valid_date(temporal::from_chrono_date(date)) => {
-            Ok(owned_temporal_column(temporal::from_chrono_date(date).to_sql()))
+        TemporalKind::Date(date) => {
+            let date = temporal::from_chrono_date(date);
+            if valid_date(date) {
+                Ok(owned_temporal_column(date.to_sql()))
+            } else {
+                Err(sqlx::Error::Encode(
+                    "value is outside the SQL Server date or datetime2 range".into(),
+                ))
+            }
         }
         TemporalKind::DateTime(time) => {
             let (value, leap) = temporal::from_chrono_naive(time);
@@ -2250,9 +2257,6 @@ fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> 
         }
         TemporalKind::Unparsed => Err(sqlx::Error::Encode(
             "SQL Server native temporal parameters require an ISO date or an ISO timestamp with seconds".into(),
-        )),
-        _ => Err(sqlx::Error::Encode(
-            "value is outside the SQL Server date or datetime2 range".into(),
         )),
     }
 }
@@ -3047,6 +3051,7 @@ mod tests {
             ColumnData::Date(Some(tds::Date::new(0))),
             ColumnData::Date(None),
             ColumnData::Time(Some(time)),
+            ColumnData::Time(Some(tds::Time::new(45_296_123, 3))),
             ColumnData::Time(Some(tds::Time::new(0, 7))),
             ColumnData::Time(None),
             ColumnData::SmallDateTime(Some(tds::SmallDateTime::new(65_535, 1439))),
@@ -3063,6 +3068,16 @@ mod tests {
                 decode_string_column(&column).unwrap(),
                 chrono_temporal_text(&column),
                 "{column:?}"
+            );
+        }
+        for scale in 0..=6 {
+            let ticks = 452_961_234_567 / 10u64.pow(7 - u32::from(scale));
+            let clock = tds::Time::new(ticks, scale);
+            let column = ColumnData::DateTime2(Some(tds::DateTime2::new(date, clock)));
+            assert_eq!(
+                decode_string_column(&column).unwrap(),
+                chrono_temporal_text(&column),
+                "datetime2({scale})"
             );
         }
         for day in [-53_690, -1, 0, 1] {
@@ -3101,6 +3116,63 @@ mod tests {
                 TemporalKind::Unparsed => panic!("could not parse {text}"),
             };
             assert_eq!(encode_temporal(&value).unwrap(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn native_temporal_parameter_rejections_match_chrono_bounds() {
+        use chrono::{Datelike, Timelike};
+
+        let leap = "2016-12-31T23:59:60.5"
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap();
+        let stamp = "2024-02-29T12:34:56Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
+        let valid_time = |time: chrono::NaiveDateTime| {
+            valid_date(time.date()) && time.nanosecond() < 1_000_000_000
+        };
+        for parameter in [
+            SqlValue::from("0000-01-01".parse::<chrono::NaiveDate>().unwrap()),
+            SqlValue::from("+10000-01-01".parse::<chrono::NaiveDate>().unwrap()),
+            SqlValue::from(
+                "+10000-01-01T00:00:00"
+                    .parse::<chrono::NaiveDateTime>()
+                    .unwrap(),
+            ),
+            SqlValue::from(leap),
+            SqlValue::from(leap.and_utc().fixed_offset()),
+            SqlValue::from(
+                stamp.with_timezone(&chrono::FixedOffset::east_opt(14 * 3600 + 60).unwrap()),
+            ),
+            SqlValue::from(stamp.with_timezone(&chrono::FixedOffset::east_opt(30).unwrap())),
+        ] {
+            let SqlValue::Temporal(value) = parameter else {
+                unreachable!();
+            };
+            let expected = match *value.kind() {
+                TemporalKind::Date(date) => valid_date(date),
+                TemporalKind::DateTime(time) => valid_time(time),
+                TemporalKind::DateTimeOffset(time) => {
+                    let offset = time.offset().local_minus_utc();
+                    offset % 60 == 0
+                        && offset.abs() <= 14 * 3600
+                        && valid_time(time.naive_utc())
+                        && valid_time(time.naive_local())
+                }
+                TemporalKind::Unparsed => unreachable!(),
+            };
+            assert!(
+                !expected,
+                "expected an out-of-range case: {}",
+                value.as_text()
+            );
+            assert!(
+                matches!(encode_temporal(&value), Err(sqlx::Error::Encode(_))),
+                "{}",
+                value.as_text()
+            );
         }
     }
 

@@ -1189,12 +1189,13 @@ macro_rules! sqlx_backup_runtime {
                     // A `TIMESTAMPTZ` is an instant; reading it typed is independent of the session
                     // `TimeZone`. `check_portable_date_times` has already refused values outside the portable range.
                     BackupValueKind::DateTime => row
-                        .try_get::<Option<time::OffsetDateTime>, _>(column)
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column)
                         .map(|value| {
                             value
                                 .map(|value| {
                                     BackupValue::String(
-                                        orm::RuntimeDateTime::from_utc(value).as_str().to_owned(),
+                                        crate::temporal::Timestamp::from_chrono(value.fixed_offset())
+                                            .canonical_utc(),
                                     )
                                 })
                                 .unwrap_or(BackupValue::Null)

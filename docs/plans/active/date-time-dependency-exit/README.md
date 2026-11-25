@@ -3,7 +3,7 @@ title: Date-time dependency exit plan
 kind: plan
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-22
+last_reviewed: 2026-11-25
 review_by: 2027-02-17
 supersedes: []
 ---
@@ -507,9 +507,10 @@ Acceptance gates:
 
 ## Current checkpoint
 
-The Phase 1 internal engine migration is complete. The ORM uses the pinned
-`time` 0.3.53 for canonicalization, calendar arithmetic, and database codecs.
-The compatibility layer preserves chrono payloads and accepted legacy spellings.
+The Phase 1 internal engine migration is complete. The ORM uses `time` 0.3
+for canonicalization, calendar arithmetic, and SQL Server codecs. The workspace
+lockfile resolves `time` to 0.3.53. PostgreSQL keeps SQLx's chrono codecs, and
+the compatibility layer preserves chrono payloads and accepted legacy spellings.
 The `humantime` exception now identifies its dependency path.
 
 The maintainer approved the separate host features and explicit

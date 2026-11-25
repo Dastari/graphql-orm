@@ -1468,8 +1468,9 @@ fn postgres_get_timestamptz(
     // sqlx reports a mismatched column type before it decodes anything, and
     // parses text results with range checks; only binary values reach the
     // unchecked addition.
-    if !<time::OffsetDateTime as sqlx::Type<sqlx::Postgres>>::compatible(&value.type_info())
-        || value.format() != sqlx::postgres::PgValueFormat::Binary
+    if !<chrono::DateTime<chrono::Utc> as sqlx::Type<sqlx::Postgres>>::compatible(
+        &value.type_info(),
+    ) || value.format() != sqlx::postgres::PgValueFormat::Binary
     {
         return postgres_get_optional::<chrono::DateTime<chrono::Utc>>(row, field)
             .map(|value| value.map(|utc| temporal::Timestamp::from_chrono(utc.fixed_offset())));

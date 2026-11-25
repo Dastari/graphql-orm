@@ -62,7 +62,7 @@
   {
     "finding": "RUSTSEC-2026-0542:humantime:2.4.0",
     "review_by": "2027-02-17",
-    "reason": "Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; The workspace reaches humantime through the Hive Router dependency tree. Recorded 2026-11-17 under the supply-chain exception policy; re-check when a maintained successor or fork is adopted upstream or a security advisory appears."
+    "reason": "Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; the workspace reaches humantime through the Hive Router dependency tree. Recorded 2026-11-17 under the supply-chain exception policy; re-check when a maintained successor or fork is adopted upstream or a security advisory appears."
   },
   {
     "finding": "RUSTSEC-2026-0574:heapless:0.6.1",

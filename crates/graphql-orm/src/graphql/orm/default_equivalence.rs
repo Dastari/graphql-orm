@@ -305,6 +305,50 @@ mod tests {
     use super::postgres_typed_defaults_equal as equal;
 
     #[test]
+    fn timestamptz_keys_match_chrono_for_postgres_iso_defaults() {
+        use chrono::{DateTime, FixedOffset, NaiveDateTime};
+
+        for (local, suffix, offset_seconds) in [
+            ("1969-12-31 23:00:00", "-01", -3600),
+            ("2000-02-29 05:30:00.123456", "+05:30", 19_800),
+            ("2000-02-29 00:00:00.000001", "-00:19:32", -1172),
+            ("2016-12-31 23:59:60.5", "+00", 0),
+            ("2017-01-01 00:59:60.5", "+01", 3600),
+            ("+262142-12-31 23:59:59", "-01", -3600),
+            ("-262143-01-01 00:00:00", "+01", 3600),
+        ] {
+            let local_value = NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+            let expected = local_value
+                .and_local_timezone(FixedOffset::east_opt(offset_seconds).unwrap())
+                .single()
+                .map(|value| (value.timestamp(), value.timestamp_subsec_nanos()));
+            let text = format!("{local}{suffix}");
+            assert_eq!(
+                super::timestamptz(&text).map(|value| value.ordering_key()),
+                expected,
+                "{text}"
+            );
+        }
+        for text in [
+            "2000-02-29T00:00:00.123456789+05:30",
+            "2016-12-31T23:59:60.5Z",
+            "1900-02-29T00:00:00Z",
+            "0001-01-01 00:00:00+00 BC",
+            "2000-02-29 00:00:00+24",
+            "infinity",
+        ] {
+            let expected = DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|value| (value.timestamp(), value.timestamp_subsec_nanos()));
+            assert_eq!(
+                super::timestamptz(text).map(|value| value.ordering_key()),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn deparsed_literals_read_the_same_under_either_string_setting() {
         use super::postgres_session_independent_literals as read;
         // With the setting on, text is already setting-independent.

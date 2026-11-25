@@ -183,6 +183,54 @@ fn chrono_values_keep_their_display_text() {
     assert_text(SqlValue::from(offset), offset.to_string());
 }
 
+fn chrono_calendar(text: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|value| value.naive_utc())
+        .or_else(|| {
+            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+                .iter()
+                .find_map(|format| chrono::NaiveDateTime::parse_from_str(text, format).ok())
+        })
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .ok()?
+                .and_hms_opt(0, 0, 0)
+        })
+}
+
+#[test]
+fn date_filter_between_order_matches_chrono_calendar_parsing() {
+    use graphql_orm::graphql::filters::{DateFilter, DateRangeInput};
+
+    let examples = [
+        "2000-2-9",
+        "2000-2-9T0:0:0.0",
+        "2000-02-09 00:00:00",
+        "2000-02-09T01:00:00+01:00",
+        "2000-2-9 1:2:3.000000001",
+        "2000-02-09 23:59:59.999999999",
+        "2000-2-9 23:59:60.5",
+        "2000-02-10",
+        "2000-02-30",
+    ];
+    for start in examples {
+        for end in examples {
+            let filter = DateFilter {
+                between: Some(DateRangeInput {
+                    start: start.into(),
+                    end: end.into(),
+                }),
+                ..Default::default()
+            };
+            let expected = chrono_calendar(start)
+                .zip(chrono_calendar(end))
+                .is_some_and(|(start, end)| start <= end);
+            assert_eq!(filter.validate().is_ok(), expected, "{start} to {end}");
+        }
+    }
+}
+
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_calendar_arithmetic_matches_chrono_at_boundaries() {
@@ -196,39 +244,105 @@ fn sqlite_calendar_arithmetic_matches_chrono_at_boundaries() {
         chrono::NaiveDate::from_ymd_opt(2000, 2, 29).unwrap(),
         chrono::NaiveDate::from_ymd_opt(2100, 3, 1).unwrap(),
     ] {
-        for days in [-366i32, -1, 0, 1, 366] {
-            let filter = DateFilter {
-                gte_relative: Some(RelativeDateInput { days }),
-                ..Default::default()
+        let mut windows = vec![
+            (
+                DateFilter {
+                    in_past: Some(true),
+                    ..Default::default()
+                },
+                None,
+                Some(0),
+            ),
+            (
+                DateFilter {
+                    in_future: Some(true),
+                    ..Default::default()
+                },
+                Some(1),
+                None,
+            ),
+            (
+                DateFilter {
+                    is_today: Some(true),
+                    ..Default::default()
+                },
+                Some(0),
+                Some(1),
+            ),
+        ];
+        for days in [1, 2, 366] {
+            windows.extend([
+                (
+                    DateFilter {
+                        recent_days: Some(days),
+                        ..Default::default()
+                    },
+                    Some(1 - days),
+                    Some(1),
+                ),
+                (
+                    DateFilter {
+                        within_days: Some(days),
+                        ..Default::default()
+                    },
+                    Some(0),
+                    Some(days),
+                ),
+            ]);
+        }
+        for days in [-366, -1, 0, 1, 366] {
+            windows.extend([
+                (
+                    DateFilter {
+                        gte_relative: Some(RelativeDateInput { days }),
+                        ..Default::default()
+                    },
+                    Some(days),
+                    None,
+                ),
+                (
+                    DateFilter {
+                        lte_relative: Some(RelativeDateInput { days }),
+                        ..Default::default()
+                    },
+                    None,
+                    Some(days + 1),
+                ),
+            ]);
+        }
+        let midnight_at = |days| {
+            today
+                .checked_add_signed(chrono::Duration::days(i64::from(days)))?
+                .and_hms_opt(0, 0, 0)
+        };
+        for offset in [-367, -366, -365, -2, -1, 0, 1, 2, 365, 366, 367] {
+            let Some(date) = midnight_at(offset).map(|value| value.date()) else {
+                continue;
             };
-            for offset in [-366i64, -1, 0, 1, 366] {
-                let Some(value) = today.checked_add_signed(chrono::Duration::days(offset)) else {
-                    continue;
-                };
-                for text in [
-                    format!("{value}T00:59:59.123456789+01:00"),
-                    value.to_string(),
-                ] {
-                    let timestamp = chrono::DateTime::parse_from_rfc3339(&text)
-                        .ok()
-                        .map(|value| value.naive_utc())
-                        .or_else(|| {
-                            chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
-                                .ok()
-                                .and_then(|value| value.and_hms_opt(0, 0, 0))
-                        });
+            for text in [
+                format!("{date}T00:59:59.123456789+01:00"),
+                format!("{date} 23:59:60.5"),
+                date.to_string(),
+            ] {
+                for (filter, lower_days, upper_days) in &windows {
                     let expected = (|| {
-                        let timestamp = timestamp?;
-                        today.succ_opt()?;
-                        let floor =
-                            today.checked_add_signed(chrono::Duration::days(i64::from(days)))?;
-                        Some(timestamp.date() >= floor)
+                        let value = chrono_calendar(&text)?;
+                        midnight_at(1)?;
+                        let after_lower = match lower_days {
+                            Some(days) => value >= midnight_at(*days)?,
+                            None => true,
+                        };
+                        let before_upper = match upper_days {
+                            Some(days) => value < midnight_at(*days)?,
+                            None => true,
+                        };
+                        Some(after_lower && before_upper)
                     })()
                     .unwrap_or(false);
                     assert_eq!(
-                        date_filter_truth_at(Some(&text), &filter, today),
+                        date_filter_truth_at(Some(&text), filter, today),
                         Some(expected),
-                        "today {today}, date {text}, relative {days}"
+                        "today {today}, value {text}, bounds {lower_days:?}..{upper_days:?}"
                     );
                 }
             }
