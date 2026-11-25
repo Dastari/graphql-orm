@@ -853,7 +853,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             fixture_with_optional_provider_and_automatic_static_with_start(
                 MockProvider::new(Vec::new()),
                 Arc::new(AllowAccess),
-                true,
+                None,
                 Some(provider.clone()),
                 true,
                 false,

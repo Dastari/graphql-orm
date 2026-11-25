@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.167.0
+
+- **Fixed.** Approval-required generated mutations now execute after approval.
+  The runtime verifies the canonical provider plan hash already stored in the
+  approval. **No action** for hosts using the built-in approval service; **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`).
+  [Migration](MIGRATION.md#01660-to-01670-approved-generated-mutations)
+
 ## Unreleased - 0.166.0
 
 - Updated the legacy approval-index upgrade tests for ORM 0.225.0. On SQLite

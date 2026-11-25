@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.166.0 to 0.167.0 approved generated mutations
+
+**No action** for hosts using `OrmAiConsequentialToolCallService`. Existing
+pending and approved-but-unconsumed approvals already store the canonical
+plan hash and can proceed in place if they still pass the normal expiry,
+fencing, and authorization checks. No schema or data migration is needed.
+Runs already in `RecoveryRequired` remain closed for operator reconciliation.
+Their consumed approvals cannot be replayed.
+
+**Action needed** for hosts that construct their own `AiApprovalBinding` for
+`AiRuntime::execute_approved_prepared_mutation`. Set `argument_hash` to
+`prepared.argument_hash()`. A custom approval that used a digest of the
+compiled variables needs a fresh binding and approval before execution.
+
+The argument hash is the lowercase hex SHA-256 of the entire closed provider
+plan as compact `serde_json`, with object keys sorted recursively and array
+order preserved. Both approval and execution use that digest. Execution
+checks the protected plan digest before recompiling the GraphQL document and
+variables. The one-shot approval hashes the serialized `AiApprovalBinding`
+with resource preconditions sorted. That envelope includes this digest, the
+generated capability fingerprint, the exact compiled operation contract, the
+tool call, session, scope, principal reference fingerprint, delegated actor
+and grant reference, policy version, authorization state, and preview hash.
+The principal fingerprint is SHA-256 of the serialized `PrincipalReference`.
+
 ## 0.165.0 to 0.166.0
 
 **No action** for the AI schema or stored data. The legacy approval-index

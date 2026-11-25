@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.167.0 verifies the stored provider plan hash when executing an approved
+generated mutation. See the [migration guide](MIGRATION.md#01660-to-01670-approved-generated-mutations).
+
 AI 0.166.0 tests legacy approval-index upgrades with ORM 0.225.0's partial-index
 introspection. See the [migration guide](MIGRATION.md#01650-to-01660).
 
