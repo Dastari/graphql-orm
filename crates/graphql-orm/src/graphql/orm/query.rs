@@ -826,7 +826,11 @@ where
         let (mut this, metadata) = self.authorize().await?;
         // Resolve the read decision once. Its predicate narrows the base query,
         // so the initial SQL window and the scan both carry it.
-        let mode = repository_read_plan::<T, B>(this.db, Some(&mut this.query)).await?;
+        let mode = repository_read_plan::<T, B>(
+            super::core::PolicyView::of(this.db),
+            Some(&mut this.query),
+        )
+        .await?;
         let config = this
             .db
             .pagination_config()
@@ -2283,15 +2287,20 @@ pub(crate) enum RowCheckMode {
 /// one, the read's executor does not receive the predicate, so the row
 /// callback stays the authority and `Complete` is residual for paging.
 pub(crate) async fn repository_read_plan<T, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
     query: Option<&mut EntityQuery<T, B>>,
 ) -> crate::Result<RowCheckMode>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     B: OrmBackend,
 {
+    let db = view.db;
     let visibility = db
-        .read_visibility::<T>(None, super::core::EntityAccessSurface::Repository)
+        .read_visibility_as::<T>(
+            view.authority,
+            None,
+            super::core::EntityAccessSurface::Repository,
+        )
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     let applies_predicate = query.is_some();
@@ -5163,14 +5172,16 @@ where
 }
 
 async fn ensure_projection_access<P, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
 ) -> crate::Result<super::ReadVisibility>
 where
     B: OrmBackend,
     P: ReadProjection<B>,
 {
     let metadata = P::Entity::metadata();
-    db.ensure_entity_access(
+    let db = view.db;
+    db.ensure_entity_access_as(
+        view.authority,
         None,
         metadata.entity_name,
         metadata.read_policy,
@@ -5200,7 +5211,7 @@ where
         .map_err(crate::graphql::errors::sqlx_error_from_public)?;
     }
     let visibility = db
-        .projection_read_visibility::<P>()
+        .projection_read_visibility::<P>(view.authority)
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     if visibility.requires_residual_checks() {
@@ -5312,7 +5323,8 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5336,7 +5348,8 @@ where
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5361,7 +5374,8 @@ where
     }
 
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5485,7 +5499,8 @@ where
     }
 
     async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
+        let policy = self.context.__policy();
+        let visibility = ensure_projection_access::<P, B>(policy.view()).await?;
         self.state.validate()?;
         let bound = self
             .state

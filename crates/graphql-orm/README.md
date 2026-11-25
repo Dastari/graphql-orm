@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
 Version 0.223.0 lets SQL Server seek on BIN2 Unicode key columns when using
 generated exact string filters (#867).
 [Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)

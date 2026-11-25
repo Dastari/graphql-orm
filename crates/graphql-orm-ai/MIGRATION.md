@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.164.0 to 0.165.0: authority-aware host field decisions
+
+**No action** unless the host `FieldPolicy` overrides
+`can_read_repository_field_with_authority` or
+`can_write_repository_field_with_authority` (new in ORM 0.224.0). Those
+overrides now also decide the host-owned fields this crate reads and writes
+through its internal handle: fields of host entities, and any field that
+declares a policy key. A policy that refuses calls without an authority there
+must admit the access this crate presents, or keep allowing those fields.
+The crate's own key-less fields are still answered by the crate.
+
 ## 0.163.0 to 0.164.0
 
 The ORM now supplies the seek predicate for SQL Server run-state filters
