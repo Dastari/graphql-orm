@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.31.0 provider endpoint path error
+
+**No action.** The shared, non-exhaustive `AiError` adds
+`InvalidProviderEndpointPath` for adapter path validation on provider profile
+saves. The non-exhaustive `AiProviderEndpointPathError` also includes
+`MalformedEndpoint` for reports on missing or malformed stored URLs.
+No schema or data migration is needed.
+
 ## 0.30.0 capability catalogue compilation
 
 **No action.** Capability fingerprints, plan schemas, catalogue contents and

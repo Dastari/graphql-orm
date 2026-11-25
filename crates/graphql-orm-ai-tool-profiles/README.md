@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+AI tool profiles 0.31.0 adds typed endpoint validation reasons for provider
+profile saves and reports, including missing or malformed stored endpoints.
+See the [migration guide](MIGRATION.md#0310-provider-endpoint-path-error).
+
 Version 0.30.0 speeds up capability catalogue compilation for targets with
 many roots by sharing verified input metadata across capabilities. See the
 [migration guide](MIGRATION.md#0300-capability-catalogue-compilation).

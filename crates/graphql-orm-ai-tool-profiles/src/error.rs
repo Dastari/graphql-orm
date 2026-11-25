@@ -28,6 +28,21 @@ impl AiRetryRefusalReason {
     }
 }
 
+/// Content-free reason a provider endpoint fails validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AiProviderEndpointPathError {
+    /// An origin-based adapter requires a root URL.
+    #[error("use a provider origin with a root path")]
+    OriginRequired,
+    /// An exact-endpoint adapter requires a path other than root.
+    #[error("use a provider endpoint with a non-root path of at most 2048 bytes")]
+    ExactEndpointRequired,
+    /// The stored configurable endpoint is missing, unparseable, or has an unsafe URL shape.
+    #[error("stored provider endpoint is missing or malformed")]
+    MalformedEndpoint,
+}
+
 /// Stable library error.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -86,6 +101,9 @@ pub enum AiError {
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),
+    /// A saved provider profile would not satisfy the adapter's path contract.
+    #[error("invalid AI provider endpoint path: {0}")]
+    InvalidProviderEndpointPath(#[from] AiProviderEndpointPathError),
     /// A tool result exceeded its reviewed byte or record budget.
     #[error("AI tool result exceeded its reviewed budget")]
     ResultBudgetExceeded,
@@ -156,6 +174,7 @@ impl AiError {
             Self::PreTransportProviderFailed => "AI_PROVIDER_FAILED",
             Self::PreTransportToolSourceUnavailable => "AI_TOOL_SOURCE_UNAVAILABLE",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
+            Self::InvalidProviderEndpointPath(_) => "AI_INVALID_PROVIDER_ENDPOINT_PATH",
             Self::ResultBudgetExceeded => "AI_RESULT_BUDGET_EXCEEDED",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
@@ -196,6 +215,7 @@ impl AiError {
             Self::PreTransportProviderFailed => "pre_transport_provider_failed",
             Self::PreTransportToolSourceUnavailable => "pre_transport_tool_source_unavailable",
             Self::InvalidInput(_) => "invalid_input",
+            Self::InvalidProviderEndpointPath(_) => "invalid_provider_endpoint_path",
             Self::ResultBudgetExceeded => "result_budget_exceeded",
             Self::ReauthorizationFailed => "reauthorization_failed",
             Self::ToolExecutionFailed => "tool_execution_failed",
@@ -303,6 +323,7 @@ mod tests {
             AiError::PreTransportProviderFailed,
             AiError::PreTransportToolSourceUnavailable,
             AiError::InvalidInput("secret-input".to_owned()),
+            AiError::InvalidProviderEndpointPath(AiProviderEndpointPathError::OriginRequired),
             AiError::ResultBudgetExceeded,
             AiError::ReauthorizationFailed,
             AiError::ToolExecutionFailed,
