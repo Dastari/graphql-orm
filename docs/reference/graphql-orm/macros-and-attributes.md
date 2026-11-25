@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -70,6 +70,8 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `changed_started` | boolean | `false`; adds the argument `Started: Boolean` to the `Changed` root for the [started signal](client-metadata.md#started-signal-on-changed-streams); the event gains the field `Started: Boolean!` and its `Action`, `ChangeKind`, `Id` and `Key` become nullable |
 | `aggregate_source` | boolean | `false`; requires `aggregate = true`; the aggregate root returns `<Entity>AggregateResultRow` with a [`SourceEntity` field](client-metadata.md#aggregate-source-entity) |
 | `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
+| `update_expected_version` | `"required"` | absent; the generated update's `ExpectedVersion` becomes `Int!`. Requires a managed version and no generated `update_many` or `upsert`. See [required `ExpectedVersion`](#required-expectedversion) |
+| `update_assurance` | `(select = "path::to::fn", levels = "policy,policy")` | absent; the generated update selects its assurance level per request. Requires no generated `update_many` or `upsert`. See [conditional update assurance](#conditional-update-assurance) |
 
 The bare `federation_key` keys on the primary key in declaration order.
 `fields` names exported GraphQL fields, which must be readable, non-null,
@@ -407,7 +409,10 @@ changes the relation cardinality. `filter` opts an unconditional public collecti
 authorized target-Where alternatives in generated roots; see
 [authorized collection filters](entities-and-relations.md#authorized-collection-filters). `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
-Relations are not ordinary persisted fields.
+Relations are not ordinary persisted fields. `server_only_key(from = "...", to = "...")`
+marks one composite key pair whose columns stay off every generated GraphQL surface while
+the generated join still uses it; see
+[server-only partition keys](entities-and-relations.md#server-only-partition-keys).
 
 An unconditional readable relation can add a correlated count to its parent
 entity's generated order input:
@@ -1460,7 +1465,8 @@ error and writes nothing, on every path and backend, including the update branch
 
 Generated GraphQL `Update` and `Delete` for a managed entity accept an optional `ExpectedVersion`
 (`Int`). When the current version differs, the mutation fails with `CONFLICT` and writes nothing.
-Repository callers use `compare_and_swap` for the same check.
+Repository callers use `compare_and_swap` for the same check. To make the update's argument
+mandatory, see [required `ExpectedVersion`](#required-expectedversion).
 
 Concurrent writers never lose an increment: every committed write advances the version exactly
 once. Generated writes read the row under a write lock and run serializably on PostgreSQL and
@@ -1507,6 +1513,159 @@ type Ticket {
 records both kinds of version in `GraphqlEntitySemanticMetadata::record_version`, which holds the
 declared field and a mode of `managed` or `cas`. It is omitted when the entity has no version
 field.
+
+### Required `ExpectedVersion`
+
+`#[graphql_entity(update_expected_version = "required")]` makes the generated single-row update
+of a managed-version entity a compare-and-swap on every call:
+
+```rust
+#[graphql_entity(
+    table = "reviews",
+    plural = "Reviews",
+    mutation_shapes = "create,update,delete",
+    update_expected_version = "required"
+)]
+struct Review {
+    #[primary_key]
+    id: String,
+    display_name: String,
+    state: String,
+    #[graphql_orm(version = "managed", default = "0")]
+    row_version: i64,
+}
+```
+
+- The SDL declares `ExpectedVersion: Int!` on the update. The operation catalogue argument has
+  GraphQL type `Int!` and Rust type `i64`, so the operation's fingerprint changes once.
+- An omitted or null value, including null for a non-null variable, is refused by GraphQL
+  validation before the resolver runs. The request carries no ORM code; a router reports it as
+  `GRAPHQL_VALIDATION_FAILED`. A stale value fails with `CONFLICT`. In every case nothing is
+  written and no `Changed` event is committed.
+- A matching value advances the version exactly once, as an optional `ExpectedVersion` does.
+- Delete keeps its optional argument. Repository and transaction writes are host writes and are
+  unaffected; use `compare_and_swap` for the same check there.
+- The derive refuses the option in these cases:
+  - without a `version = "managed"` field;
+  - without a generated update root (`mutations = false`, or `mutation_shapes` without `update`);
+  - with `dependent_deletes`;
+  - when the entity generates `update_many` or `upsert`. Select the remaining roots with
+    [`mutation_shapes`](#generated-mutation-shapes).
+  - with a relation declaring `on_delete = "set_null"`. Deleting the related row would clear this
+    row's key in the database, or in a dependent-delete plan, without the version check. Use
+    `restrict`, or `cascade`, which deletes the row instead. Deletes are not guarded.
+
+  Each of those paths rewrites existing rows without a per-row `ExpectedVersion`.
+
+See [paths these options do not cover](#paths-the-update-options-do-not-cover).
+
+Entities without the option keep their optional `ExpectedVersion`, SDL and catalogue.
+
+## Conditional update assurance
+
+`#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]` lets the generated
+single-row update choose the [operation assurance](../../architecture/operation-assurance.md)
+policy it requires from the typed patch and the locked row. The operation's registry
+classification is still checked before the row is read. The selected level is enforced as well.
+
+```rust
+#[graphql_entity(
+    table = "reviews",
+    plural = "Reviews",
+    mutation_shapes = "create,update,delete",
+    update_expected_version = "required",
+    update_assurance(select = "review_assurance", levels = "write,elevated")
+)]
+struct Review { /* as above */ }
+
+fn review_assurance(
+    input: graphql_orm::graphql::assurance::UpdateAssuranceInput<'_, Review, UpdateReviewInput>,
+) -> async_graphql::Result<&'static str> {
+    match &input.patch().state {
+        Some(state) if *state != input.current().state => Ok("elevated"),
+        _ => Ok("write"),
+    }
+}
+```
+
+Each level is an assurance policy ID: the identifier an evaluator receives. Levels must be valid
+policy IDs and must not repeat. The selector's path resolves where the entity is declared.
+
+The update runs these steps in its transaction:
+
+1. It locks the row, authorizes it and checks `ExpectedVersion`.
+2. It applies write transforms and field policies to produce the patch it will write.
+3. It calls `enforce_selected_assurance`. Without an `AssuranceEnforcement` in the schema, this
+   refuses with `AUTHORIZATION_MISCONFIGURED` and the selector is never called.
+4. It calls the selector once with `current()` (the locked row) and `patch()`
+   (`Update<Entity>Input`). An undeclared level is refused with `AUTHORIZATION_MISCONFIGURED`.
+   The evaluator then decides the returned level.
+5. It runs the `Before` mutation hook, the `UPDATE`, the `After` hook and the commit.
+
+A refusal or error at steps 3 or 4 returns before any ORM write. The transaction rolls back and
+no `Changed` event is committed. No ORM write path runs before the selector: write transforms
+can only read through the transaction, and mutation hooks run after the selection. Host SQL in a
+`DatabaseFilter` or a policy predicate does run inside the same transaction. A side-effecting
+database function called from it could write before the selector, and that write rolls back on
+refusal too. A selector should be a pure function of the patch and the row.
+
+A managed version that cannot advance past `i64::MAX` is refused before step 3, so the selector
+does not run for such a row.
+
+If the selector returns an error or panics, the client receives one fixed `INTERNAL_ERROR` with
+the default message. Neither its message, extensions or source nor a panic payload reaches the
+client. The error message is logged server-side; a panic payload is not formatted.
+
+The evaluator decides the level for the operation's registered actor class, or interactive when
+the operation is not registered. It enforces the level even when the registry exempts the
+operation. The evaluator's own refusal, such as `FORBIDDEN` or `STEP_UP_REQUIRED`, passes
+through unchanged.
+
+**The selected level is observable.** A request either succeeds or is refused for step-up, so the
+caller learns which level the selector chose. The selector receives the full locked row once the
+principal's write access is authorized. Read authorization is not re-checked for it. Branch only
+on the patch and on fields the writing principal may read.
+
+The derive refuses the option in the same cases as a required `ExpectedVersion`, except that it
+needs no managed version. A selector with the wrong signature is a type error at the generated
+call.
+
+### Paths the update options do not cover
+
+Both options guard the generated GraphQL update only.
+
+- Repository and transaction writes are trusted host writes.
+- A delete, including a declared `cascade`, removes the row and is not guarded.
+- `RuntimeSchema::from_static_entities` and `from_static_entities_for_repository` refuse an
+  entity with either option with `UnsupportedCapability`. The runtime IR represents neither
+  option, so a runtime update could otherwise rewrite the same table without them.
+  - The refusal covers any metadata naming that table, including a copy. Tables are matched on
+    their bare lowercase table name in any schema, because an unqualified name can resolve to
+    another schema through `search_path`. An unrelated table with the same name in another
+    schema is therefore refused too.
+  - The table is recorded whenever `EntityMetadata::from_schema::<E>` or
+    `from_schema_with_retention::<E>` builds metadata for the entity, including through the
+    generated `metadata()`.
+- **Host schema configuration must not bypass the checks.** The derive cannot see these cases,
+  so they are the host's responsibility:
+  - A foreign key that exists only in the database, outside the entity declarations. If it sets
+    the guarded table's key to null when a parent is deleted, the row is rewritten without the
+    checks.
+  - A second mapping of the same physical table through another entity, or through a separate
+    migration plan. It can install its own `SET NULL` foreign key or expose its own generated
+    update.
+
+  Do not map a guarded table through another entity or plan. Foreign keys into it must not use
+  `SET NULL`.
+- Runtime IR over a guarded table that the host writes by hand, deserializes, or builds from
+  reconstructed metadata is host-authored. It bypasses these protections. Keeping it consistent
+  with the guarded table is the host's responsibility.
+
+The operation catalogue describes the selection with
+`conditional_assurance()`. It returns the sorted levels and reports `is_conditional()`.
+Callers and routers read it as advisory. They can prepare for the highest listed level, but only
+the owning service knows which one a request needs. See
+[conditional assurance](../../architecture/operation-assurance.md#conditional-assurance-on-generated-updates).
 
 ## Generated `Changed` subscriptions
 
@@ -1647,3 +1806,15 @@ bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
 [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
+
+
+## SQL Server parameter types
+
+On a SQL Server entity, describe the physical type of a persisted field with
+`#[graphql_orm(mssql_type = "VARCHAR(32)")]` or
+`#[graphql_orm(mssql_type = "INT")]`. String fields accept VARCHAR and NVARCHAR
+with a valid length or MAX. Integer fields accept TINYINT, SMALLINT, INT and
+BIGINT. Nullable fields accept the same declarations. The declaration also
+overrides the column type in schema metadata and generated DDL even with
+typed binding disabled. The [SQL Server pool reference](mssql.md#typed-column-parameters)
+lists which operands use the declared type and which retain Unicode binding.

@@ -442,9 +442,8 @@ pub(crate) fn legacy_change_log_policy_name() -> String {
 /// calling role cannot change: RLS is enabled when it is off, and the earlier
 /// releases' `INSERT` policy is dropped only when the caller owns the table.
 ///
-/// Its only caller is the backup module, which is compiled for exactly one
-/// of SQLite and PostgreSQL.
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+/// Its only caller is the PostgreSQL backup runtime.
+#[cfg(feature = "postgres")]
 pub(crate) fn postgres_ensure_change_log_rls_sql() -> String {
     let backend = DatabaseBackend::Postgres;
     let table = backend.quote_identifier(CHANGE_LOG_TABLE);

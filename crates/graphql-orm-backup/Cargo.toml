@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-backup"
-version = "0.29.0"
+version = "0.31.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -15,8 +15,9 @@ method = "git-full-revision"
 default = ["local"]
 local = ["dep:tokio", "graphql-orm-storage/local"]
 smb = ["dep:secrecy", "graphql-orm-storage/smb"]
-# Requires the host application to enable exactly one graphql-orm backend
-# feature (sqlite or postgres).
+# Select orm-sqlite or orm-postgres in applications. Using orm directly
+# uses graphql-orm's default backend, so it is only correct when that is
+# SQLite or PostgreSQL and no other ORM backend is unified into the build.
 orm = ["dep:graphql-orm"]
 orm-sqlite = ["orm", "graphql-orm/sqlite"]
 orm-postgres = ["orm", "graphql-orm/postgres"]

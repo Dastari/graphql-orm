@@ -111,10 +111,14 @@ pub enum BackupError {
         target_schema_hash: String,
     },
 
-    /// A canonical snapshot and its target disagree on a live key's storage type.
+    /// A canonical snapshot and its restore target have the same key layout
+    /// entries, but disagree on the PostgreSQL type or type modifier of a key.
+    /// Restore stops before checking target emptiness or writing data.
     #[error("canonical key storage differs at table {table_name:?}, column {column_name:?}")]
     CanonicalKeyStorageMismatch {
+        /// Table whose key storage differs.
         table_name: String,
+        /// Primary-key column whose storage differs.
         column_name: String,
     },
 
@@ -242,6 +246,13 @@ pub enum BackupError {
 
     #[error("unsupported operation: {operation}")]
     UnsupportedOperation { operation: String },
+
+    /// Another product owns backup and restore for this database.
+    #[cfg(feature = "orm")]
+    #[error(transparent)]
+    BackupRestoreExternallyManaged(
+        #[from] graphql_orm::graphql::orm::BackupRestoreExternallyManaged,
+    ),
 
     #[error("database adapter error: {message}")]
     Database { message: String },

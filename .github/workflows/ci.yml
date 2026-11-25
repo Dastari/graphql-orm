@@ -216,6 +216,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --test consumer_fixtures --test cross_crate_relations_fixture --test federation_end_to_end_fixture
+      - name: Check backup adapter backend selection
+        run: bash scripts/check-backup-backend-fixture.sh
       - name: Run the graphql-orm-usage skill examples and behaviour contract
         run: cargo test --manifest-path skills/verify/Cargo.toml --target-dir target/fixtures --locked
 
@@ -271,7 +273,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "1"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test computed_field_invalidation --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test computed_field_invalidation --test postgres_rls --test postgres_rls_drift --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test server_only_relation_keys --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
@@ -438,7 +440,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui record_version_ui
 
   # Provider tests and companion lint/docs use separate runners, while provider

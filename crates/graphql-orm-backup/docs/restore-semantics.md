@@ -10,6 +10,17 @@ supersedes: []
 
 # Restore Semantics
 
+## Externally managed databases
+
+Use the ORM's
+[external backup and restore setting](../../../docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore)
+for databases whose backup and restore are owned by another product.
+`OrmBackupAdapter` returns `BackupError::BackupRestoreExternallyManaged`
+(code `BACKUP_RESTORE_EXTERNALLY_MANAGED`) before reading or writing the
+database or the snapshot repository. This covers full and incremental
+backups, target checks and clears, and both applying and dry-run restores.
+`OrmBackupObjectIndex` also refuses when its database has opted in.
+
 ## Supported Modes
 
 The default applying mode restores into an empty target:
@@ -81,6 +92,16 @@ with `LegacyManifestRefused` unless the host opts in with a
 - Refuse non-empty target databases in `EmptyDatabase` mode.
 - Refuse a snapshot the host's snapshot records do not admit (a revoked id, or
   one missing from the known-snapshot list) before writing.
+
+## Canonical PostgreSQL key compatibility
+
+The canonical backup schema identity includes the live PostgreSQL type and
+type modifier for each single-column primary key in the backup. Dry-run and
+applying restore return `CanonicalKeyStorageMismatch` when those key entries
+match by table and column and a storage type or modifier differs. The error
+identifies the affected table and column. Differences in the set of key
+entries return `RestoreSchemaMismatch`. Both errors occur before checking
+target emptiness or writing data.
 
 ## Atomicity
 

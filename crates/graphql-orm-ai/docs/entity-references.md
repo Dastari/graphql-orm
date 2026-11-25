@@ -20,10 +20,10 @@ is never treated as an instruction.
 
 ## The rule: store the handle, resolve at every use
 
-Only the handle (`kind` and `id`) is stored, cloned, logged or retried. What a
-reference resolves to is never stored by this crate: not in the message, a
-summary, a continuation, a checkpoint, a provider-call plan, a call result, an
-audit record or a background-submission record.
+The crate keeps only the handle (`kind` and `id`) when it stores, clones,
+logs or retries a structured reference. If the model repeats resolved data
+in its output, the crate stores that output under the usual assistant-content
+rules.
 
 Every time a reference is used, the host hook is called again with the
 principal that is acting at that moment, and the answer is used once:
@@ -192,12 +192,11 @@ before it, the executor:
 3. builds a `ModelDispatchRequest`: the handle-only request plus a
    `ModelDispatchReferences` table of what each handle resolved to.
 
-`ModelDispatchRequest` and `ModelDispatchReferences` are the only values that
-hold resolved data on the way to a provider. They are not `Clone` and not
-`Serialize`, their `Debug` output prints the handle-only request and a count,
-and they are moved into the adapter and dropped when the call ends. A retry
-or a continuation cannot reuse one: it runs the step again and asks the hook
-again.
+The executor moves the scoped `ModelDispatchRequest` and its
+`ModelDispatchReferences` into the adapter. Neither type implements `Clone`
+or `Serialize`, and their `Debug` output shows only the handle-only request
+or a count. The adapter consumes the resolution for the current call.
+A retry or continuation runs the resolution step again.
 
 What a provider receives for a resolved reference is
 
@@ -225,11 +224,13 @@ let harness = AiLocalHarnessRegistration::new(/* ... */)?
     .with_resolved_entity_reference_delivery(Duration::from_secs(10))?;
 let grok = AiGrokAcpRegistration::new(/* ... */)?
     .with_resolved_entity_reference_delivery(Duration::from_secs(20))?;
+let codex = AiCodexAppServerRegistration::new(/* ... */)?
+    .with_resolved_entity_reference_delivery(Duration::from_secs(10))?;
 ```
 
-Installing an `AiEntityReferenceRegistry` does not opt these adapters in, and
-an upgrade changes nothing for a deployment that already has one. The Codex
-app-server adapter has no opt-in and always sends the marker; see below.
+Installing an `AiEntityReferenceRegistry` leaves local resolved delivery
+disabled. Tool-free Codex turns accept entity-reference blocks as text and
+still reject other JSON blocks.
 
 The argument is the **freshness bound**: the longest time allowed between the
 start of resolution in the executor and the moment the one write that carries
@@ -238,16 +239,17 @@ the data may begin. It must be greater than zero and at most
 part of any registration identity or session fingerprint, so changing it does
 not rebind sessions.
 
-With the opt-in, an adapter sends resolved data in exactly one write, the one
-that delivers the turn. Everything the adapter validates, queues, compares,
-clones or logs holds the unavailable marker.
+An adapter that supports consuming dispatch can send resolved data in one
+write per turn. The adapter validates, queues, compares, clones and logs the
+marker-only form.
 
 | Adapter | The one write | How resolved data reaches it |
 | --- | --- | --- |
 | Local harness (`AiJsonLinesLocalHarnessDriver`) | the stdin request frame | `AiLocalHarnessProvider` moves the `ModelDispatchRequest` to `AiLocalHarnessDriver::stream_dispatch`. The driver admits the request on its all-marker frame, launches the process, and only then encodes the resolved frame through `wire_json` and writes it once. |
 | Grok ACP (`AiGrokAcpWireProcess`) | the `session/prompt` frame | `AiGrokAcpProvider` admits the request in marker form and moves an `AiGrokAcpPromptInput` to `AiGrokAcpRunProcess::prompt_dispatch`. The value is not `Clone` or `Serialize`, prints a block count in `Debug`, and gives up its resolved text only by being consumed, when the session is ready and the frame is built. |
+| Codex app-server (`AiCodexAppServerProtocolActor`) | the `turn/start` frame | The host's `start_dispatch_turn` override calls `write_dispatch_turn` after thread setup or resume. The actor consumes the dispatch and writes to the host-supplied writer. The host process and writer are inside the trust boundary. |
 
-The rules that hold on both:
+The same rules apply to all three adapters.
 
 - **Resolution.** The executor resolves for the run's rehydrated principal at
   this dispatch. A retry, a later turn and a resumed session are new
@@ -256,14 +258,12 @@ The rules that hold on both:
   or queues for its process. The bound limits when the resolved write may
   **begin**. It covers everything from the first host hook call to the start
   of the write: for the harness the hook, process launch and frame encoding;
-  for Grok the hook, launch admission, process launch, session resume and
+  for Grok and Codex the hook, launch admission, process launch, session resume and
   frame encoding.
   - The adapter compares the bound with the clock after the frame is encoded
-    and immediately before the write starts. On Grok that is after the
-    process's shared writer has been acquired, so a prompt that waited behind
-    another write (a `session/cancel`, for example) is checked again once the
-    wait is over. If the bound has passed, the turn is sent with markers; it
-    does not fail.
+    and immediately before the write starts. Grok checks after acquiring its
+    child writer. Codex checks after the host supplies the writer. If the
+    bound has passed, the adapter sends markers.
   - A write that has started may complete, so a write in progress when the
     bound passes can still deliver its frame.
   - If a started write has not completed when the bound passes, the adapter
@@ -272,55 +272,80 @@ The rules that hold on both:
     frame is not delivered later. On Grok the process's writer is disabled:
     `session/cancel`, session deletion and any other write are refused. On
     the harness the process is dropped, which its contract defines as a
-    forced kill, and `close_stdin` and `terminate` are not called.
+    forced kill, and `close_stdin` and `terminate` are not called. The Codex
+    actor invokes the process wrapper's synchronous tree kill before releasing
+    the writer, and the pool skips graceful shutdown.
 
   So the revocation window is: up to `maximum_age` (at most 60 seconds)
   before a resolved write begins; a write already in progress may complete.
   Discarding bytes that the host's own transport or pipe has buffered is part
-  of the `AiGrokAcpWireTransport` and `AiLocalHarnessProcess` contracts.
+  of the process transport contracts.
 - **Size.** The request is admitted on its all-marker form. If the resolved
   form would exceed a bound (the harness `maximum_request_bytes` and frame
   limit; the Grok registration's `maximum_input_bytes`, or 16 MiB for the
-  complete escaped JSON-RPC frame), every reference of that request is sent
-  as the marker. The request is refused only if the all-marker form does not
-  fit either. No value is truncated.
+  complete escaped JSON-RPC frame; or the Codex text and actor frame limits),
+  the adapter sends the all-marker frame. If that frame also exceeds a
+  limit, the adapter refuses the request.
 
-**Host-written process code.** The built-in driver and wire process above are
-the parts that write resolved data. A host that implements the seam itself
-keeps receiving the marker, even with the opt-in, until its code takes the
-dispatch value:
+**Host-written process code.** A process implementation receives markers
+through the default dispatch method. Consuming the dispatch requires the
+following adapter hook:
 
 - an `AiLocalHarnessDriver` that does not override `stream_dispatch` receives
   a plain request with markers;
 - an `AiGrokAcpRunProcess` that does not override `prompt_dispatch` receives
-  marker text.
+  marker text;
+- an `AiCodexAppServerRunProcess` that uses the default `start_dispatch_turn`
+  receives the marker-only `AiCodexAppServerTurnInput` through its existing
+  process methods, even when its registration opts in. An override uses
+  `dispatch.input()` for thread setup and passes the dispatch to
+  `write_dispatch_turn`. The actor reauthorizes historical tool sources
+  before writing. The override awaits the write before returning the event
+  stream.
 
-An override must apply the freshness bound itself, with
+Custom harness and Grok overrides apply the freshness bound themselves with
 `ModelDispatchReferences::write_deadline` or the deadline
 `AiGrokAcpPromptInput::into_wire_text` returns.
+
+The crate ships no Codex process. The host's process implementation and
+writer are inside the trust boundary. The actor accepts any compatible
+`AsyncWrite`, and its freshness bound and kill on an abandoned resolved write
+apply to that writer. Pass the child's stdin directly and hold exclusive
+access for the duration of the call. A writer that queues bytes to another
+task can finish `write_all` on enqueue and report completion before the pipe
+write. In that case the later pipe write falls outside both safeguards.
+
+**Codex echo projection.** The actor applies this best-effort
+defence-in-depth filter for every host, regardless of opt-in.
+
+- It inspects `item` in `item/started` and `item/completed` notifications.
+- It inspects `turn.items[]` in `turn/start` responses and in `turn/started` and
+  `turn/completed` notifications.
+- It sets existing `thread.preview` fields to the empty string and inspects
+  `thread.turns[].items[]` in `thread/start` and `thread/resume` responses
+  and in `thread/started` notifications.
+
+At each of those item locations, the filter keeps only `type`, `id`,
+`startedAtMs`, `completedAtMs` and `content` on items of type `userMessage`,
+and replaces existing `content` with an empty array. The filter passes
+through other fields on thread and turn objects and leaves other item types
+untouched. Treat raw child frames as protected. Model output that quotes
+resolved data can still be stored as assistant content.
 
 **What the process keeps.** This is the reason the opt-in exists. Once written,
 reference data is outside the crate:
 
-- A Grok session is provider-retained. Grok holds the thread, including any
-  reference data a prompt sent, in its session files, and later turns of that
-  session continue from it. Revoking access stops the crate from sending the
-  data again; it does not remove it from a session that already has it. It
-  goes when the session is deleted.
+- A Grok session or retained Codex thread can keep the reference data a
+  prompt sent in its session files. Later turns can continue from it.
+  Revocation stops future disclosure by the crate. Deleting the provider
+  session removes its retained data.
+- Fresh Codex threads are ephemeral and stay in the pooled Codex process's
+  memory until that process exits.
 - A harness process is launched per request and the crate keeps nothing, but
   whatever the harness executable logs or writes in its sandbox is the
   host's to bound and clean up.
 
 See also [What the crate cannot recall](#what-the-crate-cannot-recall).
-
-**Codex app-server: markers only.** `AiCodexAppServerTurnInput` is `Clone`
-and is handed to the host's process by value, and the protocol actor returns
-the encoded `turn/start` frame to the host. Resolved data could therefore
-outlive its dispatch. Delivering it needs a consuming, non-`Clone` dispatch
-path, which is a breaking signature change tracked in #828. Until then every
-entity reference in a Codex turn is the marker, and a tool-free Codex turn
-rejects an entity-reference block as `Unsupported`, like any other JSON
-block.
 
 ### Dispatch paths that send the marker
 
@@ -336,16 +361,15 @@ unavailable marker:
   `OrmAiOpenAiBackgroundSubmissionService` do. Accepting a caller-supplied
   principal here would let a host resolve references outside that check. Use
   the executor or the background-submission service.
-- The Codex app-server adapter, as described above.
-- A local-harness or Grok ACP registration that has not opted in, and a
-  host-written local-process seam that does not take the dispatch value.
+- A local-process registration that has not opted in, or a process
+  implementation that uses the marker-only default dispatch method.
 - A custom `AiProvider` that does not call
   `ModelDispatchReferences::wire_json` sends the handle block as it stands,
   which carries no data.
 
 The built-in adapters that send resolved data are OpenAI, xAI,
 OpenAI-compatible, chat-completions, Anthropic and Ollama, and, with the
-opt-in, the local harness and Grok ACP.
+opt-in, the local harness, Grok ACP and Codex app-server.
 
 ### Egress estimate and budget
 
@@ -413,8 +437,8 @@ Data that was already sent to a provider stays with that provider.
 - The model's own earlier output, and tool results, may repeat reference data
   it was given. Those are stored as assistant and tool content under their own
   rules.
-- A **Grok ACP session** that received resolved data (only with the
-  registration's opt-in) is a thread held by the local agent process.
+- A **Grok ACP session or retained Codex thread** that received resolved
+  data through the opt-in is held by the local agent process.
   Reference data a prompt sent to it stays in that thread, and in the session
   files the agent keeps, until the session is deleted.
 - A provider's own logs and abuse-monitoring retention are outside the crate.
@@ -442,9 +466,9 @@ handle list.
 
 ## Backup and restore
 
-Because only handles are stored, a backup contains no resolved reference data,
-and a restored session resolves each handle again, under the restored
-deployment's current policy, the first time it is used.
+Backup stores structured references as handles. It can include assistant
+or tool content that repeats resolved data. A restored session resolves each
+handle under the restored deployment's current policy when it is used.
 
 ## Limits
 

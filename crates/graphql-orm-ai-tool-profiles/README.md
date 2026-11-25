@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+Version 0.30.0 speeds up capability catalogue compilation for targets with
+many roots by sharing verified input metadata across capabilities. See the
+[migration guide](MIGRATION.md#0300-capability-catalogue-compilation).
+
+Version 0.28.0 stops two broker per-call costs from growing with the index:
+an index set formed again from the same index reuses that index's
+measurements, and a capability recovers its signature type names once. See
+the [migration guide](MIGRATION.md#0280-index-set-and-signature-reuse).
+
 Version 0.27.1 reuses compiled replayable subscription validators for both
 plan formats and for admitted condition values. See the
 [migration guide](MIGRATION.md#0271-subscription-validator-reuse).
@@ -224,6 +233,11 @@ The compiler binds the exact target, SDL, semantic operation, selection,
 variables schema, disclosure shape, limits, and plan fingerprint. Registration
 is discovery only; a fresh target/current-principal policy and the ordinary
 resolver remain authoritative at execution.
+
+For generated offset and keyset list roots, use `maximumItems` to request a
+page size. The compiler supplies the GraphQL page argument, and the resolver
+applies the schema's maximum page limit. Generated keyset plans read from the
+start of the connection with the default count behavior.
 
 The compact selection schema is one finite string enum of public paths, so
 adding deep relationships does not recursively duplicate either the nested

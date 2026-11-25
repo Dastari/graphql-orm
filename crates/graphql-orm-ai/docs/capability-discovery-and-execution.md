@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -126,6 +126,141 @@ let index = AiCapabilityIndex::compile(
 AiCapabilityIndexSet::compile([Arc::new(index)])
 # }
 ```
+
+### Model-context benchmark
+
+`cargo run --release -p graphql-orm-ai --example capability_context_benchmark
+-- 1 10 100` measures what the model receives as the catalogue grows. It
+stamps out two copies of a generated family per target. Each family has
+one wide entity with forty public scalar fields and five to-many
+relationships, plus the five related entities. Each entity has five
+generated query roots, including list, keyset and aggregate. That is 12
+entities and 60 query roots per target. Each target gets its own query catalogue and index, and the
+catalogues are registered in one `AiToolCatalog`. The example then drives
+the version 2 broker on a host that caches its index set, with the
+coordinator's own describe steps. For each described operation it builds and
+validates the exact model definition, checks its fingerprint and renders the
+signature. Describe results are merged under
+`AiCapabilityDeliveryLimits::maximum_describe_bytes`, and a `describe_type`
+page above that bound is refused and counted, as the coordinator refuses it.
+Each point runs in its own process. Byte sizes are deterministic; times are
+for one machine and one build. Approximate tokens are bytes / 4. The *eager
+reference* is the size of one exact definition per root: what eager or
+provider-deferred delivery would send for the same roots.
+
+Release build, 2026-11-23 (AI 0.156.0, tool profiles 0.28.0):
+
+| Targets | Query roots | Index entries | First-turn definitions | Eager reference | Discover result p95 | Describe result p95 | `describe_type` page p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 60 | 12 | 5,548 B (≈1.4k tokens) | 1.49 MB | 5,302 B | 6,037 B | 4,653 B |
+| 10 | 600 | 120 | 5,548 B | 14.9 MB | 5,372 B | 6,080 B | 4,660 B |
+| 100 | 6,000 | 1,200 | 5,548 B | 149 MB | 5,394 B | 6,123 B | 4,664 B |
+
+From 1 to 100 targets, the first-turn definitions are byte-identical (the
+four frozen broker definitions). Discover, describe and `describe_type`
+results grow by under 2%, while the eager reference grows 100 times. A
+describe of the widest entity, with all five of its operations, stays below
+8 KB. At every point:
+
+- A caller whose policy admits one target still receives a full page of that
+  target's candidates for a query that matches every target.
+- Changing one entity description in one target changes the index-set
+  fingerprint and an eager binding, but not the fixed-broker session binding.
+- A count question's top candidate offers the entity's `aggregate`
+  operation.
+- No `describe_type` page reaches the describe byte bound, so none is
+  refused.
+
+All points fit the default index and index-set limits.
+
+| Targets | Discover p50 / p95 | Describe p95, first | Describe p95, repeat | `describe_type` p95 | Startup, one target | Peak memory |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.05 / 0.07 ms | 0.87 s | 15 ms (was 0.92 s) | 3.9 ms (was 244 ms) | 23 s | 174 MiB |
+| 10 | 0.27 / 0.39 ms | 0.91 s | 19 ms (was 1.00 s) | 4.3 ms (was 228 ms) | 22 s | 1.3 GiB |
+| 100 | 2.7 / 4.7 ms | 0.89 s | 22 ms (was 0.89 s) | 3.9 ms (was 223 ms) | 21 s | 7.8 GiB |
+
+A *first* describe is the process's first describe of a capability: it
+recovers the capability's signature type names. A *repeat* describes the
+same entity again. "Was" is the same benchmark against AI tool profiles
+0.27.1, which recovered the names on every call.
+
+Discover time follows the number of matches, not the catalogue as such. The
+benchmark's questions share words such as "records" with every entity, and
+host policy is applied to every match before the result ceiling (see
+[Discovery is not authority](#discovery-is-not-authority)). A host with an
+expensive policy should override `authorize_discovery`. In those runs,
+peak memory grew by about 1.3 MiB per query root with the capabilities
+registered in the `AiToolCatalog`. For current startup measurements, see
+[Catalogue compilation benchmark](#catalogue-compilation-benchmark).
+
+A single-target host can supply its index through `AiCurrentCapabilityIndex`,
+and the crate then forms a one-member set on every broker call. Since AI tool
+profiles 0.28.0, that set reuses the index's measurements, so each call costs
+what it costs a host that caches its set. Describe and `describe_type`
+render a signature on every call. Since 0.28.0, a capability recovers the
+type names behind its signature once, so only the first describe of a
+capability pays for that. Measured on one target with 60 entities (300
+roots). A first pass on the single-index host meets cold per-capability
+caches. Both hosts are then measured on equally warm caches, the
+single-index host first:
+
+| | Before (tool profiles 0.27.1) | After (0.28.0) |
+| --- | ---: | ---: |
+| Discover p50, single-index host, warm pass | 1.56 ms | 0.153 ms |
+| Discover p50, host-cached set, warm pass | 0.137 ms | 0.161 ms |
+| Describe p95, cold pass (each capability's first describe) | 4.0 s | 4.6 s |
+| Describe p95, warm pass, single-index host | 4.1 s | 0.025 s |
+| Describe p95, warm pass, host-cached set | 4.0 s | 0.019 s |
+| `describe_type` p95, warm pass, single-index host | 1.09 s | 4.4 ms |
+
+The benchmark also reports whether a keyset operation offers a
+continuation. It does not: the page argument is server-owned, so a model
+reads only the first page of a keyset or list root. Continuation cursors are
+planned for the next fingerprint-breaking release.
+
+### Catalogue compilation benchmark
+
+In tool profiles 0.29.0, a release profile of the 60-root target recorded
+11,402 filter-role validations in 22.46 s of query catalogue compilation.
+Those validations accounted for 21.65 s. At 300 roots, validation ran
+57,002 times and accounted for 527.06 of 532.95 s. Input schema rendering
+and admission both repeated the validation, which visits the target's
+filterable fields. Tool profiles 0.30.0 validates those roles at catalogue
+binding and reuses the result. The compiler also indexes the generated input
+owners it has to check.
+
+Use `capability_context_benchmark --compile-target 2`, `10`, or `20` on the
+release binary for 60, 300, or 600 roots in one target. The timer includes
+building the target fixture and compiling the query catalogue and index. Run
+`--compile-federated 1`, `10`, or `100` for the existing 60-root targets.
+The federated time is the first-target time plus the remaining targets'
+compile and registration time, with up to six workers. The harness records
+index-set assembly separately.
+
+Release build on an AMD Ryzen 9 9955HX with Rust 1.97.1. Before is tool
+profiles 0.29.0 at `2f2b6c9d7`. After is tool profiles 0.30.0. Each row is
+one wall-clock sample from the same harness and deployment limits.
+
+| Shape | Query roots | Before (s) | After (s) |
+| --- | ---: | ---: | ---: |
+| One target | 60 | 22.43 | 0.44 |
+| One target | 300 | 533.31 | 2.09 |
+| One target, time to rejection | 600 | 2,148.48 | 4.17 |
+| Federated, 1 target | 60 | 22.63 | 0.48 |
+| Federated, 10 targets | 600 | 69.56 | 1.68 |
+| Federated, 100 targets | 6,000 | 384.33 | 12.01 |
+
+The 600-root single-target baseline produced 17,060,832 bytes of execution schemas
+before hitting the existing 16 MiB total schema limit. Both versions
+compiled the root schemas and rejected the target at the same limit.
+The row records the time to that rejection.
+
+Run the same harness with `--contract 2` on each revision and compare stdout
+with `cmp`. The snapshot covers the 60 capability fingerprints and
+execution schemas, the catalogue fingerprint and serialized index, all
+provider definitions, and the sampled broker describe and type results. It
+uses a fixed, equal-length value for the opaque loaded reference, which
+depends on the broker session.
 
 ## Discovery is not authority
 

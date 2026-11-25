@@ -20,6 +20,8 @@ pub async fn plan_full_backup(
     database: &dyn GraphqlOrmBackupAdapter,
     objects: &dyn BackupObjectIndex,
 ) -> Result<FullBackupPlan, BackupError> {
+    database.ensure_backup_restore_allowed()?;
+    objects.ensure_backup_allowed()?;
     let schema = database.schema_snapshot().await?;
     let tables = database.export_full().await?;
     schema.ensure_canonical_identity_unchanged(database).await?;

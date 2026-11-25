@@ -10,15 +10,29 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.29.0
+## Unreleased - 0.31.0
 
 - The optional PostgreSQL ORM adapter can use canonical change-journal keys
   (#592). Canonical snapshots have a distinct sealed schema identity, so
   incrementals cannot extend a legacy chain or one with different live key
   storage types. The identity covers only the adapter's backup entities, and
-  key storage mismatches name the table and column. Compaction requires the canonical feature for exact float
-  decoding. Existing hosts keep legacy keys
-  and hashes by default. [Migration](MIGRATION.md#0281-to-0290-canonical-postgresql-journal-keys)
+  key storage mismatches name the table and column. Compaction requires the
+  canonical feature for exact float decoding. Existing hosts keep legacy keys
+  and hashes by default. [Migration](MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys)
+
+## Unreleased - 0.30.0
+
+- `orm-sqlite` and `orm-postgres` select the database handle type used by the
+  ready-made adapter and object index, including when other workspace
+  members enable additional ORM backends. Enabling both adapter features
+  produces a compile-time diagnostic (#870).
+
+## Unreleased - 0.29.0
+
+- The ORM adapter and object index honor the database's external backup and
+  restore setting. Backup orchestration and restore, including dry runs,
+  refuse these databases before accessing the database or repository (follow-up
+  to #731).
 
 ## Unreleased - 0.28.1
 

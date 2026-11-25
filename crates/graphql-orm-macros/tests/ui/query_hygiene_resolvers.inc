@@ -536,6 +536,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -634,6 +643,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -1472,78 +1490,105 @@ impl RecordSubscriptions {
             >,
         >,
     > {
-        use ::graphql_orm::futures::StreamExt;
-        ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
-        ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
-        let _auth_subject =
-            ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, ::std::option::Option::None)?;
-        ::graphql_orm::graphql::orm::ensure_rls_request_context::<
-            Record,
-            ::graphql_orm::SqliteBackend,
-        >(
-            ctx,
-            <Record as ::graphql_orm::graphql::orm::Entity>::entity_name(),
-        )?;
-        ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-            ctx,
-            ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
-        )?;
-        let db = ::graphql_orm::db::request_database::<::graphql_orm::SqliteBackend>(ctx)?;
-        db.ensure_entity_access(
-            ::std::option::Option::Some(ctx),
-            "Record",
-            <Record as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-            ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription,
-        )
-        .await
-        .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-        if _filter
-            .as_ref()
-            .is_some_and(|filter| filter.dummy.is_some())
-        {
-            return ::std::result::Result::Err(
-                ::graphql_orm::graphql::errors::OrmPublicError::new(
-                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
-                )
-                .into_graphql_error(),
-            );
-        }
-        ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<
-            Record,
-            ::graphql_orm::SqliteBackend,
-        >(ctx, "record")?;
-        let keys = ::graphql_orm::graphql::subscriptions::admit_subscription_keys(
-            db,
-            key.is_some(),
-            keys.map(|keys| keys.iter().map(Record::__gom_key_values).collect()),
-        )?;
-        let actions = _filter.and_then(|filter| filter.actions);
-        let rx = db
-            .ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<
-                RecordChangedEvent,
+        struct __GomRecordChangedSubscriptionAdapter;
+        impl
+            ::graphql_orm::graphql::subscriptions::ChangedSubscriptionAdapter<
                 ::graphql_orm::SqliteBackend,
-            >>()
-            .subscribe();
-        let db = db.clone();
-        let interval = db.subscription_authority_recheck_interval();
-        let timer_db = db.clone();
-        let events = :: graphql_orm :: graphql :: subscriptions :: continuity_events (rx) . filter_map (move | result | { let db = db . clone () ; let actions = actions . clone () ; let key = key . clone () ; let keys = keys . clone () ; async move { let witness = match result { :: std :: result :: Result :: Ok (witness) => witness , :: std :: result :: Result :: Err (error) => return :: std :: option :: Option :: Some (:: std :: result :: Result :: Err (error)) , } ; let errors_before = match :: graphql_orm :: graphql :: errors :: buffered_errors :: count (ctx) { :: std :: result :: Result :: Ok (count) => count , :: std :: result :: Result :: Err (error) => return :: std :: option :: Option :: Some (:: std :: result :: Result :: Err (error)) , } ; let delivered : :: std :: option :: Option < :: graphql_orm :: graphql :: subscriptions :: ChangedPayload < RecordChangedEvent > > = async move { let event = witness . event . as_ref () ; if key . as_ref () . is_some_and (| key | :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& Record :: __gom_key_values (key)) != :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& witness . keys)) { return :: std :: option :: Option :: None ; } if keys . as_ref () . is_some_and (| keys | ! keys . contains (& :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& witness . keys))) { return :: std :: option :: Option :: None ; } if :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& witness . keys) != :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& Record :: __gom_key_values (& event . id)) { return :: std :: option :: Option :: None ; } if actions . as_ref () . is_some_and (| actions | ! actions . contains (& event . action)) { return :: std :: option :: Option :: None ; } let authorize_current = | | async { let _auth_subject = :: graphql_orm :: graphql :: auth :: enforce_resolver_auth (ctx , :: std :: option :: Option :: None) ? ; :: graphql_orm :: graphql :: orm :: ensure_rls_request_context :: < Record , :: graphql_orm :: SqliteBackend > (ctx , < Record as :: graphql_orm :: graphql :: orm :: Entity > :: entity_name () ,) ? ; :: graphql_orm :: graphql :: assurance :: enforce_resolver_assurance (ctx , :: graphql_orm :: graphql :: orm :: GraphqlOperationKind :: Subscription) ? ; witness . authorize_provenance (& db , ctx , event . source_entity . as_deref () , event . source_id . as_deref () , & event . path , event . change_kind == :: graphql_orm :: graphql :: orm :: ChangeKind :: Propagated) . await ? ; if witness . trusted_delete && event . entity . as_ref () . is_some_and (| entity | :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& Record :: __gom_subscription_key_values (entity)) != :: graphql_orm :: graphql :: loaders :: RelationKey :: from_sql_values (& witness . keys)) { return :: std :: result :: Result :: Err (:: graphql_orm :: graphql :: errors :: OrmPublicError :: forbidden () . into_graphql_error ()) ; } let preimage = if witness . trusted_delete && event . action == :: graphql_orm :: graphql :: orm :: ChangeAction :: Deleted { event . entity . as_ref () } else { :: std :: option :: Option :: None } ; let row = :: graphql_orm :: graphql :: subscriptions :: authorize_subscription_row :: < Record , :: graphql_orm :: SqliteBackend > (& db , ctx , & witness . keys , preimage) . await ? . ok_or_else (| | :: graphql_orm :: graphql :: errors :: OrmPublicError :: forbidden () . into_graphql_error ()) ? ; if key . is_some () || keys . is_some () { :: graphql_orm :: graphql :: subscriptions :: authorize_subscription_keys :: < Record , :: graphql_orm :: SqliteBackend > (& db , ctx , & row) . await ? ; } :: graphql_orm :: graphql :: subscriptions :: authorize_subscription_fields (& db , ctx , & row , "record") . await ? ; db . ensure_entity_access (:: std :: option :: Option :: Some (ctx) , "Record" , < Record as :: graphql_orm :: graphql :: orm :: Entity > :: metadata () . read_policy , :: graphql_orm :: graphql :: orm :: EntityAccessKind :: Read , :: graphql_orm :: graphql :: orm :: EntityAccessSurface :: GraphqlSubscription) . await . map_err (:: graphql_orm :: graphql :: errors :: graphql_error_from_callback) ? ; let _auth_subject = :: graphql_orm :: graphql :: auth :: enforce_resolver_auth (ctx , :: std :: option :: Option :: None) ? ; :: graphql_orm :: graphql :: orm :: ensure_rls_request_context :: < Record , :: graphql_orm :: SqliteBackend > (ctx , < Record as :: graphql_orm :: graphql :: orm :: Entity > :: entity_name () ,) ? ; :: graphql_orm :: graphql :: assurance :: enforce_resolver_assurance (ctx , :: graphql_orm :: graphql :: orm :: GraphqlOperationKind :: Subscription) ? ; witness . authorize_provenance (& db , ctx , event . source_entity . as_deref () , event . source_id . as_deref () , & event . path , event . change_kind == :: graphql_orm :: graphql :: orm :: ChangeKind :: Propagated) . await ? ; Record :: __gom_authorize_changed_operation (ctx) ? ; :: std :: result :: Result :: Ok :: < Record , :: graphql_orm :: async_graphql :: Error > (row) } ; match authorize_current () . await { :: std :: result :: Result :: Ok (row) => { let __gom_event = RecordChangedEvent { action : event . action , change_kind : event . change_kind , id : event . id . clone () , source_entity : event . source_entity . clone () , source_id : event . source_id . clone () , path : event . path . clone () , entity : :: std :: option :: Option :: Some (row) , } ; let prepared = :: graphql_orm :: graphql :: subscriptions :: ChangedPayload :: prepare (__gom_event , ctx) . await ? ; match authorize_current () . await { :: std :: result :: Result :: Ok (_) => :: std :: option :: Option :: Some (prepared) , :: std :: result :: Result :: Err (error) => { let _ = :: graphql_orm :: graphql :: loaders :: relation_authorization_error (error) ; :: std :: option :: Option :: None } } } , :: std :: result :: Result :: Err (error) => { let _ = :: graphql_orm :: graphql :: loaders :: relation_authorization_error (error) ; :: std :: option :: Option :: None } } } . await ; if delivered . is_none () { if let :: std :: result :: Result :: Err (error) = :: graphql_orm :: graphql :: errors :: buffered_errors :: truncate (ctx , errors_before) { return :: std :: option :: Option :: Some (:: std :: result :: Result :: Err (error)) ; } } delivered . map (:: std :: result :: Result :: Ok) } }) ;
-        ::std::result::Result::Ok(
-            ::graphql_orm::graphql::subscriptions::watch_subscription_authority(
-                events,
-                interval,
-                move || {
-                    let db = timer_db.clone();
-                    async move {
-                        let result = async { Record :: __gom_authorize_changed_operation (ctx) ? ; :: graphql_orm :: graphql :: assurance :: enforce_resolver_assurance (ctx , :: graphql_orm :: graphql :: orm :: GraphqlOperationKind :: Subscription) ? ; if ! db . can_access_entity (:: std :: option :: Option :: Some (ctx) , "Record" , < Record as :: graphql_orm :: graphql :: orm :: Entity > :: metadata () . read_policy , :: graphql_orm :: graphql :: orm :: EntityAccessKind :: Read , :: graphql_orm :: graphql :: orm :: EntityAccessSurface :: GraphqlSubscription) . await ? { return :: std :: result :: Result :: Err (:: graphql_orm :: graphql :: errors :: OrmPublicError :: forbidden () . into_graphql_error ()) ; } Record :: __gom_authorize_changed_operation (ctx) ? ; :: graphql_orm :: graphql :: assurance :: enforce_resolver_assurance (ctx , :: graphql_orm :: graphql :: orm :: GraphqlOperationKind :: Subscription) } . await ;
-                        if result.is_err() {
-                            ::graphql_orm::graphql::errors::buffered_errors::clear(ctx);
-                        }
-                        result
-                    }
-                },
-            ),
-        )
+            > for __GomRecordChangedSubscriptionAdapter
+        {
+            type Event = RecordChangedEvent;
+            type Row = Record;
+            type Key = RecordKey;
+            type Payload = RecordChangedEvent;
+            const ENTITY_NAME: &'static str = "Record";
+            const ENTITY_FIELD: &'static str = "record";
+            const KEY_ONLY_DELETES: bool = false;
+            fn key_values(
+                key: &Self::Key,
+            ) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Record::__gom_key_values(key)
+            }
+            fn row_key_values(
+                row: &Self::Row,
+            ) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                Record::__gom_subscription_key_values(row)
+            }
+            fn event_key(event: &Self::Event) -> &Self::Key {
+                &event.id
+            }
+            fn view(
+                event: &Self::Event,
+            ) -> ::graphql_orm::graphql::subscriptions::ChangedEventView<'_, Self::Row>
+            {
+                ::graphql_orm::graphql::subscriptions::ChangedEventView {
+                    action: event.action,
+                    kind: event.change_kind,
+                    source_entity: event.source_entity.as_deref(),
+                    source_id: event.source_id.as_deref(),
+                    path: &event.path,
+                    entity: event.entity.as_ref(),
+                }
+            }
+            fn payload(
+                event: &Self::Event,
+                row: ::std::option::Option<Self::Row>,
+            ) -> Self::Payload {
+                let (source_entity, source_id, path) = if row.is_some() {
+                    (
+                        event.source_entity.clone(),
+                        event.source_id.clone(),
+                        event.path.clone(),
+                    )
+                } else {
+                    (
+                        ::std::option::Option::None,
+                        ::std::option::Option::None,
+                        ::std::vec::Vec::new(),
+                    )
+                };
+                let __gom_event = RecordChangedEvent {
+                    action: event.action,
+                    change_kind: event.change_kind,
+                    id: event.id.clone(),
+                    source_entity,
+                    source_id,
+                    path,
+                    entity: row,
+                };
+                __gom_event
+            }
+            fn started_payload() -> ::std::option::Option<Self::Payload> {
+                ::std::option::Option::None
+            }
+            fn authorize_resolver(
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+            ) -> ::graphql_orm::async_graphql::Result<()> {
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(
+                    ctx,
+                    ::std::option::Option::None,
+                )?;
+                ::graphql_orm::graphql::orm::ensure_rls_request_context::<
+                    Record,
+                    ::graphql_orm::SqliteBackend,
+                >(
+                    ctx,
+                    <Record as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                )?;
+                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription,
+                )
+            }
+            fn authorize_operation(
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+            ) -> ::graphql_orm::async_graphql::Result<()> {
+                Record::__gom_authorize_changed_operation(ctx)
+            }
+        }
+        ::graphql_orm::graphql::subscriptions::open_generated_changed::<
+            ::graphql_orm::SqliteBackend,
+            __GomRecordChangedSubscriptionAdapter,
+        >(ctx, _filter, key, keys, false)
+        .await
     }
 }

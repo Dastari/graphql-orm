@@ -1,13 +1,13 @@
 //! PostgreSQL canonical change-journal keys and their cutover boundary.
 
 use super::rls;
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 use sqlx::PgConnection;
 
 const EPOCH_PREFIX: &str = "graphql_orm_canonical_keys_v1_";
 pub(super) const ADMIN_LOCK: &str =
     "SELECT pg_catalog.pg_advisory_xact_lock(421736070207429592::pg_catalog.int8)";
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 const JOURNAL: &str = "\"__graphql_orm_change_log\"";
 
 // Only built-in scalar types with a known binary format are allowed. In
@@ -112,7 +112,7 @@ pub(super) fn install_type_check(key_literal: &str) -> String {
 
 /// Read the type OID (which includes the width of fixed-width types) and the
 /// type modifier (e.g. numeric precision/scale) of a supported live key.
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 pub(super) async fn key_type(
     conn: &mut PgConnection,
     table: &str,
@@ -142,7 +142,7 @@ pub(super) async fn key_type(
     }
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 async fn registered_tables(conn: &mut PgConnection) -> crate::Result<Vec<(String, String)>> {
     sqlx::query_as(&format!(
         "SELECT pg_catalog.format('%I.%I', n.nspname, c.relname), r.key_column
@@ -161,7 +161,7 @@ async fn registered_tables(conn: &mut PgConnection) -> crate::Result<Vec<(String
     .await
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 pub(super) async fn epoch(conn: &mut PgConnection) -> crate::Result<Option<i64>> {
     let (epochs, has_marker_column): (Vec<String>, bool) = sqlx::query_as(&format!(
         "SELECT ARRAY(
@@ -211,8 +211,8 @@ pub(super) async fn epoch(conn: &mut PgConnection) -> crate::Result<Option<i64>>
     Ok(start)
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
-pub(super) async fn enable(pool: &crate::DbPool) -> crate::Result<i64> {
+#[cfg(feature = "postgres")]
+pub(super) async fn enable(pool: &sqlx::PgPool) -> crate::Result<i64> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
@@ -297,7 +297,7 @@ pub(super) async fn enable(pool: &crate::DbPool) -> crate::Result<i64> {
     Ok(start)
 }
 
-#[cfg(all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql"))))]
+#[cfg(feature = "postgres")]
 fn invalid_epoch() -> sqlx::Error {
     sqlx::Error::Protocol("canonical change journal boundary is invalid".into())
 }

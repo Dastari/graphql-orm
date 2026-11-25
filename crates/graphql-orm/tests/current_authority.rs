@@ -1256,6 +1256,14 @@ impl agql_auth::RefreshTokenStore for LoginStore {
     ) -> AuthResult<()> {
         Err(AuthError::AuthServiceUnavailable)
     }
+    async fn revoke_refresh_tokens_for_user(
+        &self,
+        _: &str,
+        _: OffsetDateTime,
+        _: agql_auth::RefreshTokenRevocationReason,
+    ) -> AuthResult<u64> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
     async fn touch_refresh_token(
         &self,
         _: uuid::Uuid,

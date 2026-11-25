@@ -244,6 +244,8 @@ pub async fn create_full_backup_with_options(
     request: FullBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<FullBackupResult, BackupError> {
+    database.ensure_backup_restore_allowed()?;
+    objects.ensure_backup_allowed()?;
     // Refuse before writing payloads that no sealed manifest would reference.
     required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "full_backup").await?;
@@ -396,6 +398,8 @@ pub async fn create_incremental_backup_with_options(
     request: IncrementalBackupRequest,
     options: &BackupExecutionOptions,
 ) -> Result<IncrementalBackupResult, BackupError> {
+    database.ensure_backup_restore_allowed()?;
+    objects.ensure_backup_allowed()?;
     required_authenticator(repository)?.require_repository_identity()?;
     let lock = RepositoryLock::acquire_for(repository, &options.lock, "incremental_backup").await?;
     let snapshot_id = request.snapshot_id;

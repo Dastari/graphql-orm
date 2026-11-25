@@ -653,3 +653,173 @@ async fn read_snapshot_refuses_backup_target_clear() -> Result<(), Box<dyn std::
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "orm-postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn externally_managed_database_refuses_adapter_and_repository_operations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm_backup::{
+        IncrementalBackupRequest, OrmBackupObjectIndex, OrmObjectIndexColumns,
+        create_incremental_backup, plan_full_backup,
+    };
+    use graphql_orm_storage::LocalStorageBackend;
+
+    #[cfg(feature = "orm-postgres")]
+    let pool = owned_postgres::OwnedPostgres::pool("external-backup-adapter", 1).await?;
+    #[cfg(feature = "orm-postgres")]
+    graphql_orm::sqlx::query("SET statement_timeout = '5s'")
+        .execute(&pool)
+        .await?;
+    #[cfg(feature = "orm-sqlite")]
+    let pool = setup_pool().await?;
+
+    let catalog = catalog()?;
+    let owned = Database::new(pool.clone());
+    apply_schema(&owned, &catalog).await?;
+    let db = Arc::new(
+        Database::builder(pool.clone())
+            .externally_managed_backup_restore(true)
+            .build(),
+    );
+    graphql_orm::sqlx::query("INSERT INTO conformance_identity_accounts (id, name, secret) VALUES ('a8bcc8ec-a7ee-4a13-8516-2ac3952e9aed', 'original', 'original')")
+        .execute(&pool)
+        .await?;
+
+    let owned_adapter = OrmBackupAdapter::new(Arc::new(owned), catalog.entities().to_vec());
+    let schema = owned_adapter.schema_snapshot().await?;
+    let rows = owned_adapter.export_full().await?;
+    let adapter = OrmBackupAdapter::new(db.clone(), catalog.entities().to_vec());
+    let temp = TempDir::new()?;
+    let object_store = TempDir::new()?;
+    let external_index = OrmBackupObjectIndex::new(
+        db,
+        catalog.entities().to_vec(),
+        OrmObjectIndexColumns {
+            table_name: "conformance_identity_accounts".into(),
+            object_id_column: "id".into(),
+            storage_key_column: "name".into(),
+            sha256_hex_column: "secret".into(),
+            size_bytes_column: "size".into(),
+            mime_type_column: None,
+        },
+        Arc::new(LocalStorageBackend::new(object_store.path())),
+    );
+    let repository = LocalBackupRepository::new(temp.path())
+        .with_manifest_authenticator(test_manifest_authenticator());
+    let objects = FixedObjectIndex {
+        object: BackupObjectRef {
+            object_id: Uuid::new_v4(),
+            storage_key: "object".into(),
+            sha256_hex: bytes_sha256_hex(&[]),
+            size_bytes: 0,
+            mime_type: None,
+        },
+        bytes: Bytes::new(),
+    };
+    let full = FullBackupRequest {
+        snapshot_id: Uuid::new_v4(),
+        created_at: 0,
+        app_id: "external-backup".into(),
+        app_version: "1".into(),
+    };
+    let incremental = IncrementalBackupRequest {
+        snapshot_id: Uuid::new_v4(),
+        parent_snapshot_id: full.snapshot_id,
+        created_at: 0,
+        app_id: full.app_id.clone(),
+        app_version: full.app_version.clone(),
+    };
+
+    for error in [
+        external_index
+            .list_objects_for_full_backup()
+            .await
+            .unwrap_err(),
+        external_index
+            .list_objects_for_incremental_backup(full.snapshot_id)
+            .await
+            .unwrap_err(),
+        external_index
+            .objects_from_full_export(&rows)
+            .await
+            .unwrap_err(),
+        external_index
+            .objects_from_incremental_export(full.snapshot_id, &[])
+            .await
+            .unwrap_err(),
+        external_index
+            .load_object(&objects.object)
+            .await
+            .unwrap_err(),
+        external_index
+            .load_object_stream(&objects.object)
+            .await
+            .expect_err("stream refusal"),
+        plan_full_backup(&owned_adapter, &external_index)
+            .await
+            .unwrap_err(),
+        create_full_backup(&repository, &owned_adapter, &external_index, full.clone())
+            .await
+            .unwrap_err(),
+        adapter.current_schema_snapshot().await.unwrap_err(),
+        adapter.schema_snapshot().await.unwrap_err(),
+        adapter.export_full().await.unwrap_err(),
+        adapter
+            .export_incremental(full.snapshot_id)
+            .await
+            .unwrap_err(),
+        adapter.restore_target_is_empty().await.unwrap_err(),
+        adapter.clear_restore_target().await.unwrap_err(),
+        adapter
+            .restore_full(schema, rows, RestoreContext::empty_database())
+            .await
+            .unwrap_err(),
+        adapter
+            .restore_incremental(vec![], RestoreContext::empty_database())
+            .await
+            .unwrap_err(),
+        plan_full_backup(&adapter, &objects).await.unwrap_err(),
+        create_full_backup(&repository, &adapter, &objects, full.clone())
+            .await
+            .unwrap_err(),
+        create_incremental_backup(&repository, &adapter, &objects, incremental)
+            .await
+            .unwrap_err(),
+        restore_snapshot(
+            &repository,
+            &adapter,
+            full.snapshot_id,
+            RestoreContext::empty_database(),
+        )
+        .await
+        .unwrap_err(),
+        restore_snapshot(
+            &repository,
+            &adapter,
+            full.snapshot_id,
+            RestoreContext::dry_run(),
+        )
+        .await
+        .unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, BackupError::BackupRestoreExternallyManaged(_)),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("BACKUP_RESTORE_EXTERNALLY_MANAGED")
+        );
+        assert_eq!(std::fs::read_dir(temp.path())?.count(), 0);
+    }
+    let name: String =
+        graphql_orm::sqlx::query_scalar("SELECT name FROM conformance_identity_accounts")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(name, "original");
+    Ok(())
+}

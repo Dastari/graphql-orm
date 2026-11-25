@@ -11,6 +11,17 @@ pub(crate) const CANONICAL_KEY_SCHEMA_PREFIX: &str = "pg-canonical-keys-v1:";
 #[async_trait]
 /// Database integration contract used by backup and restore operations.
 pub trait GraphqlOrmBackupAdapter: Send + Sync {
+    /// Check whether the database permits backup and restore before touching
+    /// it or the repository. The default permits both.
+    ///
+    /// # Errors
+    ///
+    /// Returns a refusal when the adapter is configured to disallow backup
+    /// and restore. Implementations must perform this check without I/O.
+    fn ensure_backup_restore_allowed(&self) -> Result<(), BackupError> {
+        Ok(())
+    }
+
     /// Returns backup-relevant schema metadata.
     ///
     /// # Errors
@@ -132,11 +143,12 @@ pub(crate) fn canonical_key_storage_mismatch(expected: &str, actual: &str) -> Op
     };
     let expected = parse(expected)?;
     let actual = parse(actual)?;
-    let (table_name, column_name) = expected
-        .keys()
-        .chain(actual.keys())
-        .find(|key| expected.get(*key) != actual.get(*key))?
-        .clone();
+    if expected.keys().ne(actual.keys()) {
+        return None;
+    }
+    let ((table_name, column_name), _) = expected
+        .into_iter()
+        .find(|(key, storage)| actual.get(key) != Some(storage))?;
     Some(BackupError::CanonicalKeyStorageMismatch {
         table_name,
         column_name,
@@ -240,4 +252,34 @@ pub struct BackupChangeExport {
     pub row: Option<BackupRow>,
     /// Change time as UTC Unix seconds.
     pub changed_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_entity_set_changes_report_restore_schema_mismatch() {
+        let base = format!(
+            "{CANONICAL_KEY_SCHEMA_PREFIX}base:{}",
+            r#"[["records","id",[23,-1]]]"#
+        );
+        let extended = format!(
+            "{CANONICAL_KEY_SCHEMA_PREFIX}extended:{}",
+            r#"[["extra","id",[23,-1]],["records","id",[20,-1]]]"#
+        );
+
+        for (backup, target) in [(&base, &extended), (&extended, &base)] {
+            let schema = GraphqlOrmBackupSchema {
+                backend: "postgres".into(),
+                migration_version: "1".into(),
+                schema_hash: backup.clone(),
+            };
+            let result = schema.ensure_restore_compatible("postgres", target);
+            assert!(
+                matches!(result, Err(BackupError::RestoreSchemaMismatch { .. })),
+                "{result:?}"
+            );
+        }
+    }
 }

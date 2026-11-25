@@ -445,6 +445,7 @@ async fn verify_restore_schema(
 ///
 /// # Errors
 ///
+/// Returns an adapter's backup and restore policy refusal before accessing the repository.
 /// Returns [`BackupError::RestoreStageFailed`] with phase/progress metadata and
 /// the original cause when locking, validation, payload preparation or adapter
 /// apply fails, and [`BackupError::LockReleaseFailed`] if the restore completed
@@ -484,6 +485,7 @@ pub async fn restore_snapshot_with_options(
     context: RestoreContext,
     options: &RestoreOptions,
 ) -> Result<RestoreResult, BackupError> {
+    database.ensure_backup_restore_allowed()?;
     let validation_error = |source| {
         restore_stage_error(
             snapshot_id,

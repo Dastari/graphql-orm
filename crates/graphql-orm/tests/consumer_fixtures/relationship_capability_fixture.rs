@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 
-use super::fixture_target;
+use super::fixture_build_dir;
 
 #[test]
 fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {
@@ -9,10 +9,7 @@ fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {
         "/../graphql-orm-macros/fixtures/relationship-capability/Cargo.toml"
     );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    // The fixture's services use the PascalCase naming contract (#508). A
-    // separate target directory keeps the camelCase fixtures' graphql-orm
-    // build from being rebuilt on every switch.
-    let target_dir = fixture_target::target_dir().join("pascal-case");
+    let target_dir = fixture_build_dir("relationship-capability");
     let status = std::process::Command::new(cargo)
         .env("CARGO_TARGET_DIR", target_dir)
         .env("GRAPHQL_ORM_RESOLVER_CASE", "PascalCase")

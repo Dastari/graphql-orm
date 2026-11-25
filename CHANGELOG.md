@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,12 +14,189 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.207.0
+## Unreleased - ORM/macros 0.220.0
 
 - PostgreSQL hosts can opt into canonical change-journal keys (#592). The
   recorder and full snapshot use the same encoding for single-column keys.
   The cutover retires legacy cursors and requires a new full backup.
-  [Migration](MIGRATION.md#02030-to-02070-canonical-postgresql-journal-keys)
+  [Migration](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys)
+
+## Unreleased - ORM/macros 0.219.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
+
+## Unreleased - ORM/macros 0.218.0
+
+- **Added (#898).** A readable composite relation can declare
+  `server_only_key(from = "...", to = "...")` for a key pair whose target
+  column is server-only (`#[graphql_orm(private)]` with no other GraphQL
+  surface). Generated traversal still joins on the complete tuple, so a target
+  in another partition resolves to `null` or an empty list. The column stays
+  out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
+  with `filter`, `order_aggregate`, `search_relation` or upward propagation is
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
+  [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
+
+## Unreleased - ORM/macros 0.215.0
+
+- **Added (#522).** SQL Server pools can opt in to binding the SQL types
+  declared on generated fields. Eligible ASCII VARCHAR comparisons convert
+  the parameter. Policies, patterns and non-ASCII text retain Unicode binding.
+  INT, SMALLINT and TINYINT can use their native widths. Generated unsigned
+  values outside the declared SQL Server range return `INVALID_INPUT`.
+- **Fixed (#849).** SQL Server character column ALTER statements use the parsed
+  column name when looking up collation, including literal brackets.
+
+## Unreleased - ORM/macros 0.214.0
+
+- **Changed (#857).** The `auth-agql` adapter uses published `agql-auth`
+  `v0.27.0`, locked to `71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+  Upgrade direct Auth dependencies with the ORM.
+  [Migration](MIGRATION.md#02130-to-02140-agql-auth-v0270)
+
+## Unreleased - ORM/macros 0.213.0
+
+- **Fixed (#887, #888).** Compile UI tests coordinate on Cargo's resolved
+  target directory. Consumer fixture builds initialize their own target
+  directories before launching Cargo.
+  [Migration](MIGRATION.md#02120-to-02130-test-harness-coordination)
+
+## Unreleased - ORM/macros 0.212.0
+
+- **Fixed (#882).** An admitted owned SQLite migration with a single column
+  drop can preserve unrelated indexes and incoming foreign keys using native
+  `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
+  drop and history updates commit together.
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
+
+## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
+
+- **Fixed (#883).** Described roots returning a registered generated entity
+  use its schema-bound semantic metadata, including generated list
+  relationship page limits. When distinct Rust types claim the same GraphQL
+  name, catalogue composition reports both sources.
+  [Migration](MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+## Unreleased - ORM/macros 0.210.0, operation catalogue 0.13.0
+
+- **Added (#851).** `#[graphql_entity(update_expected_version = "required")]`
+  makes the generated update's `ExpectedVersion` non-null (`Int!`) in the SDL
+  and the operation catalogue. An omitted or null value is refused by
+  validation, a stale one with `CONFLICT`, and a matching one advances the
+  managed version once. Delete keeps its optional argument.
+- **Added (#851).** `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+  selects the generated update's assurance policy per request from the typed
+  patch and the locked row. The selection runs inside the write transaction,
+  after the row is locked and before any write. A refusal rolls back the
+  transaction with its related writes and commits no `Changed` event.
+  `UpdateAssuranceInput` and `enforce_selected_assurance` are new. Enforcement
+  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level, or
+  for a schema without `AssuranceEnforcement`, which is checked before the
+  selector runs. A selector error or panic reaches the client only as a fixed
+  `INTERNAL_ERROR`. A row whose managed version cannot advance is refused
+  before the selector runs. The chosen level is observable to the caller, as the
+  reference documents.
+- **Added (operation catalogue, #851).** `GraphqlConditionalAssurance` and
+  `conditional_assurance()` on generated and resolved descriptors list the
+  levels an operation may require and mark the selection as conditional. The
+  declaration is part of the operation and router-export fingerprints. Both
+  options require an entity that generates neither `update_many` nor `upsert`
+  and declares no `set_null` relation. `RuntimeSchema::from_static_entities*`
+  refuses such entities, whichever typed constructor built their metadata.
+  Entities that opt into neither keep byte-identical SDL, catalogues,
+  fingerprints and debug output.
+
+## Unreleased - ORM/macros 0.209.0
+
+- `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key
+  check to hosts using external migration tools, including SQL Server (#878).
+  [Migration](MIGRATION.md#02080-to-02090-external-migration-preflight)
+
+## Unreleased - ORM/macros 0.208.0
+
+- **Added (#852).** Typed transactions can delete a bounded key set or scalar
+  filter match with one DELETE for opted-in mutable entities. The operation
+  checks row write authorization and exact cardinality, runs per-row delete
+  hooks and queues the generated change notifications.
+  [Migration](MIGRATION.md#02070-to-02080-bounded-set-based-deletes)
+
+## Unreleased - ORM/macros 0.207.0
+
+- **Security fix (#876).** From ORM/macros 0.200.0 through 0.206.0, a SQLite
+  closure read predicate (`related_closure_within` and its shorthands) could
+  reach a different verdict than the original rendering when its pointer
+  column's collation treats values as equal that the key column distinguishes,
+  for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY` key. The
+  compact walk deduplicated such pointers (`'a'` and `'A'`, or `'a'` and
+  `'a '`) at the same depth and followed only one of them, so an `Any`
+  closure could deny a row that the original rendering admits. A randomized
+  search found no over-admission, but it is not proven impossible, because
+  SQLite does not guarantee which equal pointer survives. SQLite now renders
+  every closure, single-level and nested, in the original form, byte for
+  byte as before 0.200.0. PostgreSQL and SQL Server are not affected.
+- **No action.** On PostgreSQL and SQL Server, directly nested closure read
+  predicates over built-in column tests can reuse the inner closure's scalar
+  result, reducing SQL and bind duplication. The admitted rows are unchanged
+  on all three backends (#785).
+
+## Unreleased - ORM/macros 0.206.0 and backup 0.30.0
+
+- **Fixed (#870).** SQLite and PostgreSQL database handles expose the backup
+  runtime in multi-backend builds. The ready-made backup adapter and object
+  index use the handle selected by their own feature.
+  [Migration](MIGRATION.md#02050-to-02060-backend-typed-backup-runtime)
+
+## Unreleased - ORM/macros 0.205.0
+
+- **Changed (part of #677, #358).** Generated Changed subscriptions share
+  the runtime's stream and authorization code, reducing the work rustc does
+  for each entity with subscriptions enabled.
+  **No action.** See the
+  [migration guide](MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+- **Added.** Changed subscriptions support combining `changed_started = true`
+  with `key_only_deletes`. An authorized exact-key subscriber can request a
+  started frame and receive key-only `DELETED` frames with `started: false`.
+
+## Unreleased - ORM/macros 0.204.0 and backup 0.29.0
+
+- **Added (follow-up to #731).** Opt in per database when another product
+  owns backup and restore. The ORM and its backup adapter refuse backup and
+  restore before I/O. SQL Server queries and writes on opted-in handles
+  run without the restore marker or fencing lock.
+  [Migration](MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore)
 
 ## Unreleased - ORM/macros 0.203.0
 
