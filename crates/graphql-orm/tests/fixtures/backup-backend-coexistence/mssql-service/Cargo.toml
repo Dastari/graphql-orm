@@ -1,0 +1,11 @@
+[package]
+name = "mssql-service"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+graphql-orm = { path = "../../../../", default-features = false, features = ["mssql"] }
+
+[features]
+sqlite = ["graphql-orm/sqlite"]

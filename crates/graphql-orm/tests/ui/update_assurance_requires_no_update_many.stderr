@@ -1,0 +1,5 @@
+error: update_expected_version = "required" requires mutation_shapes without update_many: a bulk update writes existing rows without a per-row ExpectedVersion or assurance selection
+ --> tests/ui/update_assurance_requires_no_update_many.rs:6:63
+  |
+6 | #[graphql_entity(table = "reviews", update_expected_version = "required")]
+  |                                                               ^^^^^^^^^^

@@ -10,6 +10,92 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
+## Unreleased - 0.162.0
+
+- Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
+  The release benchmark can measure startup separately and export a byte
+  snapshot of the catalogue and model-facing output.
+  [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
+
+## Unreleased - 0.160.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01590-to-01600)
+
+## Unreleased - 0.159.0
+
+- Codex app-server registrations can opt into resolved entity-reference
+  delivery when the host process overrides `start_dispatch_turn`. The host
+  process implementation and its writer are inside the trust boundary. The
+  freshness bound and kill on an abandoned resolved write apply to the writer
+  passed to the protocol actor. Pass the child's stdin directly. A queueing
+  writer can acknowledge the frame before the actual pipe write.
+- For all Codex hosts, the protocol actor filters known user-message echoes
+  and empties thread previews as a best-effort defence-in-depth measure.
+  Tool-free Codex turns also accept entity references. Direct runtime calls
+  permanently send markers (#721).
+
+## Unreleased - 0.158.0
+
+- **Action needed.** Apply the checked SQL Server schema upgrade so claim and
+  expired-lease recovery candidate reads can seek on run state (#848).
+- **Action needed.** Drain workers on all backends before opening the successor
+  epoch under AI schema module 0.85.0.
+
+## Unreleased - 0.157.0
+
+- **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
+  can admit replacement of the legacy approval lookup index with the unique
+  `tool_call_id` index. The live index must match the legacy definition, and
+  duplicate approval keys stop the upgrade before any DDL.
+  [Migration](MIGRATION.md#01560-to-01570)
+
+## Unreleased - 0.156.0
+
+Model-context measurement for the fixed capability broker (#551). Requires AI
+tool profiles 0.28.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change, and no AI schema module change. See the
+[migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
+
+- **Added:** the `capability_context_benchmark` example (requires the
+  `sqlite` feature) stamps a realistic generated entity family across 1, 10
+  and 100 independent targets and drives the version 2 broker as the
+  coordinator does, including the coordinator's describe steps (the exact
+  model definition and its fingerprint, the signature, and the describe byte
+  bounds). It reports first-turn definition bytes, discover,
+  describe and `describe_type` result bytes, discover latency, a restricted
+  caller's candidates, whether an unrelated target's schema change rotates a
+  retained binding, startup time and peak memory, and the bytes eager
+  delivery of the same roots would cost. Results and the measured curve are
+  in [capability discovery and execution](docs/capability-discovery-and-execution.md#model-context-benchmark).
+- **Performance:** with AI tool profiles 0.28.0, a host that supplies one
+  index through `AiCurrentCapabilityIndex` no longer pays a cost that grows
+  with the index on every broker call. Describe and `describe_type` no longer
+  regenerate a capability's compact schema on every call.
+
 ## Unreleased - 0.155.0
 
 - Exported AI query, mutation, and subscription roots declare their GraphQL

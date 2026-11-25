@@ -1,4 +1,5 @@
 use crate::dependent_deletes::Boundary;
+use crate::entity::UpdateAssuranceMetadata;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -25,6 +26,8 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
     pub(in crate::operations) rls_request_guard: &'a TokenStream,
     pub(in crate::operations) update_scope_enforcement: &'a TokenStream,
+    /// Declared conditional assurance selector (#851), if any.
+    pub(in crate::operations) update_assurance: Option<&'a UpdateAssuranceMetadata>,
     pub(in crate::operations) dependent_deletes: bool,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
@@ -80,6 +83,7 @@ pub(in crate::operations) fn update(
         resolver_auth_mode,
         rls_request_guard,
         update_scope_enforcement,
+        update_assurance,
         dependent_deletes,
         backend_marker,
         entity_name_lit,
@@ -116,6 +120,36 @@ pub(in crate::operations) fn update(
     let after_transform = Boundary::AfterTransform.emit(dependent_deletes);
     let field_checks_start = Boundary::FieldChecksStart.emit(dependent_deletes);
     let field_checks_end = Boundary::FieldChecksEnd.emit(dependent_deletes);
+    // #851: select and enforce the request's assurance level from the patch the
+    // write applies and the locked row, inside the transaction and before the
+    // `Before` hook and the UPDATE. A refusal returns before any commit, so
+    // the transaction (and every related write in it) rolls back.
+    let selected_assurance = match update_assurance {
+        Some(selector) => {
+            let select = &selector.select;
+            let levels = &selector.levels;
+            quote! {
+                // Enforcement is checked first, so a schema without it is
+                // refused before the selector reads the row.
+                ::graphql_orm::graphql::assurance::enforce_selected_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
+                    #update_mutation_name,
+                    &[#(#levels),*],
+                    || -> ::graphql_orm::async_graphql::Result<&'static str> {
+                        #select(
+                            ::graphql_orm::graphql::assurance::UpdateAssuranceInput::<#struct_name, #update_input>::new(
+                                &current_entity,
+                                &input,
+                                #update_mutation_name,
+                            ),
+                        )
+                    },
+                )?;
+            }
+        }
+        None => quote! {},
+    };
 
     // A GraphQL input object must declare at least one field, so the update
     // input and the roots that accept it exist only with a public member.
@@ -254,8 +288,11 @@ pub(in crate::operations) fn update(
                 if set_clauses.is_empty() {
                     return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput, "No fields to update"));
                 }
+                // A row whose managed version cannot advance is refused before
+                // the assurance selection (#851).
                 #struct_name::__gom_require_managed_version_headroom(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #selected_assurance
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);

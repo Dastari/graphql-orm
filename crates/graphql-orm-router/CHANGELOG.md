@@ -10,11 +10,19 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.17.1
+## Unreleased - 0.19.0
 
 - **Test coverage (#668).** The WebSocket gateway smoke test exercises
   forwarding an opaque resume cursor to a subgraph and passing back its
   change, started and reset-required frames.
+
+## Unreleased - 0.18.0
+
+- **Action needed (#857).** The `auth-agql` feature uses published
+  `agql-auth` `v0.27.0`, including its stricter validator defaults.
+  File configuration rejects exact-only scope patterns with wildcards
+  embedded inside segments.
+  [Migration](MIGRATION.md#0170-to-0180-agql-auth-v0270)
 
 ## Unreleased - 0.17.0 (breaking release)
 

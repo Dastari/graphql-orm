@@ -872,6 +872,173 @@ pub(crate) fn enforce_check(check: &AssuranceCheck<'_>) -> async_graphql::Result
     }
 }
 
+/// What a conditional update-assurance selector decides from.
+///
+/// A generated update whose entity declares
+/// `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+/// calls `path(UpdateAssuranceInput<'_, Entity, UpdateEntityInput>)` once per
+/// request. The call happens inside the write transaction, after the target
+/// row is locked, authorized and version-checked, after write transforms and
+/// field policies have produced the patch the write applies, and before the
+/// `Before` mutation hook and the `UPDATE`. The selector returns one declared
+/// level, an assurance policy ID, which [`enforce_selected_assurance`] then
+/// enforces. A refusal or an error rolls back the transaction, and no
+/// `Changed` event is committed.
+///
+/// A selector should be a pure function of the patch and the current row.
+///
+/// The row is the full locked preimage, read once the principal's write
+/// access to it is authorized. Read authorization is not re-checked for the
+/// selector. The selected level is observable to the caller, because the
+/// request either succeeds or is refused for step-up. A selector must
+/// therefore branch only on the patch and on fields the writing principal may
+/// read. A selector error never reaches the client: see
+/// [`enforce_selected_assurance`].
+#[derive(Clone, Copy)]
+pub struct UpdateAssuranceInput<'a, E, P> {
+    current: &'a E,
+    patch: &'a P,
+    field_name: &'a str,
+}
+
+impl<'a, E, P> UpdateAssuranceInput<'a, E, P> {
+    /// Constructs selector input. Public only for derive output.
+    #[doc(hidden)]
+    pub const fn new(current: &'a E, patch: &'a P, field_name: &'a str) -> Self {
+        Self {
+            current,
+            patch,
+            field_name,
+        }
+    }
+
+    /// The locked current row, as read inside the write transaction.
+    pub const fn current(&self) -> &'a E {
+        self.current
+    }
+
+    /// The typed field patch the write applies. A member left `None` does not
+    /// change its column.
+    pub const fn patch(&self) -> &'a P {
+        self.patch
+    }
+
+    /// Exact Mutation root field name of the update.
+    pub const fn field_name(&self) -> &'a str {
+        self.field_name
+    }
+}
+
+impl<E, P> fmt::Debug for UpdateAssuranceInput<'_, E, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateAssuranceInput")
+            .field("field_name", &self.field_name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Runs a conditional selector and enforces the level it chooses for a root.
+///
+/// Generated updates with `update_assurance(...)` call this inside the write
+/// transaction, after the row is locked, authorized and version-checked, and
+/// in addition to the registry classification that
+/// [`enforce_resolver_assurance`] checked before the row was read.
+///
+/// It fails closed, in this order:
+///
+/// 1. Without an installed [`AssuranceEnforcement`], it refuses with
+///    `AUTHORIZATION_MISCONFIGURED` and never calls `select`.
+/// 2. It calls `select` once. Any error it returns, including its
+///    extensions and source, and any panic, is replaced by one fixed
+///    `INTERNAL_ERROR` with the default message. The host's error message is
+///    logged server-side only; a panic payload is not formatted at all.
+///    Nothing of either reaches the client.
+/// 3. A level outside `declared_levels` is refused with
+///    `AUTHORIZATION_MISCONFIGURED`.
+/// 4. The installed evaluator decides the level for the operation's
+///    registered actor class (interactive when the operation is not
+///    registered). The level is enforced whatever the registry
+///    classification, an exemption included. The evaluator's own refusal is
+///    returned unchanged.
+///
+/// The selected level is observable to the caller: a request either succeeds
+/// or is refused with the evaluator's step-up or forbidden error. A selector
+/// therefore discloses whatever it branches on. It should branch only on the
+/// patch and on fields the writing principal may read.
+pub fn enforce_selected_assurance<'s, F>(
+    ctx: &async_graphql::Context<'_>,
+    kind: GraphqlOperationKind,
+    field_name: &str,
+    declared_levels: &[&str],
+    select: F,
+) -> async_graphql::Result<()>
+where
+    F: FnOnce() -> async_graphql::Result<&'s str>,
+{
+    let check = AssuranceCheck::from_field(ctx, kind, field_name);
+    enforce_selected_check(&check, declared_levels, select)
+}
+
+fn enforce_selected_check<'s>(
+    check: &AssuranceCheck<'_>,
+    declared_levels: &[&str],
+    select: impl FnOnce() -> async_graphql::Result<&'s str>,
+) -> async_graphql::Result<()> {
+    let (kind, field_name) = (check.kind, check.field_name);
+    let Some(enforcement) = check.data_opt::<AssuranceEnforcement>() else {
+        return Err(configuration_error(format!(
+            "conditional assurance for {}.{field_name} requires installed AssuranceEnforcement",
+            kind.root_type()
+        )));
+    };
+    let selector_failure = |internal: String| {
+        crate::graphql::errors::OrmPublicError::new(
+            crate::graphql::errors::OrmErrorCode::InternalError,
+        )
+        .with_internal(internal)
+        .into_graphql_error()
+    };
+    // A panic is contained here: the caller then returns before any write and
+    // its transaction rolls back. The payload is never formatted.
+    let selected = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(select)) {
+        Ok(Ok(selected)) => selected,
+        Ok(Err(error)) => {
+            return Err(selector_failure(format!(
+                "assurance selector for {}.{field_name} failed: {}",
+                kind.root_type(),
+                error.message
+            )));
+        }
+        Err(payload) => {
+            // Dropping the payload runs its destructor, which is host code and
+            // can panic again. Contain that too. A second payload is leaked:
+            // a bounded leak on a host bug beats unwinding out of the request.
+            if let Err(second) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(second);
+            }
+            return Err(selector_failure(format!(
+                "assurance selector for {}.{field_name} panicked",
+                kind.root_type()
+            )));
+        }
+    };
+    if !declared_levels.contains(&selected) {
+        return Err(configuration_error(format!(
+            "assurance selector for {}.{field_name} chose an undeclared level",
+            kind.root_type()
+        )));
+    }
+    let actor_class = enforcement
+        .registry
+        .operation(kind, field_name)
+        .map_or(AssuranceActorClass::Interactive, |operation| {
+            operation.actor_class
+        });
+    enforcement.evaluator.enforce(check, actor_class, selected)
+}
+
 /// Async-GraphQL guard for custom resolver fields.
 #[derive(Clone, Copy, Debug)]
 pub struct DeclaredAssuranceGuard {

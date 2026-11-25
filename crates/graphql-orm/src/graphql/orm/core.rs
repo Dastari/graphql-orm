@@ -55,11 +55,131 @@ pub enum SqlValue {
     Bool(bool),
     /// Typed null for boolean values.
     BoolNull,
+    /// Scalar with an explicitly declared SQL Server parameter type.
+    #[doc(hidden)]
+    MssqlTyped(MssqlTypedValue),
     /// Compatibility null that binds as text, including on PostgreSQL and SQL Server.
     ///
     /// Use the variant that matches the destination type when it is known, such
     /// as [`Self::UuidNull`] for a UUID or [`Self::BytesNull`] for binary data.
     Null,
+}
+
+/// A scalar together with its declared SQL Server type.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MssqlTypedValue {
+    value: Box<SqlValue>,
+    parameter_type: MssqlParameterType,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MssqlParameterType {
+    VarChar(Option<u16>),
+    Int,
+    SmallInt,
+    TinyInt,
+    UnsignedOverflow,
+}
+
+impl MssqlTypedValue {
+    pub(crate) fn value(&self) -> &SqlValue {
+        &self.value
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) fn parameter_type(&self) -> MssqlParameterType {
+        self.parameter_type
+    }
+}
+
+impl SqlValue {
+    /// Carry a canonical SQL Server integer declaration into the driver binder.
+    #[doc(hidden)]
+    pub fn with_mssql_type(self, sql_type: &str) -> Self {
+        let parameter_type = match &self {
+            Self::Int(_) | Self::IntNull => match sql_type {
+                "INT" => Some(MssqlParameterType::Int),
+                "SMALLINT" => Some(MssqlParameterType::SmallInt),
+                "TINYINT" => Some(MssqlParameterType::TinyInt),
+                _ => None,
+            },
+            _ => None,
+        };
+        match parameter_type {
+            Some(parameter_type) => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(self),
+                parameter_type,
+            }),
+            None => self,
+        }
+    }
+
+    // Limit VARCHAR conversion to printable ASCII, which round-trips
+    // through the SQL Server VARCHAR code pages without best-fit mapping.
+    pub(super) fn mssql_varchar_comparison(value: String, sql_type: &str) -> Self {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            && let Some(length) = sql_type
+                .strip_prefix("VARCHAR(")
+                .and_then(|s| s.strip_suffix(')'))
+        {
+            let length = if length == "MAX" {
+                None
+            } else if let Ok(length) = length.parse::<u16>()
+                && (1..=8000).contains(&length)
+            {
+                Some(length)
+            } else {
+                return Self::String(value);
+            };
+            return Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value)),
+                parameter_type: MssqlParameterType::VarChar(length),
+            });
+        }
+        Self::String(value)
+    }
+
+    /// Convert an unsigned SQL Server operand without wrapping through BIGINT.
+    ///
+    /// Preserve an out-of-range value until the fallible SQL bind boundary, so
+    /// infallible generated key builders can carry the refusal to the caller.
+    #[doc(hidden)]
+    pub fn mssql_unsigned(value: u64, sql_type: &str) -> Self {
+        let maximum = match sql_type {
+            "TINYINT" => u64::from(u8::MAX),
+            "SMALLINT" => i16::MAX as u64,
+            "INT" => i32::MAX as u64,
+            _ => i64::MAX as u64,
+        };
+        match i64::try_from(value) {
+            Ok(signed) if value <= maximum => Self::Int(signed),
+            _ => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value.to_string())),
+                parameter_type: MssqlParameterType::UnsignedOverflow,
+            }),
+        }
+    }
+
+    pub(crate) fn into_policy_bind(self) -> Self {
+        match self {
+            Self::MssqlTyped(typed)
+                if typed.parameter_type != MssqlParameterType::UnsignedOverflow =>
+            {
+                *typed.value
+            }
+            value => value,
+        }
+    }
+
+    pub(crate) fn without_mssql_type(&self) -> &Self {
+        match self {
+            Self::MssqlTyped(typed) => typed.value(),
+            _ => self,
+        }
+    }
 }
 
 /// A temporal parameter with the text spelling used by compatibility binds.
@@ -229,6 +349,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
             | SqlValue::DecimalNull(_)
             | SqlValue::BoolNull
             | SqlValue::Null => "n".to_string(),
+            SqlValue::MssqlTyped(typed) => component(typed.value()),
         }
     }
 
@@ -3152,7 +3273,7 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
+pub(super) async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
     let metadata = T::metadata();
@@ -4740,6 +4861,11 @@ impl EntityMetadata {
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
     {
+        // #851: record a guarded table from every typed constructor, so a
+        // conversion refuses it whichever path built the metadata first.
+        if T::__gom_guarded_update() {
+            super::__register_guarded_update_table(T::TABLE_NAME);
+        }
         Self {
             entity_name,
             table_name: T::TABLE_NAME,

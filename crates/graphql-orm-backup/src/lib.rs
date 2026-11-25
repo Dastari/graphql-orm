@@ -91,7 +91,13 @@ mod local_repository;
 mod lock;
 mod manifest;
 mod object_index;
-#[cfg(feature = "orm")]
+#[cfg(all(feature = "orm-sqlite", feature = "orm-postgres"))]
+compile_error!("select only one graphql-orm-backup adapter feature: orm-sqlite or orm-postgres");
+
+#[cfg(all(
+    feature = "orm",
+    not(all(feature = "orm-sqlite", feature = "orm-postgres"))
+))]
 mod orm;
 mod planner;
 mod prune;
@@ -137,7 +143,10 @@ pub use manifest::{
     verify_manifest_authenticity, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};
-#[cfg(feature = "orm")]
+#[cfg(all(
+    feature = "orm",
+    not(all(feature = "orm-sqlite", feature = "orm-postgres"))
+))]
 pub use orm::{OrmBackupAdapter, OrmBackupObjectIndex, OrmObjectIndexColumns};
 pub use planner::{FullBackupPlan, plan_full_backup};
 pub use prune::{

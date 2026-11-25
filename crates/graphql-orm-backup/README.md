@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.30.0 supports the SQLite and PostgreSQL ORM adapters when other
+workspace members enable additional ORM backends. See the
+[migration guide](MIGRATION.md#0290-to-0300-adapter-backend-selection).
+
 Version 0.29.0 makes the optional ORM adapter honor
 [externally managed backup and restore](MIGRATION.md#0281-to-0290-externally-managed-backup-and-restore).
 
@@ -139,8 +143,12 @@ graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev =
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a
 custom repository, disable defaults. The optional `orm-sqlite` or
-`orm-postgres` features select one ready-made ORM adapter lane; do not enable
-both.
+`orm-postgres` features select one ready-made ORM adapter. In a build with
+several ORM backends, pass an explicitly typed `Database<SqliteBackend>` or
+`Database<PostgresBackend>` matching that selection. Enable exactly one of
+these backup adapter features. The bare `orm` feature uses the ORM's default
+backend; if the workspace unifies several ORM backends, or the default is
+MSSQL, select `orm-sqlite` or `orm-postgres` instead.
 
 Version 0.11.1 aligns the package identity with the snapshot-format documentation
 added after the immutable 0.11.0 package tag. It introduces no new breaking
@@ -221,6 +229,12 @@ encryption and content-defined chunking are out of scope.
 Composite-key tables, including many-to-many link tables, are covered by full
 snapshots only: their rows are identified by a JSON array of key parts, and
 `compact_chain` refuses incremental changes to them.
+
+PostgreSQL hosts can enable the `canonical-journal-keys` feature and use
+`OrmBackupAdapter::with_canonical_change_journal_keys` after cutting over the
+database. Treat the exported key strings as opaque when assembling changes.
+Use a build with the same feature to compact canonical chains. Start a new full backup and checkpoint before producing
+incrementals. See the [opt-in procedure](MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys).
 
 ## Configuration and operations
 

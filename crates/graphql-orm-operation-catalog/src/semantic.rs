@@ -1,6 +1,7 @@
 //! Canonical public GraphQL semantic metadata.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::any::TypeId;
+use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -38,6 +39,7 @@ pub const GRAPHQL_SEMANTIC_MAXIMUM_LABEL_FIELDS: usize = 4;
 pub struct GraphqlSemanticError {
     message: &'static str,
     operation_catalog_error: Option<GraphqlOperationCatalogError>,
+    entity_conflict: Option<Box<str>>,
 }
 
 impl GraphqlSemanticError {
@@ -45,6 +47,7 @@ impl GraphqlSemanticError {
         Self {
             message,
             operation_catalog_error: None,
+            entity_conflict: None,
         }
     }
 
@@ -56,7 +59,14 @@ impl GraphqlSemanticError {
 
 impl std::fmt::Display for GraphqlSemanticError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.message)
+        formatter.write_str(self.message)?;
+        if let Some(error) = &self.operation_catalog_error {
+            write!(formatter, ": {error}")?;
+        }
+        if let Some(conflict) = &self.entity_conflict {
+            write!(formatter, ": {conflict}")?;
+        }
+        Ok(())
     }
 }
 
@@ -65,6 +75,7 @@ impl From<GraphqlOperationCatalogError> for GraphqlSemanticError {
         Self {
             message: "duplicate entity identity in operation catalogue",
             operation_catalog_error: Some(error),
+            entity_conflict: None,
         }
     }
 }
@@ -1069,6 +1080,43 @@ pub trait GraphqlCustomOperationMetadata {
     fn graphql_custom_result_types() -> &'static [GraphqlEntitySemanticMetadata] {
         &[]
     }
+
+    /// Returns result declarations with the local Rust type identity when known.
+    #[doc(hidden)]
+    fn graphql_custom_result_type_sources() -> Vec<GraphqlSemanticEntitySource> {
+        Self::graphql_custom_result_types()
+            .iter()
+            .map(|metadata| GraphqlSemanticEntitySource {
+                metadata,
+                type_id: None,
+                source_name: std::any::type_name::<Self>(),
+            })
+            .collect()
+    }
+}
+
+/// Local declaration provenance for semantic catalogue composition by `schema_roots!`.
+#[doc(hidden)]
+pub struct GraphqlSemanticEntitySource {
+    metadata: &'static GraphqlEntitySemanticMetadata,
+    type_id: Option<TypeId>,
+    source_name: &'static str,
+}
+
+impl GraphqlSemanticEntitySource {
+    /// Captures the Rust type that declared this metadata.
+    pub fn of<T: 'static>(metadata: &'static GraphqlEntitySemanticMetadata) -> Self {
+        Self {
+            metadata,
+            type_id: Some(TypeId::of::<T>()),
+            source_name: std::any::type_name::<T>(),
+        }
+    }
+
+    /// Returns the original declaration before schema-level bindings.
+    pub const fn metadata(&self) -> &'static GraphqlEntitySemanticMetadata {
+        self.metadata
+    }
 }
 
 /// Metadata trait implemented by a described handwritten GraphQL object.
@@ -1148,6 +1196,77 @@ impl GraphqlSemanticCatalog {
             .collect::<Result<Vec<_>, _>>()?;
         operations.extend(custom);
         Self::new(entities, operations)
+    }
+
+    /// Composes a static schema catalogue using each declaration's Rust provenance.
+    /// Registered generated entities take their metadata from `bind_generated`.
+    ///
+    /// # Errors
+    /// Returns an error for conflicting entity declarations or invalid catalogue metadata.
+    #[doc(hidden)]
+    pub fn compose_with_custom_sources(
+        generated: impl IntoIterator<Item = GraphqlSemanticEntitySource>,
+        custom_types: impl IntoIterator<Item = GraphqlSemanticEntitySource>,
+        operation_catalog: &GraphqlOperationCatalog,
+        custom_operations: impl IntoIterator<Item = GraphqlSemanticOperationDescriptor>,
+        mut bind_generated: impl FnMut(GraphqlEntitySemanticMetadata) -> GraphqlEntitySemanticMetadata,
+    ) -> Result<Self, GraphqlSemanticError> {
+        let mut sources = BTreeMap::<_, (GraphqlSemanticEntitySource, bool)>::new();
+        for (source, generated) in generated
+            .into_iter()
+            .map(|source| (source, true))
+            .chain(custom_types.into_iter().map(|source| (source, false)))
+        {
+            let entity_name = source.metadata.entity_name.as_str();
+            match sources.entry(entity_name) {
+                Entry::Vacant(entry) => {
+                    entry.insert((source, generated));
+                }
+                Entry::Occupied(mut entry) => {
+                    let (first, first_generated) = entry.get();
+                    let compatible_identity = match (first.type_id, source.type_id) {
+                        (Some(first), Some(second)) => first == second,
+                        // Preserve exact deduplication for legacy manual custom metadata.
+                        _ => !first_generated,
+                    };
+                    if compatible_identity
+                        && (first.metadata == source.metadata
+                            || normalize_composed_entities([
+                                first.metadata.clone(),
+                                source.metadata.clone(),
+                            ])
+                            .len()
+                                == 1)
+                    {
+                        // A legacy declaration must not obscure typed provenance
+                        // from another declaration of the same GraphQL name.
+                        if first.type_id.is_none() && source.type_id.is_some() {
+                            entry.insert((source, generated));
+                        }
+                        continue;
+                    }
+                    return Err(GraphqlSemanticError {
+                        entity_conflict: Some(
+                            format!(
+                                "{entity_name:?} from {:?} and {:?}",
+                                first.source_name, source.source_name
+                            )
+                            .into_boxed_str(),
+                        ),
+                        ..GraphqlSemanticError::new("conflicting semantic entity declarations")
+                    });
+                }
+            }
+        }
+        let entities = sources.into_values().map(|(source, generated)| {
+            let metadata = source.metadata.clone();
+            if generated {
+                bind_generated(metadata)
+            } else {
+                metadata
+            }
+        });
+        Self::compose_with_custom(entities, operation_catalog, custom_operations)
     }
 
     /// Composes explicitly constructed entity and operation descriptors, for
@@ -2249,6 +2368,50 @@ pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
 fn hex_sha256(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod entity_source_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_rust_types_cannot_share_identical_semantic_declarations() {
+        struct RegisteredRecord;
+        struct DifferentRecord;
+
+        let declaration = Box::leak(Box::new(GraphqlEntitySemanticMetadata {
+            entity_name: "Record".into(),
+            description: "Record result.".into(),
+            default_classification: GraphqlSemanticClassification::Public,
+            fields: Box::new([]),
+            label_fields: Vec::new(),
+            record_version: None,
+            generated_input_members: Vec::new(),
+        }));
+        let operations = GraphqlOperationCatalog::compose([]);
+        let error = GraphqlSemanticCatalog::compose_with_custom_sources(
+            [GraphqlSemanticEntitySource::of::<RegisteredRecord>(
+                declaration,
+            )],
+            [GraphqlSemanticEntitySource::of::<DifferentRecord>(
+                declaration,
+            )],
+            &operations,
+            [],
+            |entity| entity,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Record"), "{error}");
+        assert!(
+            error.contains(std::any::type_name::<RegisteredRecord>()),
+            "{error}"
+        );
+        assert!(
+            error.contains(std::any::type_name::<DifferentRecord>()),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(test)]

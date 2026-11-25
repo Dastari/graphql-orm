@@ -284,7 +284,8 @@ const TRAVERSAL_READ_CATEGORIES: &[&str] = &[
 /// `single_read` for to-one traversal. When that category is not declared but
 /// another read category is, every declared read category's requirement
 /// applies. Scope templates bind root arguments that a traversal does not
-/// have, so they refuse it. `GraphQLEntity` and
+/// have, so they refuse it. After scopes, traversal checks assurance on
+/// every generated query root of the target. `GraphQLEntity` and
 /// `RepositoryEntity` emit this so every relation target carries it. A
 /// malformed declaration, which `GraphQLOperations` reports, refuses every
 /// traversal rather than adding a second diagnostic here.
@@ -321,6 +322,24 @@ pub(crate) fn relation_traversal_authorization_tokens(
         };
         let list_scope = scope("list");
         let single_scope = scope("single_read");
+        let assurance = (!crate::entity::has_repository_entity_attribute(&input.attrs)).then(|| {
+            quote! {
+                // GraphQLOperations provides the names of its enabled query
+                // roots. A target without that derive has no generated roots.
+                #[allow(dead_code)]
+                trait QueryRootsFallback {
+                    const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] = &[];
+                }
+                impl<T> QueryRootsFallback for T {}
+                for &field_name in Self::__GOM_QUERY_ROOT_FIELDS {
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        field_name,
+                    )?;
+                }
+            }
+        });
         Ok(quote! {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
             if multiple {
@@ -328,6 +347,7 @@ pub(crate) fn relation_traversal_authorization_tokens(
             } else {
                 #single_scope
             }
+            #assurance
             ::std::result::Result::Ok(())
         })
     })()
@@ -1053,6 +1073,27 @@ fn resolve_upsert_config(
     }
 }
 
+fn integer_bind_tokens(
+    backend: BackendKind,
+    field_type: &syn::Type,
+    meta: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
+    let unsigned = type_path_last_ident(scalar_type).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "u8" | "u16" | "u32" | "u64" | "usize"
+        )
+    });
+    if backend == BackendKind::Mssql && unsigned {
+        let sql_type = meta.mssql_type.as_deref().unwrap_or("");
+        quote! { ::graphql_orm::graphql::orm::SqlValue::mssql_unsigned((#value) as u64, #sql_type) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Int((#value) as i64) }
+    }
+}
+
 fn push_create_input_sql_value_tokens(
     backend: BackendKind,
     struct_name: &syn::Ident,
@@ -1061,7 +1102,7 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if meta.decimal.is_some() {
+    let push = if meta.decimal.is_some() {
         let definition = decimal_definition_tokens(meta);
         if is_option_type(field_type) {
             quote! {
@@ -1171,9 +1212,10 @@ fn push_create_input_sql_value_tokens(
             )
         })
     {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { value });
         quote! {
             match #field_access {
-                ::std::option::Option::Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(value as i64)),
+                ::std::option::Option::Some(value) => bind_values.push(#integer_bind),
                 ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
             }
         }
@@ -1193,8 +1235,9 @@ fn push_create_input_sql_value_tokens(
             "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
         )
     }) {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { #field_access });
         quote! {
-            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int((#field_access) as i64));
+            bind_values.push(#integer_bind);
         }
     } else if type_path_last_ident(field_type)
         .is_some_and(|ident| matches!(ident.to_string().as_str(), "f32" | "f64"))
@@ -1230,6 +1273,14 @@ fn push_create_input_sql_value_tokens(
         quote! {
             bind_values.push(#value_expr);
         }
+    };
+    match &meta.mssql_type {
+        Some(sql_type) => quote! {{
+            #push
+            let value = bind_values.pop().expect("one generated field bind");
+            bind_values.push(value.with_mssql_type(#sql_type));
+        }},
+        None => push,
     }
 }
 
@@ -2066,6 +2117,29 @@ fn generate_graphql_operations_unfiltered(
         )
     } else {
         (quote! {}, quote! { ::std::option::Option::None })
+    };
+    // `update_expected_version = "required"` makes only the update's argument
+    // non-null; delete keeps its optional argument (#851).
+    let (update_expected_version_param, update_expected_version_binding) = if managed_version_field
+        .is_some()
+        && entity_meta.update_expected_version_required.is_some()
+    {
+        (
+            quote! {
+                #[graphql(
+                    name = #expected_version_arg_name,
+                    desc = "Required. Apply only if the record's current managed version equals this value; otherwise fail with CONFLICT and write nothing"
+                )]
+                #[__gom_catalogue_type(i64)]
+                expected_version: i64,
+            },
+            quote! { ::std::option::Option::Some(expected_version) },
+        )
+    } else {
+        (
+            expected_version_param.clone(),
+            expected_version_binding.clone(),
+        )
     };
     let managed_version_column_option = match &managed_version_field {
         Some((_, _, column)) => quote! { ::std::option::Option::Some(#column) },
@@ -3422,7 +3496,7 @@ fn generate_graphql_operations_unfiltered(
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.decimal.is_some() {
+            if meta.decimal.is_some() || meta.mssql_type.is_some() {
                 insert_binds_graphql.push(push_create_input_sql_value_tokens(
                     backend,
                     struct_name,
@@ -3531,9 +3605,10 @@ fn generate_graphql_operations_unfiltered(
                     )
                 })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { v });
                 let bind_tokens = quote! {
                     match input.#field_name {
-                        ::std::option::Option::Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64)),
+                        ::std::option::Option::Some(v) => bind_values.push(#integer_bind),
                         ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                     }
                 };
@@ -3557,8 +3632,10 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind =
+                    integer_bind_tokens(backend, field_type, &meta, quote! { input.#field_name });
                 let bind_tokens = quote! {
-                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(input.#field_name as i64));
+                    bind_values.push(#integer_bind);
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
@@ -3623,6 +3700,8 @@ fn generate_graphql_operations_unfiltered(
         if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
+            let graphql_check_index = update_field_checks_graphql.len();
+            let repo_check_index = update_field_checks_repo.len();
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { ::std::option::Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
@@ -3981,12 +4060,13 @@ fn generate_graphql_operations_unfiltered(
                         )
                     })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *v });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
                         match val {
-                            ::std::option::Option::Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Int((*v) as i64)),
+                            ::std::option::Option::Some(v) => values.push(#integer_bind),
                             ::std::option::Option::None => values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                         }
                     }
@@ -4047,11 +4127,12 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *val });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int((*val) as i64));
+                        values.push(#integer_bind);
                     }
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
@@ -4091,6 +4172,24 @@ fn generate_graphql_operations_unfiltered(
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
                 update_field_checks_repo.push(update_tokens);
+            }
+            if let Some(sql_type) = &meta.mssql_type {
+                for checks in [
+                    &mut update_field_checks_graphql[graphql_check_index..],
+                    &mut update_field_checks_repo[repo_check_index..],
+                ] {
+                    for check in checks {
+                        *check = quote! {{
+                            let bind_start = values.len();
+                            #check
+                            for value in &mut values[bind_start..] {
+                                *value = ::std::mem::replace(
+                                    value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                ).with_mssql_type(#sql_type);
+                            }
+                        }};
+                    }
+                }
             }
         }
     }
@@ -4685,6 +4784,65 @@ fn generate_graphql_operations_unfiltered(
                     ),
                 ));
             }
+        }
+    }
+    // #851: a required ExpectedVersion and a conditional assurance selector
+    // govern the single-row update only. Every other root that rewrites an
+    // existing row would bypass them, so the entity must not generate one.
+    // A declared `set_null` relation lets the database (or a dependent-delete
+    // plan) rewrite the row when its parent is deleted, so it is refused too.
+    // `cascade` deletes the row instead, and deletes are not guarded.
+    let set_null_relation = fields.iter().find_map(|field| {
+        parse_field_metadata(field)
+            .ok()
+            .filter(|meta| {
+                meta.is_relation && meta.relation_on_delete.as_deref() == Some("set_null")
+            })
+            .and_then(|_| field.ident.as_ref().map(ToString::to_string))
+    });
+    for (option, span) in [
+        (
+            "update_expected_version = \"required\"",
+            entity_meta.update_expected_version_required,
+        ),
+        (
+            "update_assurance",
+            entity_meta
+                .update_assurance
+                .as_ref()
+                .map(|selector| selector.span),
+        ),
+    ] {
+        let Some(span) = span else {
+            continue;
+        };
+        let shape_selected = |shape: &str| {
+            entity_meta
+                .mutation_shapes
+                .as_ref()
+                .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+        };
+        let refusal = if mutations_disabled.is_some() || !generates_public_update {
+            Some("requires the generated update mutation".to_owned())
+        } else if !shape_selected("update") {
+            Some("requires mutation_shapes to select update".to_owned())
+        } else if shape_selected("update_many") {
+            Some("requires mutation_shapes without update_many: a bulk update writes existing rows without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if generates_public_upsert && shape_selected("upsert") {
+            Some("requires mutation_shapes without upsert: an upsert rewrites an existing row without a per-row ExpectedVersion or assurance selection".to_owned())
+        } else if entity_meta.dependent_deletes {
+            Some("is not supported with dependent_deletes".to_owned())
+        } else if let Some(relation) = set_null_relation.as_deref() {
+            Some(format!(
+                "cannot be combined with relation `{relation}` declaring on_delete = \"set_null\": deleting the related row would rewrite this row without its ExpectedVersion or assurance selection. Use restrict or cascade"
+            ))
+        } else if option.starts_with("update_expected_version") && managed_version_field.is_none() {
+            Some("requires a #[graphql_orm(version = \"managed\")] field".to_owned())
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            return Err(syn::Error::new(span, format!("{option} {refusal}")));
         }
     }
     // Every supported entity profile emits a real Changed subscription,
@@ -7149,6 +7307,45 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    let set_delete_model_impl = if (generates_standard_write_surface
+        || composite_repository_mutations)
+        && !entity_meta.dependent_deletes
+    {
+        let event_id = if has_composite_primary_key {
+            quote! { Self::__gom_event_id(&Self::__gom_entity_key(entity)) }
+        } else {
+            pk_id_for_entity.clone()
+        };
+        quote! {
+            impl ::graphql_orm::graphql::orm::SetDeleteModel<#backend_marker> for #struct_name {
+                type Key = #key_type;
+                type WhereInput = #where_input;
+
+                fn set_delete_validate_filter(filter: &Self::WhereInput) -> ::graphql_orm::Result<()> {
+                    filter.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)
+                }
+                fn set_delete_key_values(key: &Self::Key) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_key_values(key)
+                }
+                fn set_delete_row_key_values(&self) -> ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> {
+                    Self::__gom_subscription_key_values(self)
+                }
+                fn set_delete_event_id(&self) -> ::std::string::String {
+                    let entity = self;
+                    #event_id
+                }
+                fn set_delete_queue_change<'a>(
+                    &'a self,
+                    hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+                ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+                    ::std::boxed::Box::pin(Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Deleted, ::std::option::Option::Some(self)))
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let single_bounded_helper_methods = if !has_composite_primary_key
         && !schema_policy_read_only
         && !entity_meta.append_only
@@ -7577,14 +7774,23 @@ fn generate_graphql_operations_unfiltered(
             ));
         }
         if generates_public_update {
-            operation_descriptors.push(mutation_descriptor(
+            let update_descriptor = mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
                 "update",
                 &update_mutation_name,
                 &update_operation_description,
                 quote! { #result_type },
                 &update_operation_authorization,
-            ));
+            );
+            // Only an entity declaring a selector records one, so every other
+            // descriptor and fingerprint is unchanged (#851).
+            operation_descriptors.push(match &entity_meta.update_assurance {
+                Some(selector) => {
+                    let levels = &selector.levels;
+                    quote! { #update_descriptor.with_conditional_assurance(&[#(#levels),*]) }
+                }
+                None => update_descriptor,
+            });
             operation_descriptors.push(mutation_descriptor(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
                 "update_many",
@@ -8060,6 +8266,7 @@ fn generate_graphql_operations_unfiltered(
             #append_only_surface
             #retention_surface
             #composite_mutation_surface
+            #set_delete_model_impl
             #composite_write_stubs
             #readonly_composite_changed
             #computed_field_invalidation_target
@@ -8084,12 +8291,13 @@ fn generate_graphql_operations_unfiltered(
             pk_type: &pk_type,
             input_arg_name: &input_arg_name,
             input_arg_description: &input_arg_description,
-            expected_version_param: &expected_version_param,
+            expected_version_param: &update_expected_version_param,
             result_type: &result_type,
-            expected_version_binding: &expected_version_binding,
+            expected_version_binding: &update_expected_version_binding,
             resolver_auth_mode: &resolver_auth_mode,
             rls_request_guard: &rls_request_guard,
             update_scope_enforcement: &update_scope_enforcement,
+            update_assurance: entity_meta.update_assurance.as_ref(),
             backend_marker: &backend_marker,
             entity_name_lit: &entity_name_lit,
             struct_name,
@@ -10049,6 +10257,7 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_trait_impl
         #single_bounded_trait_impls
+        #set_delete_model_impl
         #retention_surface
         #cas_trait_impl
         #keyset_trait_impl

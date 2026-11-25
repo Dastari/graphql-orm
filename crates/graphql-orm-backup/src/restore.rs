@@ -416,14 +416,7 @@ async fn verify_restore_schema(
 ) -> Result<crate::GraphqlOrmBackupSchema, BackupError> {
     let backup = manifest_schema(manifest);
     let target = database.schema_snapshot().await?;
-    if backup.backend != target.backend || backup.schema_hash != target.schema_hash {
-        return Err(BackupError::RestoreSchemaMismatch {
-            backup_backend: backup.backend,
-            backup_schema_hash: backup.schema_hash,
-            target_backend: target.backend,
-            target_schema_hash: target.schema_hash,
-        });
-    }
+    backup.ensure_restore_compatible(&target.backend, &target.schema_hash)?;
     Ok(backup)
 }
 

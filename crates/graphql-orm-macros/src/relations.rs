@@ -3,7 +3,8 @@ use crate::backend::{backend_marker_tokens, backend_render_identifier_path, reso
 use crate::entity::{
     RelationConditionMetadata, RelationConditionValue, collect_parsed_fields,
     graphql_relation_target_checks, has_graphql_complex, parse_entity_metadata,
-    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
+    relation_change_propagation_tokens, relation_delete_policy_tokens,
+    relation_server_only_columns, relation_server_only_key_mask, resolver_auth_mode_tokens,
     validate_graphql_relation_keys,
 };
 use crate::naming::graphql_field_name;
@@ -28,6 +29,8 @@ struct RelationDef {
     propagate_change: proc_macro2::TokenStream,
     source_condition: Option<ResolvedSourceCondition>,
     target_condition: Option<RelationConditionMetadata>,
+    /// A server-only key: batched rows associate by database match identity.
+    associate_by_match: bool,
 }
 
 struct ResolvedSourceCondition {
@@ -330,6 +333,8 @@ pub(crate) fn generate_graphql_relations(
             ));
         }
 
+        let server_only_keys =
+            relation_server_only_key_mask(meta, &parsed_fields, &from_cols, &to_cols)?;
         validate_graphql_relation_keys(
             backend,
             struct_name,
@@ -338,6 +343,14 @@ pub(crate) fn generate_graphql_relations(
             &parsed_fields,
             &from_cols,
             &to_cols,
+            &server_only_keys,
+            // A relation object is always a SimpleObject the host derives.
+            &relation_server_only_columns(
+                backend,
+                entity_meta.table_name.as_deref().unwrap_or("unknown"),
+                &parsed_fields,
+                true,
+            ),
         )?;
         relation_target_checks.push(graphql_relation_target_checks(
             backend,
@@ -345,6 +358,7 @@ pub(crate) fn generate_graphql_relations(
             field,
             meta,
             &to_cols,
+            &server_only_keys,
         )?);
         let mut source_field_idents = Vec::with_capacity(from_cols.len());
         let mut source_kinds = Vec::with_capacity(from_cols.len());
@@ -471,6 +485,7 @@ pub(crate) fn generate_graphql_relations(
             propagate_change,
             source_condition,
             target_condition: meta.relation_target_condition.clone(),
+            associate_by_match: server_only_keys.iter().any(|server_only| *server_only),
         });
     }
 
@@ -730,6 +745,13 @@ pub(crate) fn generate_graphql_relations(
             }
         };
 
+        // Relations with a server-only key associate batched rows by the
+        // database's match of the complete tuple, never by key text.
+        let association = if r.associate_by_match {
+            quote! { .__associate_by_database_match() }
+        } else {
+            quote! {}
+        };
         let relation_query_key = quote! {{
             let __gom_relation_page =
                 db.client_pagination_config().resolve_client_page(page.as_ref(), true).map_err(|error| error.into_graphql_error())?;
@@ -774,6 +796,7 @@ pub(crate) fn generate_graphql_relations(
                 __gom_relation_pagination,
                 auth_context.clone(),
             )
+            #association
         }};
 
         let single_relation_query_key = quote! {
@@ -791,6 +814,7 @@ pub(crate) fn generate_graphql_relations(
                 None,
                 auth_context.clone(),
             )
+            #association
         };
         let fallback_predicate_parts = fk_columns_sql
             .iter()
