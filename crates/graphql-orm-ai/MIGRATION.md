@@ -18,7 +18,9 @@ Switch all six `start_*_turn` methods to take an owned
 `start_dispatch_turn` from AI 0.159.0, move that routing into the corresponding
 fresh, newly bound, and retained methods for tool-free and dynamic-tool
 turns. Replace `dispatch.input()` with `dispatch.turn_input()` and move from
-`write_dispatch_turn` to `write_turn`.
+`write_dispatch_turn` to `write_turn`. The 0.159.0 type
+`AiCodexAppServerDispatchTurn<'_>` is removed; use the owned
+`AiCodexAppServerTurnDispatch` instead.
 
 The fresh-turn path below uses host-provided thread setup and response-stream
 methods.
