@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.31.0
+
+- **No action (#817).** Add content-free endpoint validation reasons to the
+  shared AI error contract for provider profile saves and reports. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
+
 ## Unreleased - 0.30.0
 
 - Validate filter roles and index generated-input ownership once per target

@@ -80,6 +80,38 @@ thread until deletion. See [entity reference delivery](docs/entity-references.md
 for the deadline and frame-size fallback. No GraphQL SDL, schema-module,
 or data migration is needed.
 
+## 0.162.0 to 0.163.0 skill schemas and provider endpoints
+
+**Action needed** when host code matches `ProviderError::InvalidConfiguration`
+from adapter construction, or when `provider_profile_endpoint_issues` lists
+profiles. No schema or data migration.
+
+- **Skill schemas (#816).** Stored published versions outside the depth or
+  regular-expression bounds remain readable and usable through normal skill
+  resolution. `AiResolvedSkill::has_legacy_schema` marks those versions as
+  legacy. Operators with `AiSkillAction::ManageSkill` in the exact scope can
+  call `OrmAiSkillCatalogService::legacy_skill_schemas` to audit each skill's
+  published history, including superseded versions. It returns only version IDs and
+  SHA-256 digests of the canonical stored schema envelopes. To replace a
+  legacy version, publish a new version with schemas that satisfy the limits
+  of 32 JSON nesting levels and 256 UTF-8 bytes per regular expression.
+- **Provider endpoints (#817).** Profile creates and edits require a root
+  URL for Ollama and a non-root path of at most 2,048 bytes for OpenAI-compatible
+  Responses and Chat Completions. The limit applies to the normalized URL
+  path. Native profile endpoints remain deployment-fixed. A deployment
+  override for Anthropic uses the exact-endpoint path contract at adapter
+  initialization. Existing profiles still load. Use
+  `OrmAiConfigurationService::provider_profile_endpoint_issues` with
+  provider-profile read authority to list profile IDs and content-free
+  reasons for a scope, including missing or malformed stored endpoints.
+  Listed profiles already failed adapter initialization before this release.
+  Adapter path failures now return `ProviderError::InvalidEndpointPath`
+  instead of `InvalidConfiguration`. Any edit to a grandfathered profile,
+  including a display-name-only edit, fails until its URL is corrected.
+  Profile saves that fail the path contract return
+  `AiError::InvalidProviderEndpointPath` (`AI_INVALID_PROVIDER_ENDPOINT_PATH`
+  in GraphQL).
+
 ## 0.161.0 to 0.162.0 capability catalogue compilation
 
 **No action.** Capability fingerprints, provider definitions, describe output

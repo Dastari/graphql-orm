@@ -7,34 +7,21 @@ use url::Url;
 
 use crate::{AiProviderEndpointPolicy, AiProviderKindInput, ProviderError};
 
-/// Normalizes one deployment-configured endpoint: `http` or `https`, a host,
-/// no user information, query or fragment, and a non-root path of at most
-/// 2 KiB. The caller still authorizes the exact result through
-/// [`ProviderEndpointGuard::authorize`].
-#[cfg(any(
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core",
-    feature = "provider-anthropic-core"
-))]
-pub(super) fn normalized_provider_endpoint(value: &str) -> Result<Url, ProviderError> {
-    let url =
-        crate::configuration::parse_provider_endpoint(value).map_err(|_| unsafe_endpoint())?;
-    if url.path().is_empty() || url.path() == "/" || url.path().len() > 2_048 {
-        return Err(unsafe_endpoint());
-    }
-    Ok(url)
-}
-
-/// Normalizes one deployment-configured origin with an empty or root path to
-/// its root URL.
-#[cfg(feature = "provider-ollama-core")]
-pub(super) fn normalized_provider_origin(value: &str) -> Result<Url, ProviderError> {
+/// Normalizes a configured URL and checks the adapter's path contract.
+pub(super) fn normalized_provider_endpoint(
+    value: &str,
+    kind: AiProviderKindInput,
+) -> Result<Url, ProviderError> {
     let mut url =
         crate::configuration::parse_provider_endpoint(value).map_err(|_| unsafe_endpoint())?;
-    if !matches!(url.path(), "" | "/") {
-        return Err(unsafe_endpoint());
+    let contract = kind.endpoint_path_contract().ok_or_else(unsafe_endpoint)?;
+    contract.validate(&url)?;
+    if matches!(
+        contract,
+        crate::configuration::ProviderEndpointPathContract::Origin
+    ) {
+        url.set_path("/");
     }
-    url.set_path("/");
     Ok(url)
 }
 
@@ -114,9 +101,12 @@ mod tests {
     #[test]
     fn endpoints_are_exact_and_unsafe_forms_are_refused() {
         assert_eq!(
-            normalized_provider_endpoint("http://127.0.0.1:11434/v1/chat/completions")
-                .unwrap()
-                .as_str(),
+            normalized_provider_endpoint(
+                "http://127.0.0.1:11434/v1/chat/completions",
+                AiProviderKindInput::ChatCompletions
+            )
+            .unwrap()
+            .as_str(),
             "http://127.0.0.1:11434/v1/chat/completions"
         );
         for unsafe_endpoint in [
@@ -130,7 +120,8 @@ mod tests {
             "not a url",
         ] {
             assert!(
-                normalized_provider_endpoint(unsafe_endpoint).is_err(),
+                normalized_provider_endpoint(unsafe_endpoint, AiProviderKindInput::ChatCompletions)
+                    .is_err(),
                 "{unsafe_endpoint}"
             );
         }
@@ -154,7 +145,8 @@ mod tests {
         ProviderEndpointGuard::authorize(
             Arc::new(Policy { plaintext }),
             AiProviderKindInput::OpenAiCompatible,
-            normalized_provider_endpoint(endpoint).expect("endpoint shape"),
+            normalized_provider_endpoint(endpoint, AiProviderKindInput::OpenAiCompatible)
+                .expect("endpoint shape"),
         )
         .is_some()
     }

@@ -17,6 +17,11 @@ with a freshness bound. Review process retention before enabling it.
 [Entity reference delivery](docs/entity-references.md#adapters-for-a-local-process) ·
 [Codex host migration](MIGRATION.md#breaking-release-unreleased)
 
+AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
+provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.
+Editing a reported profile requires correcting its URL. See the
+[migration guide](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints).
+
 AI 0.162.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
 targets with many capability roots. See the
 [benchmark measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark).
