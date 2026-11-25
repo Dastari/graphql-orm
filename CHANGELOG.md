@@ -48,7 +48,14 @@ for historical context.
     with `action: null`. A call made where it is not allowed also blocks the
     commit, so a hook that ignores the refusal cannot let the write through.
 
-  [Migration](MIGRATION.md#02190-to-02300-principal-bound-upserts)
+  [Migration](MIGRATION.md#02200-to-02300-principal-bound-upserts)
+
+## Unreleased - ORM/macros 0.220.0
+
+- PostgreSQL hosts can opt into canonical change-journal keys (#592). The
+  recorder and full snapshot use the same encoding for single-column keys.
+  The cutover retires legacy cursors and requires a new full backup.
+  [Migration](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys)
 
 ## Unreleased - ORM/macros 0.219.0
 

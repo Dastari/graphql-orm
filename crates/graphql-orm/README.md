@@ -15,6 +15,11 @@ verified request, carry a typed transient input for its transform and hooks,
 and acknowledge a retry without writing.
 See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
 
+Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
+full backups. Call `Database::enable_canonical_change_journal_keys` as the
+schema owner and start a fresh incremental chain. The legacy encoding remains
+the default. See the [migration procedure](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
 Version 0.219.0 enforces target query assurance on indirect runtime GraphQL
 reads and generated Federation entity lookups.
 See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).

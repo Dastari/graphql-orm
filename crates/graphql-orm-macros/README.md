@@ -14,6 +14,10 @@ Version 0.230.0 adds the `upsert_bound_key`, `transient_input` and
 `upsert_acknowledge` entity options.
 See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
 
+Version 0.220.0 stays aligned with the ORM's opt-in canonical PostgreSQL
+journal keys. Existing macro call sites require no changes. See the
+[migration guide](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
 Version 0.219.0 enforces assurance on every enabled entity query root in
 generated Federation entity lookups.
 See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).

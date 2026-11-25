@@ -93,6 +93,16 @@ with `LegacyManifestRefused` unless the host opts in with a
 - Refuse a snapshot the host's snapshot records do not admit (a revoked id, or
   one missing from the known-snapshot list) before writing.
 
+## Canonical PostgreSQL key compatibility
+
+The canonical backup schema identity includes the live PostgreSQL type and
+type modifier for each single-column primary key in the backup. Dry-run and
+applying restore return `CanonicalKeyStorageMismatch` when those key entries
+match by table and column and a storage type or modifier differs. The error
+identifies the affected table and column. Differences in the set of key
+entries return `RestoreSchemaMismatch`. Both errors occur before checking
+target emptiness or writing data.
+
 ## Atomicity
 
 What a failed restore leaves behind depends on the database adapter:

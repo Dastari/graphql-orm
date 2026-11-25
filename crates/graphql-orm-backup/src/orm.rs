@@ -67,6 +67,7 @@ pub struct OrmBackupAdapter {
     entities: Vec<&'static EntityMetadata>,
     migration_version: Option<String>,
     column_policy_overrides: Vec<ColumnPolicyOverride>,
+    canonical_journal_keys: bool,
 }
 
 struct ColumnPolicyOverride {
@@ -87,7 +88,29 @@ impl OrmBackupAdapter {
             entities,
             migration_version: None,
             column_policy_overrides: Vec::new(),
+            canonical_journal_keys: false,
         }
+    }
+
+    /// Uses the PostgreSQL canonical change journal key format for this adapter.
+    ///
+    /// Cut over the database with `Database::enable_canonical_change_journal_keys`
+    /// first. Start a new full snapshot and checkpoint before producing
+    /// incrementals. The adapter refuses a database in the other mode.
+    #[cfg(feature = "canonical-journal-keys")]
+    #[must_use]
+    pub fn with_canonical_change_journal_keys(mut self) -> Self {
+        self.canonical_journal_keys = true;
+        self
+    }
+
+    fn check_journal_key_mode(&self, canonical: bool) -> Result<(), BackupError> {
+        if self.canonical_journal_keys != canonical {
+            return Err(BackupError::Database {
+                message: "backup adapter and database use different change journal key encodings; configure the adapter to match the database and start a new full backup after cutover".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Overrides the migration version recorded in schema snapshots.
@@ -149,7 +172,21 @@ impl OrmBackupAdapter {
             &self.entities,
         );
         self.apply_column_policy_overrides(&mut snapshot.entities)?;
+        let storage = self
+            .database
+            .canonical_key_storage_identity(&snapshot.entities)
+            .await
+            .map_err(database_error("read canonical key storage types"))?;
+        self.check_journal_key_mode(storage.is_some())?;
         snapshot.schema_hash = stable_schema_hash(&snapshot.entities);
+        if let Some(storage) = storage {
+            let mut hash = Sha256::new();
+            hash.update(snapshot.schema_hash.as_bytes());
+            hash.update([0]);
+            hash.update(storage.as_bytes());
+            let prefix = crate::database::CANONICAL_KEY_SCHEMA_PREFIX;
+            snapshot.schema_hash = format!("{prefix}{:x}:{storage}", hash.finalize());
+        }
         Ok(snapshot)
     }
 
@@ -394,6 +431,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
             .begin_consistent_snapshot()
             .await
             .map_err(database_error("begin export snapshot"))?;
+        self.check_journal_key_mode(snapshot.canonical_change_journal_start_sequence().is_some())?;
         let mut exports = Vec::with_capacity(descriptors.len());
         for descriptor in &descriptors {
             let rows = self
@@ -436,16 +474,8 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         ensure_sql_write_allowed().map_err(database_error("restore rows"))?;
         let context = orm_restore_context(&context)?;
         let current_snapshot = self.current_schema_snapshot().await?;
-        if backup_schema.backend != current_snapshot.backend
-            || backup_schema.schema_hash != current_snapshot.schema_hash
-        {
-            return Err(BackupError::RestoreSchemaMismatch {
-                backup_backend: backup_schema.backend,
-                backup_schema_hash: backup_schema.schema_hash,
-                target_backend: current_snapshot.backend,
-                target_schema_hash: current_snapshot.schema_hash,
-            });
-        }
+        backup_schema
+            .ensure_restore_compatible(&current_snapshot.backend, &current_snapshot.schema_hash)?;
         let mut backup_snapshot = current_snapshot.clone();
         backup_snapshot.backend = backup_schema.backend;
         backup_snapshot.migration_version = backup_schema.migration_version;
