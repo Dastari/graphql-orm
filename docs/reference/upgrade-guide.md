@@ -68,12 +68,13 @@ changelog to decide.
 
 ### Unreleased
 
+- **Action needed** — AI 0.165.0 (#880). Review and explicitly authorize replacement of a customized SQL Server covering legacy approval index. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#sql-server-covering-approval-lookup-index)
 - **Action needed** — next breaking ORM/macros release (#905). Review statically unreadable fields used in generated relation search documents. [Migration](../../MIGRATION.md#5-review-private-fields-in-generated-search-documents-905)
 - **Action needed** — next breaking ORM release (#880). Use index constructors and review SQL Server covering index mismatches before applying migrations. [Migration](../../MIGRATION.md#6-review-sql-server-covering-indexes-in-schema-plans-880)
 - **Action needed** — next breaking ORM/macros release (#833). Add a wildcard to `TransactionMode` matches and handle fallible transaction database access. [Migration](../../MIGRATION.md#1-match-transaction-modes-with-a-wildcard-833)
 - **Action needed** — next breaking ORM/macros release (#521). Review generated SQL Server keyset orders on pools that opt into native temporal text binding. [Migration](../../MIGRATION.md#2-review-sql-server-keyset-orders-on-opted-in-pools-521)
 - **Action needed** — next breaking ORM/macros release (#793). Check existing dotted columns and delimit each literal name explicitly. [Migration](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793)
-- **Action needed** — AI 0.164.0 (#828). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — AI 0.165.0 (#828). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
 
 Changes merged to main after the latest workspace release.
 

@@ -12,6 +12,9 @@ supersedes: []
 
 ## Unreleased - next breaking graphql-orm-ai release
 
+- **Action needed (#880).** SQL Server migration plans account for `INCLUDE`
+  columns on the legacy approval lookup index. A covering variant requires
+  explicit review and destructive authorization before replacement.
 - **Breaking (#828).** All six Codex app-server process turn methods take
   `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and
   `AiCodexAppServerWriter` to deliver it. The cloneable turn input contains
