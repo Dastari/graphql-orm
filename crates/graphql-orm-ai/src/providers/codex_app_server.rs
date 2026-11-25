@@ -10148,6 +10148,7 @@ pub(crate) mod tests {
                 "generated_query",
                 "generated_entity",
                 "reviewed_static",
+                "generated_mutation",
                 null
             ]))
         );

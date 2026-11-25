@@ -258,7 +258,7 @@ impl crate::OrmAiConsequentialToolCallService {
         let output = kind.model_value();
         let callback_binding = serde_json::json!({
             "providerCallId": call.provider_call_id,
-            "toolId": call.tool_id,
+            "toolId": call.provider_facing_tool_id(),
             "output": output,
         });
         let source = AiDataSourceRef {
@@ -302,7 +302,7 @@ impl crate::OrmAiConsequentialToolCallService {
                 serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
             if stored.format_version != 1
                 || stored.provider_call_id != call.provider_call_id
-                || stored.tool_id != call.tool_id
+                || stored.tool_id != call.provider_facing_tool_id()
                 || stored.egress_manifest != expected_manifest
                 || Some(stored.egress_decision_id) != candidate.control_egress_decision_id
                 || candidate.control_egress_manifest_hash.as_deref()
@@ -332,7 +332,7 @@ impl crate::OrmAiConsequentialToolCallService {
         let stored = existing.unwrap_or_else(|| StoredNativeControlReceipt {
             format_version: 1,
             provider_call_id: call.provider_call_id.clone(),
-            tool_id: call.tool_id.clone(),
+            tool_id: call.provider_facing_tool_id().to_owned(),
             egress_manifest: expected_manifest.clone(),
             egress_decision_id: decision.id.0,
         });
@@ -361,8 +361,8 @@ impl crate::OrmAiConsequentialToolCallService {
             provider_call_id: call.provider_call_id.clone(),
             kind,
             model_input: ModelInputBlock::ToolResult {
+                tool_id: call.provider_facing_tool_id().to_owned(),
                 call_id: call.provider_call_id,
-                tool_id: call.tool_id,
                 output,
             },
             egress_manifest: expected_manifest,
@@ -389,6 +389,43 @@ impl crate::OrmAiConsequentialToolCallService {
         pending: &AiPreparedNativeApproval,
         route: &crate::AiToolResultEgressRoute,
     ) -> Result<AiNativeToolControlReceipt, crate::AiError> {
+        self.pause_native_call(lease, provider_result, context, pending, route, None)
+            .await
+    }
+
+    /// Replies without executing a brokered generated mutation while this
+    /// native turn awaits approval, exactly as
+    /// [`Self::pause_native_consequential_call`] does for a direct one. The
+    /// reply answers the provider's broker execute call.
+    pub(crate) async fn pause_brokered_native_call(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &crate::AiProviderCallResult,
+        context: crate::AiApplicationToolCallContext,
+        pending: &AiPreparedNativeApproval,
+        route: &crate::AiToolResultEgressRoute,
+        resolved: crate::orm_tools::ResolvedApplicationCall,
+    ) -> Result<AiNativeToolControlReceipt, crate::AiError> {
+        self.pause_native_call(
+            lease,
+            provider_result,
+            context,
+            pending,
+            route,
+            Some(resolved),
+        )
+        .await
+    }
+
+    async fn pause_native_call(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &crate::AiProviderCallResult,
+        context: crate::AiApplicationToolCallContext,
+        pending: &AiPreparedNativeApproval,
+        route: &crate::AiToolResultEgressRoute,
+        brokered: Option<crate::orm_tools::ResolvedApplicationCall>,
+    ) -> Result<AiNativeToolControlReceipt, crate::AiError> {
         use crate::{AiDataSourceRef, AiError, AiSourceTrust, DataClassification};
         if pending.lease.run_id() != lease.run_id()
             || pending.lease.attempt_id() != lease.attempt_id()
@@ -399,14 +436,17 @@ impl crate::OrmAiConsequentialToolCallService {
         route.validate()?;
         let tools = self.application_tools();
         let (call, policy) = tools
-            .prepare_native_blocked_call(lease, provider_result, context)
+            .prepare_native_blocked_call(lease, provider_result, context, brokered)
             .await?;
         let scope = policy.scope.clone();
         let kind = AiNativeToolControlKind::ConsequentialCallsPaused;
         let output = kind.model_value();
         let model_input = ModelInputBlock::ToolResult {
             call_id: call.provider_call_id.clone(),
-            tool_id: call.tool_id.clone(),
+            tool_id: call
+                .provider_tool_id
+                .clone()
+                .unwrap_or_else(|| call.tool_id.clone()),
             output: output.clone(),
         };
         let binding = serde_json::to_value(&model_input).map_err(|_| AiError::PersistenceFailed)?;

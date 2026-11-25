@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.33.0
+
+- **No action (#551).** `AiGraphqlMutationCapability::capability_signature`
+  and `AiGraphqlSubscriptionCapability::capability_signature` render the
+  compact typed signature of a mutation or subscription, as
+  `AiGraphqlQueryCapability::capability_signature` does for a query, so the
+  capability broker can describe generated mutations. Fingerprints, plan
+  schemas and compilation are unchanged.
+  [Migration](MIGRATION.md#0330-mutation-and-subscription-signatures)
+
 ## Unreleased - 0.32.0
 
 - **No action (#551).** Generated keyset roots can compile continuable

@@ -154,7 +154,11 @@ impl AiSupervisedAgentTurnPlan {
     /// Attaches one exact crate-owned capability delivery turn to native execution.
     ///
     /// Broker callbacks use the durable read-only broker. Static bootstrap mutations keep
-    /// their classified path. The immutable retained-session fingerprint binds delivery
+    /// their classified path. When the session brokers generated mutations
+    /// ([`crate::AiCapabilityBrokerSession::with_brokered_mutations`]), this turn's rules
+    /// are bound to it: a mutation is discoverable only while they admit its exact
+    /// fingerprint, and an execute that resolves to one is classified, rule-checked,
+    /// approved and run as that mutation. The immutable retained-session fingerprint binds delivery
     /// mode, index, bootstrap tools, provider projection and model across approval waits.
     /// Loaded broker references remain fenced to their original run attempt.
     /// Client-deferred delivery is unavailable here because native callbacks cannot
@@ -181,6 +185,8 @@ impl AiSupervisedAgentTurnPlan {
         {
             return Err(AiError::Conflict);
         }
+        // Brokered mutations follow exactly this turn's rules.
+        delivery.session().bind_mutation_rules(&self.rules)?;
         self.capability_delivery = Some(delivery);
         Ok(self)
     }

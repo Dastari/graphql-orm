@@ -1,8 +1,12 @@
 //! Fenced, protected execution of explicitly registered application tools.
 
+mod brokered;
 mod media;
 mod native_preflight;
 mod task_context;
+pub(crate) use brokered::{
+    ResolvedApplicationCall, resolved_arguments_match, row_records_call, row_records_parts,
+};
 pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
 };
@@ -655,18 +659,36 @@ impl OrmAiApplicationToolCallService {
         lease: &AiRunLease,
         provider_result: &AiProviderCallResult,
         context: AiApplicationToolCallContext,
+        brokered: Option<ResolvedApplicationCall>,
     ) -> Result<(PreparedToolCallStart, crate::AiContentProtectionPolicy), AiError> {
-        if self
-            .classify_tool_call(lease, provider_result, &context)
-            .await?
-            == AiApplicationToolDisposition::ReadOnly
-        {
-            return Err(AiError::Forbidden);
-        }
         let provider_call = provider_result
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or(AiError::Conflict)?;
+        // A brokered call was classified from its resolved mutation by the
+        // coordinator; a direct one is classified here.
+        let resolved = match brokered {
+            Some(resolved) => {
+                let resolved = resolved.bind_provider_call(provider_call)?;
+                if resolved
+                    .mutation_binding(self.runtime.tool_catalog())
+                    .is_none()
+                {
+                    return Err(AiError::Forbidden);
+                }
+                resolved
+            }
+            None => {
+                if self
+                    .classify_tool_call(lease, provider_result, &context)
+                    .await?
+                    == AiApplicationToolDisposition::ReadOnly
+                {
+                    return Err(AiError::Forbidden);
+                }
+                ResolvedApplicationCall::direct(provider_call)
+            }
+        };
         let session =
             AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
@@ -686,23 +708,24 @@ impl OrmAiApplicationToolCallService {
         let (descriptor, request, is_static) = if let Some(descriptor) = self
             .runtime
             .tool_catalog()
-            .descriptor(provider_call.tool_id())
+            .descriptor(&resolved.tool_id)
             .cloned()
+            .filter(|_| !resolved.is_brokered())
         {
             let request = build_tool_request(
                 lease,
                 id,
                 &descriptor,
-                provider_call.arguments().clone(),
+                resolved.arguments.clone(),
                 &context,
                 None,
             )?;
             (descriptor, request, true)
         } else {
             let prepared = self.runtime.prepare_mutation_capability(
-                provider_call.tool_id(),
-                provider_call.tool_fingerprint(),
-                provider_call.arguments().clone(),
+                &resolved.tool_id,
+                &resolved.tool_fingerprint,
+                resolved.arguments.clone(),
                 GraphqlInvocationContext {
                     run_id: lease.run_id(),
                     tool_call_id: id,
@@ -747,7 +770,7 @@ impl OrmAiApplicationToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                provider_call.arguments().clone(),
+                resolved.arguments.clone(),
             )
             .await?;
         Ok((
@@ -763,11 +786,13 @@ impl OrmAiApplicationToolCallService {
                 tool_call_index: i64::try_from(context.tool_call_index)
                     .map_err(|_| AiError::Conflict)?,
                 tool_id: descriptor.id.as_str().to_owned(),
-                tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                tool_fingerprint: resolved.tool_fingerprint.clone(),
+                provider_tool_id: resolved.provider_columns().0,
+                provider_tool_fingerprint: resolved.provider_columns().1,
                 execution_provenance,
                 native_preflight_refusal: None,
                 protected_arguments,
-                argument_hash: canonical_json_hash(provider_call.arguments())?,
+                argument_hash: canonical_json_hash(&resolved.arguments)?,
                 risk: risk_value(descriptor.risk).to_owned(),
                 idempotency_key: None,
                 correlation_id: context.correlation_id,
@@ -978,6 +1003,7 @@ impl OrmAiApplicationToolCallService {
             context,
             route,
             UnapprovedToolMode::ReadOnly,
+            None,
         ))
         .await
         {
@@ -1172,6 +1198,8 @@ impl OrmAiApplicationToolCallService {
                         .map_err(|_| AiError::InvalidInput("invalid tool index".to_owned()))?,
                     tool_id: provider_call.tool_id().as_str().to_owned(),
                     tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    provider_tool_id: None,
+                    provider_tool_fingerprint: None,
                     protected_arguments,
                     argument_hash,
                     risk: risk.to_owned(),
@@ -1446,23 +1474,8 @@ impl OrmAiApplicationToolCallService {
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
-        let operation = crate::AiCapabilityBrokerOperation::from_tool_id(provider_call.tool_id())
-            .ok_or(AiError::Forbidden)?;
-        let expected = delivery
-            .broker_definition(operation)
-            .ok_or(AiError::Forbidden)?;
-        let offered = provider_result
-            .request_snapshot()
-            .tools
-            .iter()
-            .filter(|definition| definition.tool_id == operation.tool_id())
-            .collect::<Vec<_>>();
-        if offered.len() != 1
-            || *offered[0] != expected
-            || provider_call.tool_fingerprint() != expected.fingerprint
-        {
-            return Err(AiError::Forbidden);
-        }
+        let operation =
+            brokered::offered_broker_operation(provider_result, provider_call, delivery)?;
         let argument_bytes = serde_json::to_vec(provider_call.arguments())
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if argument_bytes.len() > self.limits.maximum_argument_bytes {
@@ -1552,6 +1565,8 @@ impl OrmAiApplicationToolCallService {
                         .map_err(|_| AiError::InvalidInput("invalid tool index".to_owned()))?,
                     tool_id: provider_call.tool_id().as_str().to_owned(),
                     tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    provider_tool_id: None,
+                    provider_tool_fingerprint: None,
                     protected_arguments,
                     argument_hash,
                     risk: "read_only".to_owned(),
@@ -1912,6 +1927,14 @@ impl OrmAiApplicationToolCallService {
                     arguments,
                 ))
                 .await?;
+                // A mutation is only ever resolved here; the classified
+                // coordinator routes it before this read path is reached.
+                if execution.is_consequential() {
+                    return Err(AiError::InvalidInput(
+                        crate::AI_CAPABILITY_CONSEQUENTIAL_UNROUTED.to_owned(),
+                    )
+                    .into());
+                }
                 if execution.capability_kind() == crate::AiCapabilityKind::ReviewedStatic {
                     return self
                         .run_brokered_static_tool(
@@ -2097,14 +2120,26 @@ impl OrmAiApplicationToolCallService {
             return Ok((signature, inline_schema.then_some(schema)));
         }
         let catalog = self.runtime.tool_catalog();
-        let definition = catalog.query_capability_model_definition(
-            operation.capability_id(),
-            crate::capability_provider_alias(operation.capability_id()),
-        )?;
+        let mutation = operation.capability_kind() == crate::AiCapabilityKind::GeneratedMutation;
+        let definition = if mutation {
+            catalog.mutation_capability_model_definition(
+                operation.capability_id(),
+                crate::capability_provider_alias(operation.capability_id()),
+            )?
+        } else {
+            catalog.query_capability_model_definition(
+                operation.capability_id(),
+                crate::capability_provider_alias(operation.capability_id()),
+            )?
+        };
         if definition.fingerprint != operation.capability_fingerprint() {
             return Err(AiError::Forbidden);
         }
-        let signature = catalog.query_capability_signature(operation.capability_id())?;
+        let signature = if mutation {
+            catalog.mutation_capability_signature(operation.capability_id())?
+        } else {
+            catalog.query_capability_signature(operation.capability_id())?
+        };
         Ok((signature, inline_schema.then_some(definition.parameters)))
     }
 
@@ -2249,6 +2284,30 @@ impl OrmAiApplicationToolCallService {
             context,
             route,
             UnapprovedToolMode::AutomaticMutation,
+            None,
+        ))
+        .await
+    }
+
+    /// Executes one automatic generated mutation a fixed-broker execute call
+    /// resolved to, exactly as [`Self::execute_automatic_mutation`] executes
+    /// the direct definition. The durable row keeps both identities and the
+    /// tool result answers the provider's broker call.
+    pub(crate) async fn execute_brokered_automatic_mutation(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        resolved: ResolvedApplicationCall,
+    ) -> Result<AiConsequentialToolCallOutcome, AiError> {
+        Box::pin(self.boxed_unapproved(
+            lease,
+            provider_result,
+            context,
+            route,
+            UnapprovedToolMode::AutomaticMutation,
+            Some(resolved),
         ))
         .await
     }
@@ -2263,8 +2322,9 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
         mode: UnapprovedToolMode,
+        brokered: Option<ResolvedApplicationCall>,
     ) -> futures::future::BoxFuture<'a, Result<AiConsequentialToolCallOutcome, AiError>> {
-        Box::pin(self.execute_unapproved(lease, provider_result, context, route, mode))
+        Box::pin(self.execute_unapproved(lease, provider_result, context, route, mode, brokered))
     }
 
     async fn execute_unapproved(
@@ -2274,13 +2334,23 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
         mode: UnapprovedToolMode,
+        brokered: Option<ResolvedApplicationCall>,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
         self.validate_outer_binding(lease, provider_result, &context, &route)?;
         let provider_call = provider_result
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
-        let argument_bytes = serde_json::to_vec(provider_call.arguments())
+        // Only an automatic mutation is ever reached through the broker here;
+        // a brokered read keeps the broker's own read path.
+        let resolved = match brokered {
+            Some(resolved) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
+                resolved.bind_provider_call(provider_call)?
+            }
+            Some(_) => return Err(AiError::Forbidden),
+            None => ResolvedApplicationCall::direct(provider_call),
+        };
+        let argument_bytes = serde_json::to_vec(&resolved.arguments)
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if argument_bytes.len() > self.limits.maximum_argument_bytes {
             return Err(AiError::InvalidInput(
@@ -2306,7 +2376,7 @@ impl OrmAiApplicationToolCallService {
 
         let id = AiToolCallId::new();
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
-        let argument_hash = canonical_json_hash(provider_call.arguments())?;
+        let argument_hash = canonical_json_hash(&resolved.arguments)?;
         let idempotency_key = matches!(mode, UnapprovedToolMode::ReadOnly)
             .then(|| format!("ai-tool:{provider_call_key}"));
         let invocation = GraphqlInvocationContext {
@@ -2318,149 +2388,13 @@ impl OrmAiApplicationToolCallService {
             delegation_reference: context.delegation_reference.clone(),
             idempotency_key: idempotency_key.clone(),
         };
+        // Boxed: inline, this preparation enlarges the frame of the
+        // callback that executes it in debug builds.
         let (descriptor, disclosure_fingerprint, request, generated_query, prepared_mutation) =
-            match mode {
-                UnapprovedToolMode::ReadOnly => {
-                    if let Some(descriptor) = self
-                        .runtime
-                        .tool_catalog()
-                        .descriptor(provider_call.tool_id())
-                        .cloned()
-                    {
-                        let disclosure_fingerprint = self
-                            .runtime
-                            .tool_catalog()
-                            .disclosure_schema(provider_call.tool_id())
-                            .map(|schema| schema.fingerprint.clone())
-                            .ok_or(AiError::Forbidden)?;
-                        if descriptor.fingerprint != provider_call.tool_fingerprint()
-                            || descriptor.operation_kind != AiToolOperationKind::Query
-                            || descriptor.operation_domain != AiToolOperationDomain::Application
-                            || descriptor.maturity != ToolMaturity::ReadOnly
-                            || descriptor.risk != AiToolRisk::ReadOnly
-                            || descriptor.approval != AiApprovalRule::None
-                            || !descriptor.idempotent
-                        {
-                            return Err(AiError::Forbidden);
-                        }
-                        let contract = descriptor
-                            .graphql_contract
-                            .clone()
-                            .ok_or(AiError::Forbidden)?;
-                        let request = ToolGraphqlRequest {
-                            document: descriptor.document.clone(),
-                            operation_name: contract.operation_name.clone(),
-                            contract,
-                            variables: provider_call.arguments().clone(),
-                            invocation,
-                        };
-                        self.runtime
-                            .preauthorize_tool(
-                                lease.principal_reference(),
-                                &descriptor.id,
-                                &request,
-                            )
-                            .await?;
-                        (descriptor, disclosure_fingerprint, request, false, None)
-                    } else {
-                        let compiled = self.runtime.tool_catalog().compile_query_capability(
-                            provider_call.tool_id(),
-                            provider_call.tool_fingerprint(),
-                            provider_call.arguments().clone(),
-                        )?;
-                        let (descriptor, disclosure, variables) = compiled.into_parts();
-                        let contract = descriptor
-                            .graphql_contract
-                            .clone()
-                            .ok_or(AiError::Forbidden)?;
-                        let request = ToolGraphqlRequest {
-                            document: descriptor.document.clone(),
-                            operation_name: contract.operation_name.clone(),
-                            contract,
-                            variables,
-                            invocation,
-                        };
-                        (
-                            descriptor,
-                            disclosure.fingerprint.clone(),
-                            request,
-                            true,
-                            None,
-                        )
-                    }
-                }
-                UnapprovedToolMode::AutomaticMutation => {
-                    if let Some(descriptor) = self
-                        .runtime
-                        .tool_catalog()
-                        .descriptor(provider_call.tool_id())
-                        .cloned()
-                    {
-                        if descriptor.fingerprint != provider_call.tool_fingerprint()
-                            || !crate::runtime::is_automatic_application_mutation(&descriptor)
-                        {
-                            return Err(AiError::Forbidden);
-                        }
-                        let request = build_tool_request(
-                            lease,
-                            id,
-                            &descriptor,
-                            provider_call.arguments().clone(),
-                            &context,
-                            None,
-                        )?;
-                        let authorization = self
-                            .runtime
-                            .preauthorize_tool(
-                                lease.principal_reference(),
-                                &descriptor.id,
-                                &request,
-                            )
-                            .await?;
-                        if authorization.approval_requirement() != AiApprovalRule::None {
-                            return Err(AiError::Forbidden);
-                        }
-                        let disclosure = self
-                            .runtime
-                            .tool_catalog()
-                            .disclosure_schema(&descriptor.id)
-                            .ok_or(AiError::Forbidden)?
-                            .fingerprint
-                            .clone();
-                        (descriptor, disclosure, request, false, None)
-                    } else {
-                        let prepared = self.runtime.prepare_mutation_capability(
-                            provider_call.tool_id(),
-                            provider_call.tool_fingerprint(),
-                            provider_call.arguments().clone(),
-                            invocation,
-                        )?;
-                        if prepared.execution_policy()
-                            != graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
-                        {
-                            return Err(AiError::Forbidden);
-                        }
-                        self.runtime
-                            .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
-                            .await?;
-                        let descriptor = prepared.descriptor().clone();
-                        let disclosure_fingerprint = descriptor
-                            .graphql_contract
-                            .as_ref()
-                            .ok_or(AiError::Forbidden)?
-                            .disclosure_schema_fingerprint
-                            .clone();
-                        let request = prepared.request().clone();
-                        (
-                            descriptor,
-                            disclosure_fingerprint,
-                            request,
-                            false,
-                            Some(prepared),
-                        )
-                    }
-                }
-            };
+            Box::pin(
+                self.prepare_unapproved_request(lease, &context, id, &resolved, mode, invocation),
+            )
+            .await?;
         let provenance = if !generated_query && prepared_mutation.is_none() {
             Some(
                 crate::AiToolExecutionProvenance::from_provider_call(
@@ -2494,7 +2428,7 @@ impl OrmAiApplicationToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                provider_call.arguments().clone(),
+                resolved.arguments.clone(),
             )
             .await?;
         let started_event_id = Uuid::new_v4();
@@ -2502,7 +2436,7 @@ impl OrmAiApplicationToolCallService {
         let started_payload = json!({
             "toolCallId": id.0,
             "runId": lease.run_id().0,
-            "toolId": provider_call.tool_id().as_str(),
+            "toolId": resolved.tool_id.as_str(),
         });
         let protected_started_event = self
             .protect(
@@ -2546,8 +2480,10 @@ impl OrmAiApplicationToolCallService {
                     tool_call_index: i64::try_from(context.tool_call_index).map_err(|_| {
                         AiError::InvalidInput("tool call index is invalid".to_owned())
                     })?,
-                    tool_id: provider_call.tool_id().as_str().to_owned(),
-                    tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                    tool_id: resolved.tool_id.as_str().to_owned(),
+                    tool_fingerprint: resolved.tool_fingerprint.clone(),
+                    provider_tool_id: resolved.provider_columns().0,
+                    provider_tool_fingerprint: resolved.provider_columns().1,
                     protected_arguments,
                     argument_hash,
                     risk: risk_value(descriptor.risk).to_owned(),
@@ -2609,9 +2545,9 @@ impl OrmAiApplicationToolCallService {
                     self.runtime
                         .execute_query_capability(
                             lease.principal_reference(),
-                            provider_call.tool_id(),
-                            provider_call.tool_fingerprint(),
-                            provider_call.arguments().clone(),
+                            &resolved.tool_id,
+                            &resolved.tool_fingerprint,
+                            resolved.arguments.clone(),
                             request.invocation.clone(),
                         )
                         .await
@@ -2759,7 +2695,7 @@ impl OrmAiApplicationToolCallService {
             let outbound_bytes = output_bytes
                 .len()
                 .checked_add(provider_call.call_id().len())
-                .and_then(|bytes| bytes.checked_add(provider_call.tool_id().as_str().len()))
+                .and_then(|bytes| bytes.checked_add(resolved.provider_tool_id.as_str().len()))
                 .ok_or_else(|| AiError::InvalidInput("tool result is too large".to_owned()))?;
 
             #[cfg(test)]
@@ -2835,7 +2771,7 @@ impl OrmAiApplicationToolCallService {
                         state,
                         Some(ModelInputBlock::ToolResult {
                             call_id: provider_call.call_id().to_owned(),
-                            tool_id: provider_call.tool_id().as_str().to_owned(),
+                            tool_id: resolved.provider_tool_id.as_str().to_owned(),
                             output: model_output.clone(),
                         }),
                         Some(decision.id.0),
@@ -2874,7 +2810,7 @@ impl OrmAiApplicationToolCallService {
                     json!({
                         "toolCallId": id.0,
                         "runId": lease.run_id().0,
-                        "toolId": provider_call.tool_id().as_str(),
+                        "toolId": resolved.tool_id.as_str(),
                         "state": final_state.as_str(),
                     }),
                 )
@@ -2891,7 +2827,7 @@ impl OrmAiApplicationToolCallService {
                     json!({
                         "toolCallId": id.0,
                         "runId": lease.run_id().0,
-                        "toolId": provider_call.tool_id().as_str(),
+                        "toolId": resolved.tool_id.as_str(),
                         "state": final_state.as_str(),
                     }),
                 )
@@ -2924,7 +2860,7 @@ impl OrmAiApplicationToolCallService {
                         protected_inbox_event,
                         correlation_id: context.correlation_id,
                         expected_provider_call_key: provider_call_key,
-                        expected_tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                        expected_tool_fingerprint: resolved.tool_fingerprint.clone(),
                         expected_owner_principal_kind: session.owner_principal_kind,
                         expected_owner_subject: session.owner_subject,
                         expected_scope_kind: context.scope.kind,
@@ -2964,6 +2900,164 @@ impl OrmAiApplicationToolCallService {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Builds the exact request of one unapproved read or automatic
+    /// mutation, after the same registration and authorization checks as the
+    /// direct definition.
+    #[allow(clippy::type_complexity)]
+    async fn prepare_unapproved_request(
+        &self,
+        lease: &AiRunLease,
+        context: &AiApplicationToolCallContext,
+        id: AiToolCallId,
+        resolved: &ResolvedApplicationCall,
+        mode: UnapprovedToolMode,
+        invocation: GraphqlInvocationContext,
+    ) -> Result<
+        (
+            AiToolDescriptor,
+            String,
+            ToolGraphqlRequest,
+            bool,
+            Option<crate::AiPreparedGraphqlMutation>,
+        ),
+        AiError,
+    > {
+        Ok(match mode {
+            UnapprovedToolMode::ReadOnly => {
+                if let Some(descriptor) = self
+                    .runtime
+                    .tool_catalog()
+                    .descriptor(&resolved.tool_id)
+                    .cloned()
+                {
+                    let disclosure_fingerprint = self
+                        .runtime
+                        .tool_catalog()
+                        .disclosure_schema(&resolved.tool_id)
+                        .map(|schema| schema.fingerprint.clone())
+                        .ok_or(AiError::Forbidden)?;
+                    if descriptor.fingerprint != resolved.tool_fingerprint
+                        || descriptor.operation_kind != AiToolOperationKind::Query
+                        || descriptor.operation_domain != AiToolOperationDomain::Application
+                        || descriptor.maturity != ToolMaturity::ReadOnly
+                        || descriptor.risk != AiToolRisk::ReadOnly
+                        || descriptor.approval != AiApprovalRule::None
+                        || !descriptor.idempotent
+                    {
+                        return Err(AiError::Forbidden);
+                    }
+                    let contract = descriptor
+                        .graphql_contract
+                        .clone()
+                        .ok_or(AiError::Forbidden)?;
+                    let request = ToolGraphqlRequest {
+                        document: descriptor.document.clone(),
+                        operation_name: contract.operation_name.clone(),
+                        contract,
+                        variables: resolved.arguments.clone(),
+                        invocation,
+                    };
+                    self.runtime
+                        .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+                        .await?;
+                    (descriptor, disclosure_fingerprint, request, false, None)
+                } else {
+                    let compiled = self.runtime.tool_catalog().compile_query_capability(
+                        &resolved.tool_id,
+                        &resolved.tool_fingerprint,
+                        resolved.arguments.clone(),
+                    )?;
+                    let (descriptor, disclosure, variables) = compiled.into_parts();
+                    let contract = descriptor
+                        .graphql_contract
+                        .clone()
+                        .ok_or(AiError::Forbidden)?;
+                    let request = ToolGraphqlRequest {
+                        document: descriptor.document.clone(),
+                        operation_name: contract.operation_name.clone(),
+                        contract,
+                        variables,
+                        invocation,
+                    };
+                    (
+                        descriptor,
+                        disclosure.fingerprint.clone(),
+                        request,
+                        true,
+                        None,
+                    )
+                }
+            }
+            UnapprovedToolMode::AutomaticMutation => {
+                if let Some(descriptor) = self
+                    .runtime
+                    .tool_catalog()
+                    .descriptor(&resolved.tool_id)
+                    .cloned()
+                {
+                    if descriptor.fingerprint != resolved.tool_fingerprint
+                        || !crate::runtime::is_automatic_application_mutation(&descriptor)
+                    {
+                        return Err(AiError::Forbidden);
+                    }
+                    let request = build_tool_request(
+                        lease,
+                        id,
+                        &descriptor,
+                        resolved.arguments.clone(),
+                        context,
+                        None,
+                    )?;
+                    let authorization = self
+                        .runtime
+                        .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+                        .await?;
+                    if authorization.approval_requirement() != AiApprovalRule::None {
+                        return Err(AiError::Forbidden);
+                    }
+                    let disclosure = self
+                        .runtime
+                        .tool_catalog()
+                        .disclosure_schema(&descriptor.id)
+                        .ok_or(AiError::Forbidden)?
+                        .fingerprint
+                        .clone();
+                    (descriptor, disclosure, request, false, None)
+                } else {
+                    let prepared = self.runtime.prepare_mutation_capability(
+                        &resolved.tool_id,
+                        &resolved.tool_fingerprint,
+                        resolved.arguments.clone(),
+                        invocation,
+                    )?;
+                    if prepared.execution_policy()
+                        != graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+                    {
+                        return Err(AiError::Forbidden);
+                    }
+                    self.runtime
+                        .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                        .await?;
+                    let descriptor = prepared.descriptor().clone();
+                    let disclosure_fingerprint = descriptor
+                        .graphql_contract
+                        .as_ref()
+                        .ok_or(AiError::Forbidden)?
+                        .disclosure_schema_fingerprint
+                        .clone();
+                    let request = prepared.request().clone();
+                    (
+                        descriptor,
+                        disclosure_fingerprint,
+                        request,
+                        false,
+                        Some(prepared),
+                    )
+                }
+            }
+        })
     }
 
     async fn mark_automatic_recovery(
@@ -3159,6 +3253,31 @@ impl OrmAiConsequentialToolCallService {
         provider_result: &AiProviderCallResult,
         context: AiApplicationToolCallContext,
     ) -> Result<crate::AiPreparedNativeApproval, AiError> {
+        self.prepare_native_approval_inner(lease, provider_result, context, None)
+            .await
+    }
+
+    /// Prepares the native approval of one approval-required generated
+    /// mutation a fixed-broker execute call resolved to, exactly as
+    /// [`Self::prepare_native_approval`] prepares the direct definition.
+    pub(crate) async fn prepare_brokered_native_approval(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        resolved: ResolvedApplicationCall,
+    ) -> Result<crate::AiPreparedNativeApproval, AiError> {
+        self.prepare_native_approval_inner(lease, provider_result, context, Some(resolved))
+            .await
+    }
+
+    async fn prepare_native_approval_inner(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        brokered: Option<ResolvedApplicationCall>,
+    ) -> Result<crate::AiPreparedNativeApproval, AiError> {
         if self.provider_session_service.is_none()
             || provider_result.provider_session_claim().is_none()
         {
@@ -3166,7 +3285,7 @@ impl OrmAiConsequentialToolCallService {
         }
         let id = AiToolCallId::new();
         let prepared = self
-            .prepare_consequential_request(lease, provider_result, context, id)
+            .prepare_consequential_request(lease, provider_result, context, id, brokered)
             .await?;
         let preparation = NativeApprovalPreparation {
             context: prepared.context.clone(),
@@ -3319,12 +3438,41 @@ impl OrmAiConsequentialToolCallService {
         {
             return Err(AiError::Conflict);
         }
+        // A broker-routed candidate is re-resolved from its stored resolved
+        // identity and arguments only, never from the broker's process-local
+        // loaded binding.
+        let call = AiToolCallRecord::find_by_id(
+            self.application_tools.run_service.custody_database(),
+            &candidate.tool_call_id().0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::Conflict)?;
+        let brokered = if call.provider_tool_id.is_some() {
+            let arguments = self
+                .application_tools
+                .open(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_tool_calls",
+                        call.id,
+                        "protected_arguments",
+                        &scope,
+                    ),
+                    call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
+                )
+                .await?;
+            Some(ResolvedApplicationCall::from_record(&call, arguments)?)
+        } else {
+            None
+        };
         let current = self
             .prepare_consequential_request(
                 lease,
                 provider_result,
                 original.context,
                 candidate.tool_call_id(),
+                brokered,
             )
             .await?;
         if current.binding != original.binding
@@ -3411,7 +3559,7 @@ impl OrmAiConsequentialToolCallService {
     ) -> Result<AiRequestedConsequentialToolCall, AiError> {
         let id = AiToolCallId::new();
         let prepared = self
-            .prepare_consequential_request(lease, provider_result, context, id)
+            .prepare_consequential_request(lease, provider_result, context, id, None)
             .await?;
         let active_lease = self
             .application_tools
@@ -3431,12 +3579,48 @@ impl OrmAiConsequentialToolCallService {
         .await
     }
 
+    /// [`Self::request_approval`] for a generated mutation a broker execute
+    /// call resolved to. Test-only: the classified native coordinator routes
+    /// brokered approvals through [`Self::prepare_brokered_native_approval`],
+    /// which shares the same preparation.
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) async fn request_brokered_approval(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        expires_at: time::OffsetDateTime,
+        resolved: ResolvedApplicationCall,
+    ) -> Result<AiRequestedConsequentialToolCall, AiError> {
+        let id = AiToolCallId::new();
+        let prepared = self
+            .prepare_consequential_request(lease, provider_result, context, id, Some(resolved))
+            .await?;
+        let active_lease = self
+            .application_tools
+            .run_service
+            .begin_tool_call(lease, prepared.call)
+            .await?;
+        self.request_prepared_approval_inner(
+            &active_lease,
+            provider_result,
+            id,
+            prepared.binding,
+            prepared.preview,
+            expires_at,
+            false,
+            false,
+        )
+        .await
+    }
+
     async fn prepare_consequential_request(
         &self,
         lease: &AiRunLease,
         provider_result: &AiProviderCallResult,
         context: AiApplicationToolCallContext,
         id: AiToolCallId,
+        brokered: Option<ResolvedApplicationCall>,
     ) -> Result<PreparedConsequentialRequest, AiError> {
         validate_provider_binding(&self.application_tools, lease, provider_result, &context)?;
         if provider_result.provider_session_claim().is_some()
@@ -3448,7 +3632,11 @@ impl OrmAiConsequentialToolCallService {
             .tool_calls()
             .get(context.tool_call_index)
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
-        let argument_bytes = serde_json::to_vec(provider_call.arguments())
+        let resolved = match brokered {
+            Some(resolved) => resolved.bind_provider_call(provider_call)?,
+            None => ResolvedApplicationCall::direct(provider_call),
+        };
+        let argument_bytes = serde_json::to_vec(&resolved.arguments)
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if argument_bytes.len() > self.application_tools.limits.maximum_argument_bytes {
             return Err(AiError::InvalidInput(
@@ -3478,7 +3666,7 @@ impl OrmAiConsequentialToolCallService {
         }
 
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
-        let argument_hash = canonical_json_hash(provider_call.arguments())?;
+        let argument_hash = canonical_json_hash(&resolved.arguments)?;
         let idempotency_key = None;
         let invocation = GraphqlInvocationContext {
             run_id: lease.run_id(),
@@ -3493,15 +3681,19 @@ impl OrmAiConsequentialToolCallService {
             self.application_tools
                 .runtime
                 .tool_catalog()
-                .descriptor(provider_call.tool_id())
+                .descriptor(&resolved.tool_id)
                 .cloned()
         {
-            validate_approval_descriptor(&descriptor, provider_call.tool_fingerprint())?;
+            // A reviewed static mutation is only ever offered directly.
+            if resolved.is_brokered() {
+                return Err(AiError::Forbidden);
+            }
+            validate_approval_descriptor(&descriptor, &resolved.tool_fingerprint)?;
             let request = build_tool_request(
                 lease,
                 id,
                 &descriptor,
-                provider_call.arguments().clone(),
+                resolved.arguments.clone(),
                 &context,
                 None,
             )?;
@@ -3514,9 +3706,9 @@ impl OrmAiConsequentialToolCallService {
             (descriptor, request, preauthorization, fingerprint)
         } else {
             let prepared = self.application_tools.runtime.prepare_mutation_capability(
-                provider_call.tool_id(),
-                provider_call.tool_fingerprint(),
-                provider_call.arguments().clone(),
+                &resolved.tool_id,
+                &resolved.tool_fingerprint,
+                resolved.arguments.clone(),
                 invocation,
             )?;
             if prepared.execution_policy()
@@ -3535,7 +3727,7 @@ impl OrmAiConsequentialToolCallService {
                 descriptor,
                 request,
                 preauthorization,
-                provider_call.tool_fingerprint().to_owned(),
+                resolved.tool_fingerprint.clone(),
             )
         };
         if preauthorization.approval_requirement() != AiApprovalRule::OneShot {
@@ -3566,15 +3758,16 @@ impl OrmAiConsequentialToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                provider_call.arguments().clone(),
+                resolved.arguments.clone(),
             )
             .await?;
-        let provenance = if self
-            .application_tools
-            .runtime
-            .tool_catalog()
-            .descriptor(provider_call.tool_id())
-            .is_some()
+        let provenance = if !resolved.is_brokered()
+            && self
+                .application_tools
+                .runtime
+                .tool_catalog()
+                .descriptor(&resolved.tool_id)
+                .is_some()
         {
             Some(
                 crate::AiToolExecutionProvenance::from_provider_call(
@@ -3616,6 +3809,8 @@ impl OrmAiConsequentialToolCallService {
                 .map_err(|_| AiError::InvalidInput("tool call index is invalid".to_owned()))?,
             tool_id: descriptor.id.as_str().to_owned(),
             tool_fingerprint: binding_fingerprint,
+            provider_tool_id: resolved.provider_columns().0,
+            provider_tool_fingerprint: resolved.provider_columns().1,
             protected_arguments,
             argument_hash,
             risk: risk_value(descriptor.risk).to_owned(),
@@ -3953,6 +4148,19 @@ impl OrmAiConsequentialToolCallService {
                 tenant_id: session.tenant_id.clone(),
             };
             validate_session_binding(&session, lease, &scope)?;
+            // A broker-routed row runs its stored resolved mutation; its
+            // provider-facing identity must be the broker execute definition.
+            if !brokered::valid_provider_identity(&call)
+                || (call.provider_tool_id.is_some()
+                    && self
+                        .application_tools
+                        .runtime
+                        .tool_catalog()
+                        .descriptor(&AiToolId::parse(call.tool_id.clone())?)
+                        .is_some())
+            {
+                return Err(AiError::Conflict);
+            }
             let tool_id = AiToolId::parse(call.tool_id.clone())?;
             let provider_kind = call
                 .provider_kind
@@ -4426,7 +4634,7 @@ impl OrmAiConsequentialToolCallService {
             let Some(outbound_bytes) = output_bytes
                 .len()
                 .checked_add(call.provider_call_id.len())
-                .and_then(|bytes| bytes.checked_add(descriptor.id.as_str().len()))
+                .and_then(|bytes| bytes.checked_add(call.provider_facing_tool_id().len()))
             else {
                 return self
                     .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
@@ -4530,9 +4738,11 @@ impl OrmAiConsequentialToolCallService {
                         } else {
                             AiApplicationToolCallState::Completed
                         },
+                        // The result answers the provider's own call: for a
+                        // broker-routed mutation, the broker execute call.
                         Some(ModelInputBlock::ToolResult {
                             call_id: call.provider_call_id.clone(),
-                            tool_id: descriptor.id.as_str().to_owned(),
+                            tool_id: call.provider_facing_tool_id().to_owned(),
                             output: model_output.clone(),
                         }),
                         Some(decision.id.0),
@@ -4942,6 +5152,11 @@ const TYPE_UNKNOWN_CORRECTION: BrokerCorrection = BrokerCorrection {
     disclosure_contract: b"graphql-orm-ai/capability-type-correction/v1",
 };
 
+const CONSEQUENTIAL_UNROUTED_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "Nothing was executed. This run cannot request changes through the capability broker. Answer with the information you have, and tell the user the change needs a session that can request it.",
+    disclosure_contract: b"graphql-orm-ai/capability-consequential-unrouted-correction/v1",
+};
+
 const SELECTION_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
     text: "Nothing was executed. This run does not hold that candidate or loadedReference; it may have expired. Call discover to obtain a current candidate, describe it, then issue a new call with the returned loadedReference.",
     disclosure_contract: b"graphql-orm-ai/capability-selection-stale-correction/v1",
@@ -4961,6 +5176,11 @@ impl From<AiError> for BrokerCallFailure {
             }
             AiError::InvalidInput(message) if message == crate::AI_CAPABILITY_TYPE_UNKNOWN => {
                 Some(TYPE_UNKNOWN_CORRECTION)
+            }
+            AiError::InvalidInput(message)
+                if message == crate::AI_CAPABILITY_CONSEQUENTIAL_UNROUTED =>
+            {
+                Some(CONSEQUENTIAL_UNROUTED_CORRECTION)
             }
             _ => None,
         };

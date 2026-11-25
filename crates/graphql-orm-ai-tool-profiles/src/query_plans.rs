@@ -2214,6 +2214,20 @@ impl AiGraphqlMutationCapability {
         self.execution_policy
     }
 
+    /// Compact typed signature of this mutation for the capability broker.
+    ///
+    /// It renders [`Self::compact_argument_schema`] exactly as
+    /// [`AiGraphqlQueryCapability::capability_signature`] renders a query.
+    /// It is model-facing only: plans are still validated against the
+    /// unchanged closed schema and the fingerprint is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compact schema cannot be rendered.
+    pub fn capability_signature(&self) -> Result<crate::AiCapabilitySignature, AiError> {
+        self.base.capability_signature()
+    }
+
     /// Returns the public entity this mutation was generated for, when it is
     /// a generated entity operation.
     pub fn generated_entity_name(&self) -> Option<&str> {

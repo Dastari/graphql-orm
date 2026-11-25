@@ -10,7 +10,12 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
-AI tool profiles 0.32.0 compiles continuable keyset pages with a server-held
+AI tool profiles 0.33.0 renders compact typed signatures for generated
+mutations and subscriptions, so the capability broker can describe generated
+mutations. See the
+[migration guide](MIGRATION.md#0330-mutation-and-subscription-signatures).
+
+Version 0.32.0 compiles continuable keyset pages with a server-held
 cursor and lists capability index entries for hierarchical browsing, for
 capability broker version 3. Existing fingerprints are unchanged. See the
 [migration guide](MIGRATION.md#0320-continuable-keyset-pages).

@@ -155,6 +155,52 @@ authorization of the destructive steps before applying the plan in an external
 transaction. No data backfill is required.
 [Pre-0.83 approval index upgrade](#01560-to-01570)
 
+### Generated mutations through the capability broker (#551)
+
+**Action needed** for every host of the ORM services, and for fixed-broker
+hosts.
+
+1. **Apply AI schema module 0.86.0.** It adds two nullable columns to
+   `graphql_orm_ai_tool_calls`: `provider_tool_id` and
+   `provider_tool_fingerprint`. The upgrade is two additive column steps with
+   no backfill. Existing rows keep both columns null and stay direct calls.
+   SQL Server deployments with the external schema policy apply the reviewed
+   DDL as for any column addition.
+2. **Reading tool-call rows.** For a call routed through the fixed broker,
+   `tool_id` and `tool_fingerprint` are the resolved generated mutation, and
+   `provider_tool_id` and `provider_tool_fingerprint` are the broker execute
+   definition the provider called. Host queries that need the provider-facing
+   tool must read `provider_tool_id` first and fall back to `tool_id`.
+3. **Rebind (same release as broker version 3).** The discover definition's
+   `kind` enum adds `generated_mutation`, and the discover, browse and
+   execute descriptions change, so those definition fingerprints change
+   again in this release. Hosts upgrading once from the last release rebind
+   once. Admit the current five broker fingerprints wherever you list them
+   by value.
+4. **Opt in (optional).** Call
+   `AiCapabilityBrokerSession::with_brokered_mutations` on the session of a
+   classified native supervised turn. Its hierarchical rules decide which
+   mutations are reachable: a mutation's own capability fingerprint must
+   pass at its reviewed classification (one-shot supervised write for
+   approval-required, approval-free autonomous write for automatic), so
+   rules that list only the broker fingerprints admit none. Nothing changes
+   for sessions that do not opt in, or for the read-only coordinator.
+5. **Approved generated mutations.** `AiRuntime::execute_approved_prepared_mutation`
+   now checks the approval's argument hash against the hash of the provider
+   plan (`AiPreparedGraphqlMutation::argument_hash`) instead of the compiled
+   variables. Approvals created by `OrmAiConsequentialToolCallService`
+   already bind the plan hash, so they now execute instead of converging to
+   `RecoveryRequired`. A host that builds its own `AiApprovalBinding` for a
+   prepared mutation must set `argument_hash` to `prepared.argument_hash()`.
+6. **Restore and recovery.** No extra action. A restored broker-routed row is
+   re-resolved only from its stored resolved identity and arguments; the
+   broker's process-local state is never needed. A row whose provider-facing
+   columns are not both the broker execute definition, or both null, is
+   refused at approved execution and checkpoint adoption.
+
+No GraphQL SDL change. Subscriptions keep their wait contract and do not
+enter the broker in this release.
+
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 
 **Action needed** when host code matches `ProviderError::InvalidConfiguration`

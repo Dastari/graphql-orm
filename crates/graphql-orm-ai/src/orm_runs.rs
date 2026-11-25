@@ -729,6 +729,9 @@ pub(crate) struct PreparedToolCallStart {
     pub tool_call_index: i64,
     pub tool_id: String,
     pub tool_fingerprint: String,
+    /// Provider-facing identity of a broker-routed call; `None` for a direct call.
+    pub provider_tool_id: Option<String>,
+    pub provider_tool_fingerprint: Option<String>,
     pub execution_provenance: Option<crate::AiToolExecutionProvenance>,
     /// Shared rather than cloned: the refusal is a minted-only token, and a
     /// retried transaction must never duplicate it.
@@ -2343,7 +2346,7 @@ impl OrmAiRunService {
                         if call.run_id != lease.run_id.0
                             || call.lease_generation != lease.lease_generation
                             || call.provider_call_id != expected.provider_call_id
-                            || call.tool_id != expected.tool_id
+                            || call.provider_facing_tool_id() != expected.tool_id
                             || call.provider_kind.as_deref()
                                 != Some(checkpoint.provider_kind.as_str())
                             || call.provider_model.as_deref()
@@ -3395,6 +3398,8 @@ impl OrmAiRunService {
                             tool_call_index: call.tool_call_index,
                             tool_id: call.tool_id,
                             tool_fingerprint: call.tool_fingerprint,
+                            provider_tool_id: call.provider_tool_id,
+                            provider_tool_fingerprint: call.provider_tool_fingerprint,
                             execution_provenance,
                             protected_arguments: Some(call.protected_arguments),
                             argument_hash: call.argument_hash,
@@ -8316,6 +8321,8 @@ mod tests {
                 tool_call_index: 0,
                 tool_id: "records.read".to_owned(),
                 tool_fingerprint: "tool-fingerprint".to_owned(),
+                provider_tool_id: None,
+                provider_tool_fingerprint: None,
                 execution_provenance: None,
                 protected_arguments: Some(serde_json::json!({"protected": true})),
                 argument_hash: "argument-hash".to_owned(),
@@ -8765,6 +8772,8 @@ mod tests {
                 tool_call_index: 0,
                 tool_id: "records.update".to_owned(),
                 tool_fingerprint: "tool-fingerprint".to_owned(),
+                provider_tool_id: None,
+                provider_tool_fingerprint: None,
                 execution_provenance: None,
                 protected_arguments: None,
                 argument_hash: "argument-hash".to_owned(),
@@ -10695,6 +10704,8 @@ mod tests {
             tool_call_index: 0,
             tool_id: "reviewed-action".to_owned(),
             tool_fingerprint: "descriptor-v1".to_owned(),
+            provider_tool_id: None,
+            provider_tool_fingerprint: None,
             execution_provenance: None,
             native_preflight_refusal: None,
             protected_arguments: serde_json::json!({"ciphertext":"arguments"}),
