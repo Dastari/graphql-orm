@@ -18,8 +18,9 @@ supersedes: []
   server-held `after` cursor, and `AiCompiledGraphqlQuery::take_page_info`
   removes the page info from the resolver response before disclosure.
   `AiCapabilityIndexSet::browse_matches` lists top-level entries for
-  hierarchical browsing. Existing capability, catalogue, index and plan
-  fingerprints, documents and plan schemas are unchanged.
+  hierarchical browsing. The `Debug` output of `AiGraphqlQueryPageInfo` and
+  of a compiled page redacts the cursor. Existing capability, catalogue,
+  index and plan fingerprints, documents and plan schemas are unchanged.
   [Migration](MIGRATION.md#0320-continuable-keyset-pages)
 
 ## Unreleased - 0.31.0

@@ -692,7 +692,12 @@ impl GraphqlRequestContext {
 }
 
 /// Server-authored GraphQL operation request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `variables` can carry server-held state the model never sees, such as the
+/// keyset cursor of a continued broker page. The `Debug` output therefore
+/// lists variable names only. A host executor receives the values to run
+/// the operation and must not log or forward them.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolGraphqlRequest {
     /// Static server-authored operation document.
     pub document: String,
@@ -704,6 +709,28 @@ pub struct ToolGraphqlRequest {
     pub variables: serde_json::Value,
     /// Invocation/audit metadata.
     pub invocation: GraphqlInvocationContext,
+}
+
+impl std::fmt::Debug for ToolGraphqlRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variables = self.variables.as_object().map_or_else(
+            || vec!["<redacted>".to_owned()],
+            |object| {
+                object
+                    .keys()
+                    .map(|name| format!("{name}: <redacted>"))
+                    .collect()
+            },
+        );
+        formatter
+            .debug_struct("ToolGraphqlRequest")
+            .field("document", &self.document)
+            .field("operation_name", &self.operation_name)
+            .field("contract", &self.contract)
+            .field("variables", &variables)
+            .field("invocation", &self.invocation)
+            .finish()
+    }
 }
 
 /// Bounded normalized GraphQL result.

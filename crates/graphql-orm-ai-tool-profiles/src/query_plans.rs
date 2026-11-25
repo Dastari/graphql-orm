@@ -51,7 +51,8 @@ pub const AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES: usize = 1_024;
 /// The cursor is opaque resolver state. It is never part of a model-facing
 /// result: a caller keeps it server-side and passes it back to
 /// [`AiGraphqlQueryCapability::compile_compact_page`] for the next page.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Its `Debug` output redacts the cursor.
+#[derive(Clone, Eq, PartialEq)]
 pub struct AiGraphqlQueryPageInfo {
     /// Whether the resolver reports a further page.
     pub has_next_page: bool,
@@ -59,6 +60,22 @@ pub struct AiGraphqlQueryPageInfo {
     /// [`AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES`].
     pub end_cursor: Option<String>,
 }
+
+impl std::fmt::Debug for AiGraphqlQueryPageInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiGraphqlQueryPageInfo")
+            .field("has_next_page", &self.has_next_page)
+            .field(
+                "end_cursor",
+                &self.end_cursor.as_ref().map(|_| REDACTED_CURSOR),
+            )
+            .finish()
+    }
+}
+
+/// Placeholder `Debug` output for a resolver keyset cursor.
+const REDACTED_CURSOR: &str = "<redacted cursor>";
 
 impl AiGraphqlQueryPageInfo {
     /// The cursor of the next page, when one exists and can be requested.
@@ -3381,7 +3398,10 @@ impl AiCompiledGraphqlSubscription {
 }
 
 /// Exact server-compiled query ready for ordinary authorization and routing.
-#[derive(Clone, Debug)]
+///
+/// The `Debug` output of a continuable page redacts its variables, which
+/// carry the server-held keyset cursor.
+#[derive(Clone)]
 pub struct AiCompiledGraphqlQuery {
     capability_fingerprint: String,
     plan_fingerprint: String,
@@ -3442,6 +3462,23 @@ impl AiCompiledGraphqlMutation {
     ) {
         let (descriptor, disclosure, variables) = self.compiled.into_parts();
         (self.execution_policy, descriptor, disclosure, variables)
+    }
+}
+
+impl std::fmt::Debug for AiCompiledGraphqlQuery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("AiCompiledGraphqlQuery");
+        debug
+            .field("capability_fingerprint", &self.capability_fingerprint)
+            .field("plan_fingerprint", &self.plan_fingerprint)
+            .field("descriptor", &self.descriptor)
+            .field("disclosure_schema", &self.disclosure_schema);
+        if self.page_info.is_some() {
+            debug.field("variables", &"<redacted page variables>");
+        } else {
+            debug.field("variables", &self.variables);
+        }
+        debug.field("page", &self.page_info.is_some()).finish()
     }
 }
 
@@ -9377,6 +9414,9 @@ mod tests {
             &json!({"v0": {"limit": 2, "after": "cursor-1"}})
         );
         assert_ne!(next.plan_fingerprint(), first.plan_fingerprint());
+        // Debug output of a page never carries its server-held cursor.
+        assert!(!format!("{next:?}").contains("cursor-1"));
+        assert!(format!("{unpaged:?}").contains("limit"));
         for cursor in [
             String::new(),
             "c".repeat(AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES + 1),
@@ -9402,6 +9442,7 @@ mod tests {
         }});
         let page_info = next.take_page_info(&mut data).unwrap().unwrap();
         assert_eq!(page_info.next_cursor(), Some("cursor-2"));
+        assert!(!format!("{page_info:?}").contains("cursor-2"));
         assert_eq!(
             data,
             json!({"SubscriptionsKeyset": {"edges": [node.clone()]}})

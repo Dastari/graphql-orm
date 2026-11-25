@@ -545,22 +545,36 @@ ambiguous:
 | `level` | Needs | Returns |
 | --- | --- | --- |
 | `namespaces` | nothing | each logical namespace with its number of capabilities |
-| `capabilities` | `namespace`, optional `entity` | discover-shaped candidates, describable directly |
-| `operations` | `namespace` and `entity` | the entity candidate and each operation's name, shape, description and result description |
+| `capabilities` | `namespace`, optional `entity` | discover-shaped candidates with a `candidateReference` |
+| `operations` | `namespace` and `entity` | the entity's candidate header (no operation list) and one page of its operations: name, shape, description and result description |
 
 Pages hold at most `AI_CAPABILITY_BROWSE_PAGE_MAXIMUM` (32) items, with
-`offset` and `nextOffset`. Browsing applies host policy exactly as discover
-does, before anything is counted or paged: every listed entry and each
-entity's grouped roots go to `authorize_discovery` in one batch, an entity is
-kept only with its admitted roots, and a namespace appears only with an
-admitted capability. A denied or unknown entity gives the same empty
-`operations` page. The batch depends only on the level and filters, and
-`with_maximum_discovery_authorizations` bounds it as it bounds discovery
-(`AI_CAPABILITY_DISCOVERY_TOO_BROAD`). At `namespaces` the batch is the whole
-index set, so a host with a large catalogue and an expensive policy should
-override `authorize_discovery`. Listed candidates are retained like
-discovery candidates (and in the discovery cache when it is enabled), so
-describe accepts them. Browsing grants no load or execution authority.
+`offset` and `nextOffset`; `offset` goes up to
+`AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET` (1,048,576, the most entries an index
+set can hold), so every returned `nextOffset` is accepted. Browsing applies
+host policy exactly as discover does, before anything is counted or paged:
+every listed entry and each entity's grouped roots go to
+`authorize_discovery` in one batch, an entity is kept only with its admitted
+roots, and a namespace appears only with an admitted capability.
+
+Nothing in a browse result depends on what the principal may not see:
+
+- An unknown filter, a filter host policy denies, and a browse whose policy
+  batch would exceed `with_maximum_discovery_authorizations` all return the
+  same empty page. Unlike discover, browse never reports
+  `AI_CAPABILITY_DISCOVERY_TOO_BROAD`, because its exact filters would turn
+  that error into a signal about hidden entries. Size the bound for your
+  largest namespace, or override `authorize_discovery` (at `namespaces` the
+  batch is the whole index set).
+- Results carry no index or entry fingerprint. Each listed capability has an
+  opaque `candidateReference`, fresh for every browse, that only this run's
+  broker session resolves; describe takes it in place of
+  `candidateFingerprint`. Browse results are not shared through the
+  discovery cache.
+- The `operations` header has no operation list, so `limit` bounds every
+  list the page returns.
+
+Browsing grants no load or execution authority.
 
 **Continuation handles.** A generated keyset root
 (`AiGraphqlQueryCapability::supports_continuation`) returns its rows a page
@@ -592,11 +606,25 @@ argument. A continued page is not authorized by its handle:
 
 An unknown, altered, evicted or expired handle, or one presented with another
 `loadedReference` or session, is `selection_stale`. Handles expire with
-their loaded binding (the broker's loaded TTL, at most five minutes). A
+their loaded binding (the broker's loaded TTL, at most five minutes) and are
+expired from the expiry instant on. Retention and expiry are checked again
+after the policy checks, immediately before the page is dispatched. A
 session retains at most `AI_CAPABILITY_MAXIMUM_CONTINUATIONS` (32) handles,
-dropping the oldest; a chain reaches at most
-`AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES` (256) pages; and an end cursor
-longer than `AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES` (1,024) ends the chain.
+dropping the oldest. Every handle of one chain draws on a shared budget of
+`AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES` (256) executions, the first page
+included: reusing a handle or redeeming handles concurrently spends the same
+budget, so 256 bounds the chain's total work, not only its depth. A spent
+chain issues no new handle and its handles are `selection_stale`. An end
+cursor longer than `AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES` (1,024) ends the
+chain.
+
+The cursor is also kept out of diagnostics: the `Debug` output of
+`AiCapabilityBrokerSession`, `AiCapabilityExecution`,
+`AiGraphqlQueryPageInfo`, a compiled page (`AiCompiledGraphqlQuery`) and
+`ToolGraphqlRequest` (variable names only) redacts it. The host's
+`GraphqlToolExecutor` necessarily receives it as the `after` variable of the
+continued request; a host transport must not log or forward request
+variables.
 Every page is bounded by `maximumItems` and the result limits as before, so
 results stay O(page). Offset list roots take the model's own `page.offset`
 and are not continuable.
@@ -642,6 +670,15 @@ What else the binding covers depends on the mode:
 | --- | --- | --- |
 | `EagerExact`, `ProviderDeferred`, `ClientDeferred` | the complete canonical index set | rebinds the retained session |
 | `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` (3) | keeps the retained session |
+
+Broker version 3 also versions the fixed-broker result contracts it
+changes: discover results carry disclosure contract
+`capability-broker-discover/v3` and describe results
+`capability-broker-describe/v3`; browse is `capability-broker-browse/v1`,
+and a continuable execute result has a contract derived from its query's
+disclosure schema. Client-deferred discovery is unchanged: it still returns
+`version: 2` under the version 2 contract
+(`AI_CAPABILITY_CLIENT_DEFERRED_DISCOVERY_VERSION`).
 
 Bumping the broker version changes the fixed broker definitions and every
 fixed-broker binding, so a session bound under an earlier version matches no

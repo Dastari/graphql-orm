@@ -513,7 +513,7 @@ pub async fn keyset_continuation_round_trip(database: Database) {
             &session,
             &json!({
                 "capabilityId": candidate["capabilityId"],
-                "candidateFingerprint": candidate["candidateFingerprint"],
+                "candidateReference": candidate["candidateReference"],
             }),
         )
         .await
@@ -542,6 +542,38 @@ pub async fn keyset_continuation_round_trip(database: Database) {
             .expect("page compiles");
         assert!(compiled.descriptor().document.contains("pageInfo"));
         assert_ne!(compiled.plan_fingerprint(), unpaged.plan_fingerprint());
+        // The cursor a continued page carries never appears in Debug output:
+        // not of the execution, the compiled page, or the host request.
+        if let Some(cursor) = execution.continuation_cursor() {
+            let contract = compiled
+                .descriptor()
+                .graphql_contract
+                .clone()
+                .expect("page contract");
+            let request = ToolGraphqlRequest {
+                document: compiled.descriptor().document.clone(),
+                operation_name: contract.operation_name.clone(),
+                contract,
+                variables: compiled.variables().clone(),
+                invocation: GraphqlInvocationContext {
+                    run_id: run.run_id,
+                    tool_call_id: AiToolCallId::new(),
+                    scope: AiScope::new("tenant", "broker-parity"),
+                    correlation_id: "broker-parity".to_owned(),
+                    causation_id: "broker-parity".to_owned(),
+                    delegation_reference: None,
+                    idempotency_key: None,
+                },
+            };
+            assert!(request.variables.to_string().contains(cursor));
+            for debug in [
+                format!("{execution:?}"),
+                format!("{compiled:?}"),
+                format!("{request:?}"),
+            ] {
+                assert!(!debug.contains(cursor), "{debug}");
+            }
+        }
         let response = schema
             .execute(
                 graphql_orm::async_graphql::Request::new(compiled.descriptor().document.clone())
@@ -556,6 +588,9 @@ pub async fn keyset_continuation_round_trip(database: Database) {
             .take_page_info(&mut data)
             .expect("page info")
             .expect("a page reports its page info");
+        if let Some(cursor) = page_info.end_cursor.as_deref() {
+            assert!(!format!("{page_info:?}").contains(cursor));
+        }
         // What remains is exactly the disclosed shape: no cursor.
         assert!(!data.to_string().contains("pageInfo"), "{data}");
         compiled

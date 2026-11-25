@@ -105,7 +105,14 @@ or data migration is needed.
    exhaustive matches. Construct `AiCapabilityBrokerAmplification` with
    `browse_calls` or `..Default::default()`. `total_calls` counts browse
    calls.
-3. **Results and prompts.** A broker execute result of a generated keyset
+3. **Results and prompts.** Fixed-broker discover and describe results
+   report `version: 3` under the new disclosure contracts
+   `capability-broker-discover/v3` and `capability-broker-describe/v3`;
+   client-deferred discovery keeps `version: 2` and its version 2 contract.
+   Browse candidates carry an opaque `candidateReference` instead of
+   `candidateFingerprint`, and browse results carry no index fingerprint;
+   describe takes either `candidateFingerprint` (from discover) or
+   `candidateReference` (from browse), exactly one. A broker execute result of a generated keyset
    root now carries `continuation` beside `data` and `errorCodes`: a
    `{"handle", "expiresInSeconds"}` object while more rows exist, else
    `null`. Its disclosure-schema fingerprint is derived from the query's own
@@ -120,8 +127,15 @@ or data migration is needed.
 4. **Policy.** Browse sends each listed entry and its grouped roots to
    `authorize_discovery`, like discover. At `level: namespaces` that batch
    is the whole index set. A host with an expensive policy should override
-   `authorize_discovery` or set
-   `with_maximum_discovery_authorizations`.
+   `authorize_discovery`. Over a `with_maximum_discovery_authorizations`
+   bound, browse returns the empty page it returns for an unknown filter
+   rather than an error, so size the bound for your largest namespace.
+5. **Continuation budget and logging.** All handles of one chain share a
+   budget of 256 executions, reuse included. `ToolGraphqlRequest`'s `Debug`
+   output now lists variable names only, and the `Debug` output of the
+   broker session, executions, page info and compiled pages redacts
+   cursors. A host executor receives a continued page's cursor in the
+   request variables: do not log or forward them.
 
 No GraphQL SDL, AI schema-module or data migration is needed.
 

@@ -33,8 +33,16 @@ supersedes: []
   `AiCapabilityBrokerSession::continuation_count`,
   `AiRuntime::execute_query_capability_page`,
   `AiToolCatalog::query_capability_supports_continuation` and
-  `compile_query_capability_page`. The model-context benchmark reports browse
-  result sizes. [Migration](MIGRATION.md#capability-broker-version-3-551)
+  `compile_query_capability_page`. Browse answers an over-bound, denied or
+  unknown filter with the same empty page, carries opaque
+  `candidateReference`s (accepted by describe) instead of fingerprints, and
+  never lists more than `limit` items. All handles of a chain share one
+  256-execution budget. Cursors are redacted from the `Debug` output of the
+  broker session, executions, page info, compiled pages and
+  `ToolGraphqlRequest` (variable names only). Fixed-broker discover and
+  describe results use version 3 disclosure contracts; client-deferred
+  discovery is unchanged. The model-context benchmark reports browse result
+  sizes. [Migration](MIGRATION.md#capability-broker-version-3-551)
 
 - **Breaking (#828).** All six Codex app-server process turn methods take
   `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and

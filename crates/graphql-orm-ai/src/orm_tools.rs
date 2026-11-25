@@ -1833,8 +1833,14 @@ impl OrmAiApplicationToolCallService {
                         .dispatch_discover(lease.principal_reference(), &run, session, arguments)
                         .await?
                 };
-                BrokerCallOutput::metadata(output, broker_disclosure_fingerprint(operation))
-                    .map_err(Into::into)
+                // Client-deferred discovery keeps its version 2 contract.
+                let fingerprint =
+                    if delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred {
+                        client_deferred_discovery_disclosure_fingerprint()
+                    } else {
+                        broker_disclosure_fingerprint(operation)
+                    };
+                BrokerCallOutput::metadata(output, fingerprint).map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::Browse => {
                 let output = Box::pin(broker.dispatch_browse(
@@ -5058,13 +5064,13 @@ fn brokered_static_plan_schema(descriptor: &crate::AiToolDescriptor) -> serde_js
 fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) -> String {
     hex::encode(Sha256::digest(match operation {
         crate::AiCapabilityBrokerOperation::Discover => {
-            b"graphql-orm-ai/capability-broker-discover/v2".as_slice()
+            b"graphql-orm-ai/capability-broker-discover/v3".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Browse => {
             b"graphql-orm-ai/capability-broker-browse/v1".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Describe => {
-            b"graphql-orm-ai/capability-broker-describe/v2".as_slice()
+            b"graphql-orm-ai/capability-broker-describe/v3".as_slice()
         }
         crate::AiCapabilityBrokerOperation::DescribeType => {
             b"graphql-orm-ai/capability-broker-describe-type/v1".as_slice()
@@ -5082,6 +5088,13 @@ fn continuation_disclosure_fingerprint(query_disclosure_fingerprint: &str) -> St
     digest.update(b"graphql-orm-ai/capability-broker-continuation/v1\0");
     digest.update(query_disclosure_fingerprint.as_bytes());
     hex::encode(digest.finalize())
+}
+
+/// Unchanged version 2 contract of client-deferred discovery results.
+fn client_deferred_discovery_disclosure_fingerprint() -> String {
+    hex::encode(Sha256::digest(
+        b"graphql-orm-ai/capability-broker-discover/v2",
+    ))
 }
 
 fn safe_failure_disclosure_fingerprint() -> String {
