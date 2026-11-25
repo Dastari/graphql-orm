@@ -97,6 +97,9 @@ DNS rebinding, private-address, container-boundary, and network-zone rules. The
 adapter does not discover servers or models and never accepts a model-authored
 URL.
 
+Profile creates and edits enforce the same root-path requirement. Existing
+profiles still load for administrative review.
+
 Response streams are bounded to 16 MiB total, 2 MiB per NDJSON line, 64 tool
 calls and the configured request timeout. The transport chunk allowance is four
 chunks per maximum output token plus 1,024 framing chunks, capped by

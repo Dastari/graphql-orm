@@ -4134,6 +4134,7 @@ fn classify_background_retrieval_error(
             ))
         }
         ProviderError::InvalidConfiguration(_)
+        | ProviderError::InvalidEndpointPath(_)
         | ProviderError::InvalidRequest
         | ProviderError::EgressDenied
         | ProviderError::BudgetDenied

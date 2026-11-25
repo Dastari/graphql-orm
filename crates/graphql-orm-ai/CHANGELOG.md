@@ -10,6 +10,21 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
 ## Unreleased - 0.162.0
 
 - Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
