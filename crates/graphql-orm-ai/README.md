@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.166.0 verifies the stored provider plan hash when executing an approved
+generated mutation. See the [migration guide](MIGRATION.md#01640-to-01660-approved-generated-mutations).
+
 AI 0.164.0 uses the ORM's exact string filters to seek on SQL Server run-state
 indexes (#867). See the [migration guide](MIGRATION.md#01630-to-01640).
 

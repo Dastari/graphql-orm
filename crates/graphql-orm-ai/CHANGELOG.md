@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.166.0
+
+- **Fixed.** Approval-required generated mutations now execute after approval.
+  The runtime verifies the canonical provider plan hash already stored in the
+  approval. **No action** for hosts using the built-in approval service.
+  [Migration](MIGRATION.md#01640-to-01660-approved-generated-mutations)
+
 ## Unreleased - 0.164.0
 
 - SQL Server run candidate reads use the ORM's generated exact string filters
