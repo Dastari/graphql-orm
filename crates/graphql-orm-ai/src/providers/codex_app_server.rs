@@ -10119,10 +10119,10 @@ pub(crate) mod tests {
     #[test]
     fn fixed_broker_definitions_project_their_nullable_scalar_unions_for_codex() {
         let definitions = crate::capability_broker_definitions();
-        assert_eq!(definitions.len(), 4);
+        assert_eq!(definitions.len(), 5);
         let projected = project_codex_dynamic_tools(&definitions)
             .expect("every crate-authored fixed broker schema should project");
-        assert_eq!(projected.protocol_values.len(), 4);
+        assert_eq!(projected.protocol_values.len(), 5);
         let describe_type = projected
             .protocol_values
             .iter()
@@ -10167,15 +10167,36 @@ pub(crate) mod tests {
         );
         assert_eq!(
             execute.pointer("/inputSchema/required"),
-            Some(&json!(["loadedReference", "selections"]))
+            Some(&json!(["loadedReference"]))
         );
-        assert!(
-            jsonschema::validator_for(&execute["inputSchema"])
-                .expect("projected execute schema")
-                .is_valid(&json!({
-                    "loadedReference": "b".repeat(64),
-                    "selections": ["records.id"]
-                }))
+        let execute_schema =
+            jsonschema::validator_for(&execute["inputSchema"]).expect("projected execute schema");
+        assert!(execute_schema.is_valid(&json!({
+            "loadedReference": "b".repeat(64),
+            "selections": ["records.id"]
+        })));
+        // A continued page sends only its loaded reference and handle.
+        assert!(execute_schema.is_valid(&json!({
+            "loadedReference": "b".repeat(64),
+            "continuation": "c".repeat(64)
+        })));
+        assert_eq!(
+            execute.pointer("/inputSchema/properties/continuation/type"),
+            Some(&json!(["string", "null"]))
+        );
+
+        let browse = projected
+            .protocol_values
+            .iter()
+            .find(|tool| tool.get("name") == Some(&json!("graphql_capabilities_browse")))
+            .expect("browse projection should exist");
+        assert_eq!(
+            browse.pointer("/inputSchema/required"),
+            Some(&json!(["level"]))
+        );
+        assert_eq!(
+            browse.pointer("/inputSchema/properties/level/enum"),
+            Some(&json!(["namespaces", "capabilities", "operations"]))
         );
         assert!(
             execute

@@ -213,10 +213,13 @@ single-index host first:
 | Describe p95, warm pass, host-cached set | 4.0 s | 0.019 s |
 | `describe_type` p95, warm pass, single-index host | 1.09 s | 4.4 ms |
 
-The benchmark also reports whether a keyset operation offers a
-continuation. It does not: the page argument is server-owned, so a model
-reads only the first page of a keyset or list root. Continuation cursors are
-planned for the next fingerprint-breaking release.
+The figures above are for broker version 2. Version 3 adds the browse
+definition, so the first-turn definitions grow once, by one fixed
+definition, and stay identical at every catalogue size. The benchmark now
+also reports `browse` result sizes (the namespace list and each sampled
+entity's capability and operation pages, each at most 32 items) and whether
+a keyset operation offers a continuation, which it does from version 3 (see
+[Broker version 3](#broker-version-3-browsing-and-continuation-handles)).
 
 ### Catalogue compilation benchmark
 
@@ -328,7 +331,7 @@ negotiation metadata, never authority.
 | `EagerExact` | All already-filtered exact definitions | Small sets within exact count and byte limits |
 | `ClientDeferred` | Exact static bootstrap plus discovery; freshly loaded generated-query definitions on the next continuation | Stateless/local or client-executed search |
 | `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search, including large non-frozen surfaces unless the broker preference is enabled |
-| `FixedBroker` | Exact static bootstrap plus frozen discover/describe/describe_type/execute definitions | Retained sessions, and large surfaces by default |
+| `FixedBroker` | Exact static bootstrap plus frozen discover/browse/describe/describe_type/execute definitions | Retained sessions, and large surfaces by default |
 
 Above the eager count or byte limit, a provider that supports both
 `ProviderDeferred` and `FixedBroker` gets `FixedBroker` by default
@@ -357,7 +360,7 @@ A reviewed static read tool can be reached through the fixed broker instead
 of being offered as a bootstrap definition. Such a tool is not a provider
 definition: it does not count against the 128 static bootstrap fingerprints
 or a provider's definition ceiling, and adding or removing one never changes
-the session binding or the four broker definitions.
+the session binding or the five broker definitions.
 
 ```rust,ignore
 let session = AiCapabilityBrokerSession::new(delivery_limits)?
@@ -439,7 +442,7 @@ let turn = AiReadOnlyAgentTurnPlan::new(
 ```
 
 The host composes `OrmAiApplicationToolCallService` as the coordinator's
-ordinary tool executor. The coordinator recognizes only the four frozen IDs
+ordinary tool executor. The coordinator recognizes only the five frozen IDs
 from the exact offered surface and dispatches them through that service; a
 host executor retains a fail-closed default and does not gain broker execution
 implicitly.
@@ -463,8 +466,9 @@ delegation, resolver and disclosure boundary.
 
 ### Broker version 2: signatures, `describe_type` and entity operations
 
-`AI_CAPABILITY_BROKER_VERSION` is 2. Its four definitions are discover,
-describe, `graphql.capabilities.describe_type` and execute.
+Version 2 introduced discover, describe, `graphql.capabilities.describe_type`
+and execute as described here. Version 3 keeps them and adds browsing and
+continuation handles (next section).
 
 - **Discover** returns, for an entity, one `generated_entity` candidate with
   its `operations` (each root's name and shape). A root without an entity and
@@ -529,6 +533,85 @@ dropped first, then the signatures, and the response sets
 `signaturesAvailable` to `false`; an oversized type page is refused so the
 model asks for a smaller `limit`.
 
+### Broker version 3: browsing and continuation handles
+
+`AI_CAPABILITY_BROKER_VERSION` is 3. Its five definitions are discover,
+`graphql.capabilities.browse`, describe, `describe_type` and execute.
+
+**Browse** lists the capabilities discover covers (generated reads and the
+static tools this run brokers) by hierarchy, for a model whose search is
+ambiguous:
+
+| `level` | Needs | Returns |
+| --- | --- | --- |
+| `namespaces` | nothing | each logical namespace with its number of capabilities |
+| `capabilities` | `namespace`, optional `entity` | discover-shaped candidates, describable directly |
+| `operations` | `namespace` and `entity` | the entity candidate and each operation's name, shape, description and result description |
+
+Pages hold at most `AI_CAPABILITY_BROWSE_PAGE_MAXIMUM` (32) items, with
+`offset` and `nextOffset`. Browsing applies host policy exactly as discover
+does, before anything is counted or paged: every listed entry and each
+entity's grouped roots go to `authorize_discovery` in one batch, an entity is
+kept only with its admitted roots, and a namespace appears only with an
+admitted capability. A denied or unknown entity gives the same empty
+`operations` page. The batch depends only on the level and filters, and
+`with_maximum_discovery_authorizations` bounds it as it bounds discovery
+(`AI_CAPABILITY_DISCOVERY_TOO_BROAD`). At `namespaces` the batch is the whole
+index set, so a host with a large catalogue and an expensive policy should
+override `authorize_discovery`. Listed candidates are retained like
+discovery candidates (and in the discovery cache when it is enabled), so
+describe accepts them. Browsing grants no load or execution authority.
+
+**Continuation handles.** A generated keyset root
+(`AiGraphqlQueryCapability::supports_continuation`) returns its rows a page
+at a time. Describe marks such an operation `"continuation": true`. Its
+broker result is the usual `data` and `errorCodes` plus `continuation`:
+`{"handle", "expiresInSeconds"}` while the resolver reports another page,
+`null` otherwise. To read the next page the model calls execute with the
+`loadedReference`, optionally the `operation`, and `continuation` only. Any
+other plan field with a handle is invalid input.
+
+The handle is an opaque random reference to state the run's
+`AiCapabilityBrokerSession` keeps server-side: the exact compact plan and root
+of the first page and the resolver's end cursor. The cursor never reaches the
+model. The compiler selects the connection's `pageInfo { hasNextPage
+endCursor }` beside its edges and `AiCompiledGraphqlQuery::take_page_info`
+removes it from the resolver response before the disclosure schema is
+applied; for a later page the compiler supplies the cursor as the
+server-owned keyset `after`, and the model still cannot address the page
+argument. A continued page is not authorized by its handle:
+
+- it must be presented with the `loadedReference` that produced it, in the
+  same broker session, so it carries that binding's principal, session, run,
+  attempt, provider session and fingerprints;
+- execute repeats the full loaded-binding check, the current index and
+  schema fingerprints and current host policy for the entity and the root,
+  exactly as for a first page, and refuses drift as `capability_stale`;
+- the page then runs through ordinary resolver authorization, row policy and
+  the disclosure schema, so a cursor only ever moves the position.
+
+An unknown, altered, evicted or expired handle, or one presented with another
+`loadedReference` or session, is `selection_stale`. Handles expire with
+their loaded binding (the broker's loaded TTL, at most five minutes). A
+session retains at most `AI_CAPABILITY_MAXIMUM_CONTINUATIONS` (32) handles,
+dropping the oldest; a chain reaches at most
+`AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES` (256) pages; and an end cursor
+longer than `AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES` (1,024) ends the chain.
+Every page is bounded by `maximumItems` and the result limits as before, so
+results stay O(page). Offset list roots take the model's own `page.offset`
+and are not continuable.
+
+A host driving the broker itself uses
+`AiCapabilityDiscoveryBroker::dispatch_browse`,
+`AiRuntime::execute_query_capability_page` (or
+`AiGraphqlQueryCapability::compile_compact_page` and `take_page_info`) and
+`AiCapabilityDiscoveryBroker::record_continuation`; the coordinator does this
+for broker calls.
+
+**Server-side aggregates** are the entity's generated aggregate and count
+operations: a count question's top candidate offers the `aggregate`
+operation, and its result is the aggregate, not the rows.
+
 ### Turn amplification
 
 Delivery work consumes normal bounded-loop capacity:
@@ -538,8 +621,9 @@ Delivery work consumes normal bounded-loop capacity:
 | Eager exact | 0 |
 | Provider deferred | Provider-native discovery only; exact application call still counts normally |
 | Client deferred, newly selected capability | 1 discover, then the exact application call |
-| Fixed broker, novel capability | discover + describe + execute = 3, plus one `describe_type` per expanded type |
+| Fixed broker, novel capability | discover (or browse) + describe + execute = 3, plus one `describe_type` per expanded type and one browse per extra hierarchy level |
 | Fixed broker, still-loaded capability | execute = 1 |
+| Fixed broker, next page of a continuable result | execute = 1 |
 
 Every completed broker result is ordinary provider input, so stateless loops
 also consume the corresponding continuation turns. Size provider-turn,
@@ -557,12 +641,12 @@ What else the binding covers depends on the mode:
 | Mode | Also bound | A schema or catalogue change |
 | --- | --- | --- |
 | `EagerExact`, `ProviderDeferred`, `ClientDeferred` | the complete canonical index set | rebinds the retained session |
-| `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` (2) | keeps the retained session |
+| `FixedBroker` | `AI_CAPABILITY_BROKER_VERSION` (3) | keeps the retained session |
 
 Bumping the broker version changes the fixed broker definitions and every
-fixed-broker binding, so a session bound under version 1 matches no current
-binding and rebinds once; the Grok registration check also refuses a tool set
-that carries the version 1 definitions. The four fixed broker definitions are
+fixed-broker binding, so a session bound under an earlier version matches no
+current binding and rebinds once; the Grok registration check also refuses a
+tool set that carries earlier definitions. The five fixed broker definitions are
 the same for every catalogue, so a
 retained fixed-broker session, and the chat it carries, survives a schema
 change in any target. The index is checked where it matters instead: every
@@ -578,7 +662,7 @@ Both outcomes are retryable, execute nothing, and carry a fixed `correction`
 | Model-facing code | When | Model recovery |
 | --- | --- | --- |
 | `capability_stale` | The run holds the candidate or loaded capability, and a fingerprint above has changed since (at describe, `describe_type` or execute). | Discover again, describe the new candidate, use the new signatures and `loadedReference`. |
-| `selection_stale` | The run does not hold the selection: discovery never returned that candidate to it, or the `loadedReference` is unknown or expired. | Discover (or describe) again. |
+| `selection_stale` | The run does not hold the selection: discovery or browse never returned that candidate to it, the `loadedReference` is unknown or expired, or the continuation handle is unknown, expired or belongs to another `loadedReference`. | Discover (or describe) again. |
 
 `capability_stale` is reported only for a candidate the current principal was
 already shown, or a capability it already loaded, so it reveals nothing about

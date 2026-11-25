@@ -12,6 +12,8 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Codex app-server turn dispatch (#828)
+
 **Action needed** for hosts implementing `AiCodexAppServerRunProcess`.
 Switch all six `start_*_turn` methods to take an owned
 `AiCodexAppServerTurnDispatch`. If your implementation overrides
@@ -81,6 +83,47 @@ prevents resending data and leaves earlier data in the provider-retained
 thread until deletion. See [entity reference delivery](docs/entity-references.md#adapters-for-a-local-process)
 for the deadline and frame-size fallback. No GraphQL SDL, schema-module,
 or data migration is needed.
+
+### Capability broker version 3 (#551)
+
+**Action needed** for fixed-broker hosts.
+`AI_CAPABILITY_BROKER_VERSION` is 3.
+
+1. **Rebind once.** The fixed broker now has five definitions:
+   `graphql.capabilities.browse` is added. Every broker definition
+   fingerprint changes, and so does every `FixedBroker` session binding.
+   A retained session bound under version 2 matches no current binding:
+   the provider-session fence refuses to resume it and the session goes
+   through cleanup-and-rebind once. Admit the five new broker definition
+   fingerprints wherever you list them by value, for example in
+   hierarchical rules. A Grok tool set that still carries the version 2
+   definitions is refused. Eager, client-deferred and provider-deferred
+   bindings are unchanged, and so are the generated capability, catalogue,
+   index and existing plan fingerprints. The #683 operation fingerprint
+   algorithm is unchanged. Approvals are unaffected.
+2. **Code.** Add an `AiCapabilityBrokerOperation::Browse` arm to
+   exhaustive matches. Construct `AiCapabilityBrokerAmplification` with
+   `browse_calls` or `..Default::default()`. `total_calls` counts browse
+   calls.
+3. **Results and prompts.** A broker execute result of a generated keyset
+   root now carries `continuation` beside `data` and `errorCodes`: a
+   `{"handle", "expiresInSeconds"}` object while more rows exist, else
+   `null`. Its disclosure-schema fingerprint is derived from the query's own
+   fingerprint and the continuation contract. Describe marks such
+   operations `"continuation": true`. Execute no longer requires
+   `selections` in its schema: a continued page sends only
+   `loadedReference`, optionally `operation`, and `continuation`. Update
+   model guidance or tests that parse these results. A host that drives the
+   broker itself must call `AiRuntime::execute_query_capability_page` and
+   `AiCapabilityDiscoveryBroker::record_continuation` to offer continuation;
+   `execute_query_capability` is unchanged.
+4. **Policy.** Browse sends each listed entry and its grouped roots to
+   `authorize_discovery`, like discover. At `level: namespaces` that batch
+   is the whole index set. A host with an expensive policy should override
+   `authorize_discovery` or set
+   `with_maximum_discovery_authorizations`.
+
+No GraphQL SDL, AI schema-module or data migration is needed.
 
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 

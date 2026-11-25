@@ -12,6 +12,30 @@ supersedes: []
 
 ## Unreleased - next breaking graphql-orm-ai release
 
+- **Breaking (#551).** Capability broker version 3. The fixed broker adds a
+  fifth frozen definition, `graphql.capabilities.browse`, which lists the
+  current capabilities by namespace, capability and operation after host
+  policy, with the same `authorize_discovery` batch, authorization bound and
+  candidate retention as discover. Execute returns a `continuation` handle
+  for generated keyset roots while more rows exist and takes it back to read
+  the next page; the cursor stays server-side, and each page repeats the
+  loaded-binding, index and host-policy checks and runs through ordinary
+  resolver authorization. Handles are bound to their loaded reference and
+  broker session, expire with it, and are bounded in count, chain length and
+  cursor size. Every broker definition fingerprint and every fixed-broker
+  session binding changes once; capability, index and plan fingerprints of
+  existing plans are unchanged. New API: `AI_CAPABILITY_BROWSE_TOOL_ID`,
+  `AiCapabilityBrokerOperation::Browse`,
+  `AiCapabilityDiscoveryBroker::dispatch_browse` and `record_continuation`,
+  `AiCapabilityContinuation`, `AiCapabilityExecution::continuation_cursor`,
+  `page_number` and `operation_name`,
+  `AiCapabilityBrokerAmplification::browse_calls`,
+  `AiCapabilityBrokerSession::continuation_count`,
+  `AiRuntime::execute_query_capability_page`,
+  `AiToolCatalog::query_capability_supports_continuation` and
+  `compile_query_capability_page`. The model-context benchmark reports browse
+  result sizes. [Migration](MIGRATION.md#capability-broker-version-3-551)
+
 - **Breaking (#828).** All six Codex app-server process turn methods take
   `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and
   `AiCodexAppServerWriter` to deliver it. The cloneable turn input contains

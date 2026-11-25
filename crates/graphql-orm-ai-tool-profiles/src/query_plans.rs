@@ -39,6 +39,43 @@ pub const AI_GRAPHQL_MUTATION_CAPABILITY_VERSION: u16 = 1;
 /// Current bounded subscription-capability contract version.
 pub const AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION: u16 = 1;
 
+/// Maximum bytes of a resolver keyset cursor a continued page carries.
+///
+/// A longer end cursor ends the continuation: the page is still returned,
+/// but no later page can be requested from it.
+pub const AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES: usize = 1_024;
+
+/// Server-side paging state of one continuable keyset page, removed from the
+/// resolver response by [`AiCompiledGraphqlQuery::take_page_info`].
+///
+/// The cursor is opaque resolver state. It is never part of a model-facing
+/// result: a caller keeps it server-side and passes it back to
+/// [`AiGraphqlQueryCapability::compile_compact_page`] for the next page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiGraphqlQueryPageInfo {
+    /// Whether the resolver reports a further page.
+    pub has_next_page: bool,
+    /// End cursor of this page, when the resolver returned one within
+    /// [`AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES`].
+    pub end_cursor: Option<String>,
+}
+
+impl AiGraphqlQueryPageInfo {
+    /// The cursor of the next page, when one exists and can be requested.
+    pub fn next_cursor(&self) -> Option<&str> {
+        self.end_cursor.as_deref().filter(|_| self.has_next_page)
+    }
+}
+
+/// Exact page-info field names of one continuable keyset connection, in the
+/// finished schema's own field case.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct KeysetPageInfoFields {
+    page_info: String,
+    has_next_page: String,
+    end_cursor: String,
+}
+
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
 const MAXIMUM_PROVIDER_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -791,7 +828,7 @@ struct CompiledVariableSchema {
 
 // The compiler supplies these keys from the finished SDL and admitted
 // semantic metadata. Each cache shares one schema, catalogue and limits.
-type VariableSchemaKey = (String, Option<String>, bool);
+type VariableSchemaKey = (String, Option<String>, ServerPageSchema);
 type VariableSchemaCache = BTreeMap<VariableSchemaKey, Arc<CompiledVariableSchema>>;
 
 #[derive(Clone, Default)]
@@ -830,6 +867,17 @@ pub struct AiGraphqlQueryCapability {
     input_type_names: InputTypeNames,
 }
 
+/// Server-owned keyset page input schema of one compiled variable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ServerPageSchema {
+    /// An ordinary variable.
+    None,
+    /// The server-owned keyset page of a first page.
+    Limit,
+    /// The server-owned keyset page of a continued page.
+    LimitAfter,
+}
+
 /// Lazily recovered input-type names of one capability's compact schema.
 #[derive(Clone, Debug, Default)]
 struct InputTypeNames(Arc<OnceLock<Arc<BTreeMap<String, String>>>>);
@@ -839,7 +887,7 @@ impl AiGraphqlQueryCapability {
         &self,
         graphql_type: &str,
         description: Option<&str>,
-        server_keyset_page: bool,
+        server_keyset_page: ServerPageSchema,
     ) -> Result<Arc<CompiledVariableSchema>, AiError> {
         const MAXIMUM_CACHED_VARIABLE_SCHEMAS: usize = 128;
 
@@ -856,19 +904,36 @@ impl AiGraphqlQueryCapability {
         if let Some(compiled) = cache.get(&key) {
             return Ok(Arc::clone(compiled));
         }
-        let value = if server_keyset_page {
-            // The compiler supplies only a limit. The resolver applies its
-            // page cap and the schema supplies the other input defaults.
+        let value = if server_keyset_page != ServerPageSchema::None {
+            // The compiler supplies only a limit, and for a continued page
+            // its server-held position. The resolver applies its page cap
+            // and the schema supplies the other input defaults.
             let maximum = self
                 .limits
                 .maximum_list_items
                 .min(self.limits.maximum_result_records);
-            let mut value = json!({
-                "type": "object",
-                "properties": { "limit": bounded_integer_schema(1, i64::from(maximum)) },
-                "required": ["limit"],
-                "additionalProperties": false,
-            });
+            let mut value = if server_keyset_page == ServerPageSchema::LimitAfter {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": bounded_integer_schema(1, i64::from(maximum)),
+                        "after": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES,
+                        },
+                    },
+                    "required": ["limit", "after"],
+                    "additionalProperties": false,
+                })
+            } else {
+                json!({
+                    "type": "object",
+                    "properties": { "limit": bounded_integer_schema(1, i64::from(maximum)) },
+                    "required": ["limit"],
+                    "additionalProperties": false,
+                })
+            };
             insert_description(&mut value, description)?;
             value
         } else {
@@ -1100,9 +1165,90 @@ impl AiGraphqlQueryCapability {
         self.compile_compact_plan(plan).map_err(AiError::from)
     }
 
+    /// Whether this root returns continuable keyset pages: a generated keyset
+    /// list whose page argument is server-owned and whose connection exposes
+    /// `pageInfo { hasNextPage endCursor }`.
+    pub fn supports_continuation(&self) -> bool {
+        self.keyset_page_info_fields().is_some()
+    }
+
+    fn keyset_page_info_fields(&self) -> Option<KeysetPageInfoFields> {
+        generated_keyset_page_argument(&self.schema, &self.operation)?;
+        if !matches!(&self.output, QueryOutput::Entity { route, .. }
+            if route.first().is_some_and(|segment| !segment.field_name.is_empty()))
+        {
+            return None;
+        }
+        let root = self
+            .schema
+            .operation_root_field(GraphqlOperationKind::Query, &self.operation.field_name)
+            .ok()?;
+        let Some(SchemaType::Object(connection)) =
+            self.schema.types.get(named_type(&root.ty).ok()?)
+        else {
+            return None;
+        };
+        let field = unique_case_insensitive_field;
+        let (page_info, page_info_field) = field(connection, "pageInfo", None)?;
+        let Some(SchemaType::Object(page_info_type)) =
+            self.schema.types.get(named_type(&page_info_field.ty).ok()?)
+        else {
+            return None;
+        };
+        let (has_next_page, _) = field(page_info_type, "hasNextPage", Some("Boolean!"))?;
+        let (end_cursor, _) = field(page_info_type, "endCursor", Some("String"))?;
+        Some(KeysetPageInfoFields {
+            page_info,
+            has_next_page,
+            end_cursor,
+        })
+    }
+
+    /// Compiles one compact plan as a continuable keyset page.
+    ///
+    /// The plan is the same compact plan [`Self::compile_compact`] accepts.
+    /// The compiler additionally selects the connection's page info and, for
+    /// a later page, supplies `after` as the server-owned keyset position.
+    /// `after` must be an end cursor a previous page of the same plan
+    /// returned through [`AiCompiledGraphqlQuery::take_page_info`]; the
+    /// resolver still applies its own authorization and row policy to every
+    /// page, so a cursor only ever moves the position.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when the root does not support
+    /// continuation, and a safe input error for an invalid plan or cursor.
+    pub fn compile_compact_page(
+        &self,
+        plan: Value,
+        after: Option<&str>,
+    ) -> Result<AiCompiledGraphqlQuery, AiError> {
+        let fields = self
+            .keyset_page_info_fields()
+            .ok_or_else(|| configuration_error("query capability does not support continuation"))?;
+        if after.is_some_and(|cursor| {
+            cursor.is_empty()
+                || cursor.len() > AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES
+                || cursor.chars().any(char::is_control)
+        }) {
+            return Err(input_error("continuation cursor is invalid"));
+        }
+        let page = ServerPage { fields, after };
+        self.compile_compact_plan_page(plan, Some(&page))
+            .map_err(AiError::from)
+    }
+
     fn compile_compact_plan(
         &self,
         plan: Value,
+    ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
+        self.compile_compact_plan_page(plan, None)
+    }
+
+    fn compile_compact_plan_page(
+        &self,
+        plan: Value,
+        page: Option<&ServerPage<'_>>,
     ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
         prevalidate_json_plan(self, &plan)?;
         let validator = self
@@ -1113,7 +1259,7 @@ impl AiGraphqlQueryCapability {
             // work and a bounded migration window. It is never advertised by
             // the v3 model definition and remains subject to the same final
             // schema-derived compiler and budgets.
-            if plan.get("fields").is_some() && plan.get("selections").is_none() {
+            if page.is_none() && plan.get("fields").is_some() && plan.get("selections").is_none() {
                 return self.compile_plan(plan);
             }
             return Err(
@@ -1123,7 +1269,7 @@ impl AiGraphqlQueryCapability {
         let compact: AiCompactGraphqlQueryPlan = serde_json::from_value(plan.clone())
             .map_err(|_| input_error("compact query plan has an invalid shape"))?;
         let expanded = self.expand_compact_plan(compact)?;
-        self.compile_typed_plan(expanded, &plan, GraphqlOperationKind::Query)
+        self.compile_typed_plan_page(expanded, &plan, GraphqlOperationKind::Query, page)
     }
 
     /// Staged compact compilation that converts every correctable local
@@ -1190,6 +1336,19 @@ impl AiGraphqlQueryCapability {
         fingerprint_plan: &Value,
         expected_kind: GraphqlOperationKind,
     ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
+        self.compile_typed_plan_page(plan, fingerprint_plan, expected_kind, None)
+    }
+
+    fn compile_typed_plan_page(
+        &self,
+        plan: AiGraphqlQueryPlan,
+        fingerprint_plan: &Value,
+        expected_kind: GraphqlOperationKind,
+        page: Option<&ServerPage<'_>>,
+    ) -> Result<AiCompiledGraphqlQuery, PlanCompileError> {
+        if page.is_some() && expected_kind != GraphqlOperationKind::Query {
+            return Err(configuration_error("only a query compiles as a page").into());
+        }
         self.semantic_catalog
             .validate()
             .map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
@@ -1212,7 +1371,11 @@ impl AiGraphqlQueryCapability {
             self.output.requires_root_bound(),
             inject_root_bound,
             generated_keyset_page_argument(&self.schema, &self.operation),
+            page.map(|page| page.after),
         )?;
+        if page.is_some() && plan.maximum_items.is_none() {
+            return Err(input_error("query collection bound is missing or unexpected").into());
+        }
 
         let (projection, disclosure) = match &self.output {
             QueryOutput::Entity {
@@ -1228,10 +1391,22 @@ impl AiGraphqlQueryCapability {
                 let (entity_projection, entity_disclosure) =
                     context.compile_entity_selection(entity, selection, &mut ancestry, 0)?;
                 let maximum = plan.maximum_items.unwrap_or(1);
-                let (projection, mut disclosure) =
+                let (mut projection, mut disclosure) =
                     wrap_projection_route(route, entity_projection, entity_disclosure, maximum);
                 if let Some(floor) = result_floor {
                     tighten_disclosure_root(&mut disclosure, *floor);
+                }
+                // The page info is server state: it is selected beside the
+                // connection's edges but is not part of the disclosure
+                // schema, and the runtime removes it before disclosure.
+                if let Some(page) = page {
+                    let inner = projection
+                        .strip_suffix(" }")
+                        .ok_or_else(|| configuration_error("page projection is malformed"))?;
+                    projection = format!(
+                        "{inner} {} {{ {} {} }} }}",
+                        page.fields.page_info, page.fields.has_next_page, page.fields.end_cursor
+                    );
                 }
                 (projection, disclosure)
             }
@@ -1303,7 +1478,7 @@ impl AiGraphqlQueryCapability {
         } else {
             format!("({})", arguments.join(", "))
         };
-        let plan_fingerprint = sha256_json(&json!({
+        let mut fingerprint_input = json!({
             "version": match expected_kind {
                 GraphqlOperationKind::Query => AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
                 GraphqlOperationKind::Mutation => AI_GRAPHQL_MUTATION_CAPABILITY_VERSION,
@@ -1312,7 +1487,17 @@ impl AiGraphqlQueryCapability {
             },
             "capability_fingerprint": self.fingerprint,
             "plan": fingerprint_plan,
-        }));
+        });
+        // A page is a distinct plan: its document selects page info and its
+        // position is part of its variables. Unpaged fingerprints are
+        // unchanged.
+        if let (Some(page), Some(object)) = (page, fingerprint_input.as_object_mut()) {
+            object.insert(
+                "page".to_owned(),
+                json!({"version": 1, "after": page.after}),
+            );
+        }
+        let plan_fingerprint = sha256_json(&fingerprint_input);
         let operation_name = format!(
             "{}_{}",
             match expected_kind {
@@ -1462,8 +1647,30 @@ impl AiGraphqlQueryCapability {
             descriptor,
             disclosure_schema,
             variables: Value::Object(variables),
+            page_info: page.map(|page| (self.operation.field_name.clone(), page.fields.clone())),
         })
     }
+}
+
+/// The one argument-free field of `fields` named `name` in any field case,
+/// with type `ty` when given.
+fn unique_case_insensitive_field<'a>(
+    fields: &'a BTreeMap<String, SchemaField>,
+    name: &str,
+    ty: Option<&str>,
+) -> Option<(String, &'a SchemaField)> {
+    let mut matching = fields
+        .iter()
+        .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name));
+    let (found, field) = matching.next()?;
+    (matching.next().is_none() && field.arguments.is_empty() && ty.is_none_or(|ty| field.ty == ty))
+        .then(|| (found.clone(), field))
+}
+
+/// Server-owned page request of one continuable keyset page.
+struct ServerPage<'a> {
+    fields: KeysetPageInfoFields,
+    after: Option<&'a str>,
 }
 
 fn exact_aggregate_disclosure(
@@ -3181,6 +3388,9 @@ pub struct AiCompiledGraphqlQuery {
     descriptor: AiToolDescriptor,
     disclosure_schema: AiDisclosureSchema,
     variables: Value,
+    /// Root field and server-side page-info selection of a page compiled by
+    /// [`AiGraphqlQueryCapability::compile_compact_page`]; `None` otherwise.
+    page_info: Option<(String, KeysetPageInfoFields)>,
 }
 
 /// Exact server-compiled mutation ready for classified runtime handling.
@@ -3264,6 +3474,67 @@ impl AiCompiledGraphqlQuery {
     /// Decomposes the compiled query for a runtime execution boundary.
     pub fn into_parts(self) -> (AiToolDescriptor, AiDisclosureSchema, Value) {
         (self.descriptor, self.disclosure_schema, self.variables)
+    }
+
+    /// Whether this query was compiled as a continuable page and its
+    /// document also selects the connection's page info.
+    pub const fn is_page(&self) -> bool {
+        self.page_info.is_some()
+    }
+
+    /// Removes the page info a continuable page selected from the resolver
+    /// response `data`, leaving exactly the shape the disclosure schema
+    /// describes, and returns it.
+    ///
+    /// Returns `Ok(None)` and leaves `data` unchanged for a query that was
+    /// not compiled as a page. A null root reports no further page.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with a configuration error when the response of a page
+    /// lacks the selected page info or carries it in another shape.
+    pub fn take_page_info(
+        &self,
+        data: &mut Value,
+    ) -> Result<Option<AiGraphqlQueryPageInfo>, AiError> {
+        let Some((root_field, fields)) = &self.page_info else {
+            return Ok(None);
+        };
+        let malformed = || configuration_error("continuable page response has no page info");
+        let root = data
+            .as_object_mut()
+            .and_then(|object| object.get_mut(root_field))
+            .ok_or_else(malformed)?;
+        if root.is_null() {
+            return Ok(Some(AiGraphqlQueryPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+            }));
+        }
+        let page_info = root
+            .as_object_mut()
+            .and_then(|object| object.remove(&fields.page_info))
+            .ok_or_else(malformed)?;
+        let page_info = page_info.as_object().ok_or_else(malformed)?;
+        if page_info.len() != 2 {
+            return Err(malformed());
+        }
+        let has_next_page = page_info
+            .get(&fields.has_next_page)
+            .and_then(Value::as_bool)
+            .ok_or_else(malformed)?;
+        let end_cursor = match page_info.get(&fields.end_cursor) {
+            Some(Value::Null) => None,
+            Some(Value::String(cursor)) => (!cursor.is_empty()
+                && cursor.len() <= AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES
+                && !cursor.chars().any(char::is_control))
+            .then(|| cursor.clone()),
+            _ => return Err(malformed()),
+        };
+        Ok(Some(AiGraphqlQueryPageInfo {
+            has_next_page,
+            end_cursor,
+        }))
     }
 }
 
@@ -6366,6 +6637,7 @@ impl<'a> CompileContext<'a> {
         expect_bound: bool,
         inject_bound: bool,
         server_keyset_page: Option<&str>,
+        server_after: Option<Option<&str>>,
     ) -> Result<Vec<String>, AiError> {
         if expect_bound != maximum_items.is_some() {
             return Err(input_error(
@@ -6407,6 +6679,19 @@ impl<'a> CompileContext<'a> {
         if let Some(maximum) = injected_maximum {
             inject_page_limit(&self.capability.schema, schema_fields, &mut values, maximum)?;
         }
+        // A continued keyset page also takes its server-held position.
+        if server_after.is_some() && server_keyset_page.is_none() {
+            return Err(configuration_error(
+                "continuable page has no server-owned keyset page argument",
+            ));
+        }
+        if let (Some(name), Some(Some(after))) = (server_keyset_page, server_after) {
+            values
+                .get_mut(name)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| configuration_error("keyset page argument is missing"))?
+                .insert("after".to_owned(), Value::String(after.to_owned()));
+        }
         if values.keys().any(|name| !schema_fields.contains_key(name)) {
             return Err(input_error("query plan contains an unknown argument"));
         }
@@ -6425,7 +6710,11 @@ impl<'a> CompileContext<'a> {
             let compiled = self.capability.variable_schema(
                 &schema.ty,
                 description,
-                server_keyset_page == Some(name.as_str()),
+                match (server_keyset_page == Some(name.as_str()), server_after) {
+                    (false, _) => ServerPageSchema::None,
+                    (true, Some(Some(_))) => ServerPageSchema::LimitAfter,
+                    (true, _) => ServerPageSchema::Limit,
+                },
             )?;
             if !compiled.validator.is_valid(&value) {
                 return Err(input_error(
@@ -6525,6 +6814,7 @@ impl<'a> CompileContext<'a> {
                 relationship_plan.maximum_items,
                 collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
                 collection.is_some_and(GraphqlSemanticCollectionBound::model_may_select_maximum),
+                None,
                 None,
             )?;
             ancestry.push(relationship.target.clone());
@@ -8994,6 +9284,171 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keyset_pages_select_server_page_info_and_take_a_server_cursor() {
+        let (sdl, base) = input_collision_fixture(false);
+        let sdl = sdl
+            .replace(
+                "type SubscriptionConnection { edges: [SubscriptionEdge!]! }",
+                "type SubscriptionConnection { edges: [SubscriptionEdge!]!, pageInfo: PageInfo! }
+                 type PageInfo { hasNextPage: Boolean!, endCursor: String }",
+            )
+            .replace(
+                "type Query {",
+                "type Query {
+                    SubscriptionsKeyset(page: KeysetPageInput!): SubscriptionConnection!
+                 ",
+            )
+            + "\ninput KeysetPageInput { after: String, limit: Int, includeTotalCount: Boolean! = false }";
+        assert!(sdl.contains("pageInfo: PageInfo!"), "{sdl}");
+        let keyset = GraphqlSemanticOperationDescriptor::generated(
+            GraphqlOperationKind::Query,
+            GeneratedGraphqlOperationCategory::KeysetList,
+            "Subscription",
+            "SubscriptionsKeyset",
+            "Read a bounded keyset page.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "page".to_owned(),
+                description: "Page settings.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "KeysetPageInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named(
+                "SubscriptionConnection",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+            true,
+        )
+        .unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_descriptors(
+            base.entities,
+            base.operations.into_iter().chain([keyset]),
+        )
+        .unwrap();
+        let catalog = input_collision_capabilities(&sdl, &semantics);
+        let capability = |root| {
+            catalog
+                .capabilities()
+                .find(|capability| capability.field_name() == root)
+                .unwrap()
+        };
+        let offset = capability("Subscriptions");
+        let keyset = capability("SubscriptionsKeyset");
+        assert!(keyset.supports_continuation());
+        // An offset page belongs to the model's own arguments.
+        assert!(!offset.supports_continuation());
+
+        let plan = json!({
+            "arguments": {},
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {},
+            "selections": ["id"],
+            "maximumItems": 2,
+        });
+        let unpaged = keyset.compile_compact(plan.clone()).unwrap();
+        assert!(!unpaged.is_page());
+        assert!(!unpaged.descriptor().document.contains("pageInfo"));
+        let first = keyset.compile_compact_page(plan.clone(), None).unwrap();
+        assert!(first.is_page());
+        assert!(
+            first
+                .descriptor()
+                .document
+                .contains("{ edges { node { id } } pageInfo { hasNextPage endCursor } }"),
+            "{}",
+            first.descriptor().document
+        );
+        assert_eq!(first.variables(), &json!({"v0": {"limit": 2}}));
+        assert_ne!(first.plan_fingerprint(), unpaged.plan_fingerprint());
+        // The page info is server state, not part of the disclosure.
+        assert_eq!(
+            first.disclosure_schema().fingerprint,
+            unpaged.disclosure_schema().fingerprint
+        );
+        let next = keyset
+            .compile_compact_page(plan.clone(), Some("cursor-1"))
+            .unwrap();
+        assert_eq!(
+            next.variables(),
+            &json!({"v0": {"limit": 2, "after": "cursor-1"}})
+        );
+        assert_ne!(next.plan_fingerprint(), first.plan_fingerprint());
+        for cursor in [
+            String::new(),
+            "c".repeat(AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES + 1),
+            "cursor\n".to_owned(),
+        ] {
+            assert!(
+                keyset
+                    .compile_compact_page(plan.clone(), Some(&cursor))
+                    .is_err()
+            );
+        }
+        assert!(offset.compile_compact_page(plan.clone(), None).is_err());
+        // The model still cannot address the keyset position.
+        let mut supplied = plan.clone();
+        supplied["arguments"]["page"] = json!({"after": "cursor-1"});
+        assert!(keyset.compile_compact(supplied.clone()).is_err());
+        assert!(keyset.compile_compact_page(supplied, None).is_err());
+
+        let node = json!({"node": {"id": "subscription-1"}});
+        let mut data = json!({"SubscriptionsKeyset": {
+            "edges": [node.clone()],
+            "pageInfo": {"hasNextPage": true, "endCursor": "cursor-2"},
+        }});
+        let page_info = next.take_page_info(&mut data).unwrap().unwrap();
+        assert_eq!(page_info.next_cursor(), Some("cursor-2"));
+        assert_eq!(
+            data,
+            json!({"SubscriptionsKeyset": {"edges": [node.clone()]}})
+        );
+        next.disclosure_schema()
+            .evaluate_graphql_with_record_limit(&data, 10)
+            .unwrap();
+        // An unpaged query leaves its response alone.
+        let mut untouched = data.clone();
+        assert_eq!(unpaged.take_page_info(&mut untouched).unwrap(), None);
+        assert_eq!(untouched, data);
+
+        let last = |page_info: Value| {
+            let mut data = json!({"SubscriptionsKeyset": {"edges": [], "pageInfo": page_info}});
+            next.take_page_info(&mut data)
+        };
+        let end = last(json!({"hasNextPage": false, "endCursor": "cursor-3"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(end.next_cursor(), None);
+        let oversized = last(json!({
+            "hasNextPage": true,
+            "endCursor": "c".repeat(AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES + 1),
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(oversized.next_cursor(), None);
+        for malformed in [
+            json!({"hasNextPage": true}),
+            json!({"hasNextPage": "yes", "endCursor": null}),
+            json!({"hasNextPage": true, "endCursor": 7}),
+            json!({"hasNextPage": true, "endCursor": "c", "startCursor": "b"}),
+        ] {
+            assert!(last(malformed).is_err());
+        }
+        assert!(
+            next.take_page_info(&mut json!({"SubscriptionsKeyset": {"edges": []}}))
+                .is_err()
+        );
+        assert!(next.take_page_info(&mut json!({})).is_err());
+        let empty = next
+            .take_page_info(&mut json!({"SubscriptionsKeyset": null}))
+            .unwrap()
+            .unwrap();
+        assert!(!empty.has_next_page);
+    }
+
     fn input_collision_plan(pascal: bool) -> Value {
         let selections =
             ["Id", "Name", "CustomerId", "PlanName"].map(|name| input_collision_name(name, pascal));
@@ -10070,6 +10525,7 @@ mod tests {
                     None,
                     false,
                     false,
+                    None,
                     None
                 )
                 .is_ok(),
@@ -10096,21 +10552,21 @@ mod tests {
         ));
 
         let integer = capability
-            .variable_schema("Int!", Some("integer"), false)
+            .variable_schema("Int!", Some("integer"), ServerPageSchema::None)
             .unwrap();
         let reused = cloned
-            .variable_schema("Int!", Some("integer"), false)
+            .variable_schema("Int!", Some("integer"), ServerPageSchema::None)
             .unwrap();
         assert!(Arc::ptr_eq(&integer, &reused));
         assert!(reused.validator.is_valid(&json!(42)));
         assert!(!reused.validator.is_valid(&json!("42")));
 
         let text = cloned
-            .variable_schema("String!", Some("integer"), false)
+            .variable_schema("String!", Some("integer"), ServerPageSchema::None)
             .unwrap();
         assert!(text.validator.is_valid(&json!("42")));
         let renamed = cloned
-            .variable_schema("Int!", Some("renamed"), false)
+            .variable_schema("Int!", Some("renamed"), ServerPageSchema::None)
             .unwrap();
         assert_eq!(renamed.value["description"], "renamed");
     }
@@ -10689,6 +11145,7 @@ mod tests {
                         None,
                         false,
                         false,
+                        None,
                         None
                     )
                     .is_err()

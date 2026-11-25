@@ -682,6 +682,89 @@ impl AiRuntime {
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
     }
 
+    /// Compiles and executes one registered automatic GraphQL query plan as a
+    /// continuable keyset page.
+    ///
+    /// This is [`Self::execute_query_capability`] for a root that
+    /// [`AiToolCatalog::query_capability_supports_continuation`] reports,
+    /// with the same readiness, target-policy, host-policy, resolver
+    /// authorization, output-limit and disclosure checks. The document also
+    /// selects the connection's page info, which is removed from the response
+    /// before disclosure and returned separately: the cursor it carries is
+    /// server state and never part of the model-facing result. `after` is a
+    /// cursor a previous page of the same plan returned; it only moves the
+    /// position, and the resolver applies its authorization and row policy
+    /// to every page.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed as [`Self::execute_query_capability`] does, for a root
+    /// without continuation, and for a response without its page info.
+    pub async fn execute_query_capability_page(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        plan: serde_json::Value,
+        after: Option<&str>,
+        invocation: GraphqlInvocationContext,
+    ) -> Result<(AiToolExecutionResult, crate::AiGraphqlQueryPageInfo), AiError> {
+        if !self.start_gate.is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let compiled = self.tool_catalog.compile_query_capability_page(
+            capability_id,
+            capability_fingerprint,
+            plan,
+            after,
+        )?;
+        if !compiled.is_page() {
+            return Err(AiError::Forbidden);
+        }
+        let page = compiled.clone();
+        let (descriptor, disclosure_schema, variables) = compiled.into_parts();
+        if !self
+            .generated_graphql_target_policy
+            .allows_query(&descriptor)
+            || descriptor.maturity > self.maximum_tool_maturity
+            || descriptor.operation_kind != AiToolOperationKind::Query
+            || descriptor.operation_domain != AiToolOperationDomain::Application
+            || descriptor.approval != AiApprovalRule::None
+            || !descriptor.idempotent
+        {
+            return Err(AiError::Forbidden);
+        }
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .ok_or(AiError::Forbidden)?;
+        let request = ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables,
+            invocation,
+        };
+        let (mut response, authorization) = self
+            .tool_bridge
+            .execute_generated_query(
+                principal_reference,
+                capability_id,
+                capability_fingerprint,
+                &descriptor,
+                request,
+            )
+            .await
+            .map_err(Self::map_tool_execution_error)?;
+        let page_info = page
+            .take_page_info(&mut response.data)
+            .map_err(|_| AiError::ToolExecutionFailed)?
+            .ok_or(AiError::ToolExecutionFailed)?;
+        let result =
+            self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)?;
+        Ok((result, page_info))
+    }
+
     pub(crate) async fn preauthorize_query_capability(
         &self,
         principal_reference: &PrincipalReference,

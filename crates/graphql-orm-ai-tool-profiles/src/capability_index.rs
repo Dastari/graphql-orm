@@ -1015,6 +1015,70 @@ impl AiCapabilityIndexSet {
         )
     }
 
+    /// Lists every top-level entry for hierarchical browsing, in
+    /// deterministic `(namespace, entity or name, ID)` order, without
+    /// applying host policy.
+    ///
+    /// Top-level entries are the entries discovery ranks: entity entries,
+    /// standalone generated roots and static tools; the roots an entity entry
+    /// groups are reached through [`AiCapabilityRankedMatch::operations`].
+    /// `namespace` and `entity` restrict the list to one exact public
+    /// namespace and entity name. A caller applies host policy to the
+    /// complete list, with each entity's grouped roots, before it pages or
+    /// counts the result, exactly as for a search.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe filter name. Browsing emits model-safe
+    /// metadata only and grants no authority.
+    pub fn browse_matches(
+        &self,
+        namespace: Option<&str>,
+        entity: Option<&str>,
+    ) -> Result<Vec<AiCapabilityRankedMatch<'_>>, AiError> {
+        if [namespace, entity]
+            .into_iter()
+            .flatten()
+            .any(|name| validate_public_name(name, "browse filter").is_err())
+        {
+            return Err(input_error("capability browse filter is invalid"));
+        }
+        let mut matches = self
+            .indexes
+            .values()
+            .flat_map(|index| {
+                index
+                    .entries
+                    .values()
+                    .map(move |entry| AiCapabilityRankedMatch {
+                        index: index.as_ref(),
+                        entry,
+                    })
+            })
+            .filter(|candidate| {
+                namespace.is_none_or(|namespace| candidate.entry.namespace == namespace)
+                    && entity
+                        .is_none_or(|entity| candidate.entry.entity_name.as_deref() == Some(entity))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            let key = |candidate: &AiCapabilityRankedMatch<'_>| {
+                (
+                    candidate.entry.namespace.clone(),
+                    candidate
+                        .entry
+                        .entity_name
+                        .clone()
+                        .unwrap_or_else(|| candidate.entry.name.clone()),
+                )
+            };
+            key(left)
+                .cmp(&key(right))
+                .then_with(|| left.entry.id.cmp(&right.entry.id))
+        });
+        Ok(matches)
+    }
+
     /// Ranks matches again after host policy, counting for each entity entry
     /// only the operations host policy admitted.
     ///

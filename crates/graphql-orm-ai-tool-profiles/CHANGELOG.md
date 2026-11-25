@@ -10,6 +10,18 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.32.0
+
+- **No action (#551).** Generated keyset roots can compile continuable
+  pages: `AiGraphqlQueryCapability::supports_continuation` and
+  `compile_compact_page` select the connection's page info and take a
+  server-held `after` cursor, and `AiCompiledGraphqlQuery::take_page_info`
+  removes the page info from the resolver response before disclosure.
+  `AiCapabilityIndexSet::browse_matches` lists top-level entries for
+  hierarchical browsing. Existing capability, catalogue, index and plan
+  fingerprints, documents and plan schemas are unchanged.
+  [Migration](MIGRATION.md#0320-continuable-keyset-pages)
+
 ## Unreleased - 0.31.0
 
 - **No action (#817).** Add content-free endpoint validation reasons to the

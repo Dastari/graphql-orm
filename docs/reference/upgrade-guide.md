@@ -72,6 +72,7 @@ changelog to decide.
 - **Action needed** — next breaking ORM/macros release (#521). Review generated SQL Server keyset orders on pools that opt into native temporal text binding. [Migration](../../MIGRATION.md#2-review-sql-server-keyset-orders-on-opted-in-pools-521)
 - **Action needed** — next breaking ORM/macros release (#793). Check existing dotted columns and delimit each literal name explicitly. [Migration](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793)
 - **Action needed** — AI 0.164.0 (#828). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
+- **Action needed** — AI 0.165.0 and AI tool profiles 0.32.0 (#551). Capability broker version 3 adds hierarchical browsing and keyset continuation handles; fixed-broker sessions rebind once and rules that list broker fingerprints must admit the five new ones. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#capability-broker-version-3-551)
 
 Changes merged to main after the latest workspace release.
 

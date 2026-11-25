@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.32.0 continuable keyset pages
+
+**No action.** The additions are opt-in. `compile_compact` still compiles
+the first page of a keyset root without page info, and the model still
+cannot supply the keyset page argument. A page from `compile_compact_page`
+has its own document and plan fingerprint, and the same disclosure schema.
+Read its resolver response through `take_page_info` before disclosure: the
+page info is server state and not part of the disclosure schema. Keep the
+cursor server-side. No schema or data migration is needed.
+
 ## 0.31.0 provider endpoint path error
 
 **No action.** The shared, non-exhaustive `AiError` adds

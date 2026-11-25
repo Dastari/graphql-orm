@@ -2260,6 +2260,18 @@ async fn owned_postgres_broker_v2_entity_capability_executes_one_root_through_th
     broker_entity_parity::entity_capability_round_trip(database).await;
 }
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn owned_postgres_broker_v3_pages_a_keyset_root_through_continuation_handles() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<AiOrmBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    broker_entity_parity::keyset_continuation_round_trip(database).await;
+}
+
 #[path = "../support/legacy_approval_upgrade.rs"]
 mod legacy_approval_upgrade;
 
