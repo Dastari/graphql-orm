@@ -1714,8 +1714,222 @@ fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -
     }
 }
 
+/// Resolve a relation's `server_only_key` declarations to key-pair positions.
+///
+/// A server-only pair narrows a complete-tuple join on the server; it never
+/// becomes a public key. Each declaration must name one declared `from`/`to`
+/// pair, at least one pair must stay public, and capabilities that would
+/// evaluate the join outside the relation field itself are refused.
+pub(crate) fn relation_server_only_key_mask(
+    metadata: &FieldMetadata,
+    fields: &[ParsedField],
+    source_columns: &[String],
+    target_columns: &[String],
+) -> syn::Result<Vec<bool>> {
+    let mut mask = vec![false; source_columns.len()];
+    let declarations = &metadata.relation_server_only_keys;
+    if declarations.is_empty() {
+        return Ok(mask);
+    }
+    for key in declarations {
+        let Some(index) = source_columns
+            .iter()
+            .zip(target_columns)
+            .position(|(from, to)| *from == key.from && *to == key.to)
+        else {
+            return Err(syn::Error::new(
+                key.span,
+                format!(
+                    "server_only_key(from = \"{}\", to = \"{}\") must name one declared from/to key pair of this relation, in the same position",
+                    key.from, key.to
+                ),
+            ));
+        };
+        if std::mem::replace(&mut mask[index], true) {
+            return Err(syn::Error::new(key.span, "duplicate server_only_key"));
+        }
+    }
+    let source_field = |name: &str| {
+        fields.iter().find(|parsed| {
+            parsed
+                .field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == name)
+        })
+    };
+    // The loader regroups batched rows by each member's text. Floating-point
+    // text is not a lossless identity, so a near-equal value could attach a
+    // row to another parent that shares the public members.
+    for column in source_columns {
+        // A SQLite boolean is decoded from any nonzero integer and bound
+        // back as `1`, so the bound value need not be the stored one.
+        let kind = source_field(column)
+            .and_then(|parsed| crate::relations::classify_relation_value_type(&parsed.field.ty));
+        let refused = match kind {
+            Some((crate::relations::RelationValueKind::Float, _)) => Some("floating-point"),
+            Some((crate::relations::RelationValueKind::Bool, _)) => Some("boolean"),
+            _ => None,
+        };
+        if let Some(refused) = refused {
+            return Err(syn::Error::new(
+                declarations[0].span,
+                format!(
+                    "server_only_key relations require exactly comparable key members; `{column}` is {refused}, use an integer, string or UUID key"
+                ),
+            ));
+        }
+    }
+    // The bound value must be the stored partition value: a skipped field is
+    // defaulted on hydration, a read transform rewrites it, and JSON, date,
+    // boolean-field, decimal and spatial mappings decode it into another
+    // representation before it is bound again.
+    for key in declarations {
+        match source_field(&key.from) {
+            Some(parsed)
+                if !parsed.meta.is_relation
+                    && !parsed.meta.skip_db
+                    && parsed.meta.transform_read.is_none()
+                    && !parsed.meta.is_json_field
+                    && !parsed.meta.is_date_field
+                    && !parsed.meta.is_boolean_field
+                    && parsed.meta.decimal.is_none()
+                    && !parsed.meta.mssql_money
+                    && parsed.meta.spatial.is_none() => {}
+            _ => {
+                return Err(syn::Error::new(
+                    key.span,
+                    format!(
+                        "server_only_key source `{}` must be a persisted scalar field read as stored, so the join binds the stored value: no skip_db, read transform, json, date, boolean-field, decimal or spatial mapping",
+                        key.from
+                    ),
+                ));
+            }
+        }
+    }
+    let refuse = |message: &str| Err(syn::Error::new(declarations[0].span, message));
+    if mask.iter().all(|server_only| *server_only) {
+        return refuse(
+            "a server_only_key relation needs at least one public, GraphQL-readable key pair; server-only keys only narrow a complete-tuple join",
+        );
+    }
+    if metadata.relation_filter {
+        return refuse(
+            "server_only_key relations cannot declare `filter`: related-row filters would evaluate the server-only join from the parent's WhereInput",
+        );
+    }
+    if metadata.relation_order_aggregate.is_some() {
+        return refuse(
+            "server_only_key relations cannot declare `order_aggregate`: parent ordering would evaluate the server-only join",
+        );
+    }
+    if metadata.search_relation.is_some() {
+        return refuse(
+            "server_only_key relations cannot declare graphql_orm(search_relation(...)): search documents are maintained outside request authorization",
+        );
+    }
+    if metadata
+        .relation_propagate_change
+        .as_deref()
+        .is_some_and(|value| value != "none")
+    {
+        return refuse(
+            "server_only_key relations cannot propagate Changed events; generated propagation authorizes public subscribable keys only",
+        );
+    }
+    Ok(mask)
+}
+
+/// The physical columns this entity certifies as server-only relation keys.
+///
+/// Eligibility belongs to the normalized physical column, not to one Rust
+/// field: every field mapping the column must be declared `private` with no
+/// other surface, and the column must not be a member of the effective
+/// primary key (the implicit `id` included). When the GraphQL object is not
+/// generated by this derive, every mapping must also skip its object getter.
+pub(crate) fn relation_server_only_columns(
+    backend: BackendKind,
+    table: &str,
+    fields: &[ParsedField],
+    require_object_skip: bool,
+) -> Vec<String> {
+    let persisted = || {
+        fields
+            .iter()
+            .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)
+    };
+    // Resolve every mapping as the generated SQL does: table qualifiers
+    // dropped, quoting removed and bare PostgreSQL names case-folded, so an
+    // alias that reaches the same column through other spelling is found.
+    let physical = |parsed: &ParsedField| {
+        let rust_name = parsed.field.ident.as_ref().unwrap().to_string();
+        relation_column_identity(
+            backend,
+            parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
+            true,
+        )
+    };
+    let same = |left: &str, right: &str| {
+        if backend == BackendKind::Postgres {
+            left == right
+        } else {
+            left.eq_ignore_ascii_case(right)
+        }
+    };
+    let mut primary_keys = persisted()
+        .filter(|parsed| parsed.meta.is_primary_key)
+        .map(physical)
+        .collect::<Vec<_>>();
+    if primary_keys.is_empty() {
+        primary_keys.push(relation_column_identity(
+            backend,
+            &implicit_id_db_column(fields).unwrap_or_else(|| "id".to_string()),
+            true,
+        ));
+    }
+    // Fail closed where names cannot be told apart reliably, or could meet
+    // the by-match loader's own aliases: PostgreSQL truncates identifiers
+    // past 63 bytes, catalogue collations decide non-ASCII equality, and
+    // generated statements reserve the `__gom_` prefix.
+    let reserved = |name: &str| {
+        name.get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("__gom_"))
+    };
+    let table_name = relation_column_identity(backend, table, true);
+    if reserved(&table_name)
+        || persisted()
+            .map(physical)
+            .any(|column| !column.is_ascii() || column.len() > 63 || reserved(&column))
+    {
+        return Vec::new();
+    }
+    let mut columns: Vec<String> = Vec::new();
+    for candidate in persisted() {
+        let column = physical(candidate);
+        if columns.iter().any(|known| same(known, &column))
+            || primary_keys.iter().any(|key| same(key, &column))
+        {
+            continue;
+        }
+        let eligible = persisted()
+            .filter(|parsed| same(&physical(parsed), &column))
+            .all(|parsed| {
+                parsed.meta.is_private
+                    && parsed.meta.graphql_server_only()
+                    && (!require_object_skip || has_graphql_object_skip(&parsed.field))
+            });
+        if eligible {
+            columns.push(column);
+        }
+    }
+    columns
+}
+
 /// Refuse generated relation reads that disclose statically unreadable keys.
 /// Validate local and self-target columns available in this derive's input AST.
+/// `server_only` marks `server_only_key` pairs: their local member is exempt
+/// and their target member must be a server-only column.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_graphql_relation_keys(
     backend: BackendKind,
     entity: &syn::Ident,
@@ -1724,10 +1938,20 @@ pub(crate) fn validate_graphql_relation_keys(
     fields: &[ParsedField],
     source_columns: &[String],
     target_columns: &[String],
+    server_only: &[bool],
+    server_only_columns: &[String],
 ) -> syn::Result<()> {
     if !metadata.graphql_readable() {
         return Ok(());
     }
+    let public = |columns: &[String]| {
+        columns
+            .iter()
+            .zip(server_only)
+            .filter(|(_, server_only)| !**server_only)
+            .map(|(column, _)| column.clone())
+            .collect::<Vec<_>>()
+    };
     let check = |columns: &[String], side: &str, physical: bool| -> syn::Result<()> {
         for column in columns {
             let target_name = physical.then(|| relation_column_identity(backend, column, true));
@@ -1772,7 +1996,7 @@ pub(crate) fn validate_graphql_relation_keys(
         }
         Ok(())
     };
-    check(source_columns, "local key", false)?;
+    check(&public(source_columns), "local key", false)?;
     if let Some(condition) = &metadata.relation_source_condition {
         check(
             std::slice::from_ref(&condition.member),
@@ -1785,13 +2009,58 @@ pub(crate) fn validate_graphql_relation_keys(
         .as_deref()
         .is_some_and(|target| entity == target || target == "Self")
     {
-        check(target_columns, "self-target key", true)?;
+        check(&public(target_columns), "self-target key", true)?;
         if let Some(condition) = &metadata.relation_target_condition {
             check(
                 std::slice::from_ref(&condition.member),
                 "self-target condition column",
                 true,
             )?;
+        }
+        for (column, _) in target_columns
+            .iter()
+            .zip(server_only)
+            .filter(|(_, server_only)| **server_only)
+        {
+            let target_name = relation_column_identity(backend, column, true);
+            let same = |physical: &str| {
+                if backend == BackendKind::Postgres {
+                    physical == target_name
+                } else {
+                    physical.eq_ignore_ascii_case(&target_name)
+                }
+            };
+            let declared = fields.iter().any(|parsed| {
+                !parsed.meta.is_relation
+                    && !parsed.meta.skip_db
+                    && parsed.field.ident.as_ref().is_some_and(|name| {
+                        let rust_name = name.to_string();
+                        same(&relation_column_identity(
+                            backend,
+                            parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
+                            true,
+                        ))
+                    })
+            });
+            match declared {
+                true if server_only_columns.iter().any(|column| same(column)) => {}
+                true => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "server_only_key target `{column}` must have no GraphQL surface; every field mapping the column must be #[graphql_orm(private)] and #[graphql(skip)] without filter, order, subscribe, input or primary-key exposure"
+                        ),
+                    ));
+                }
+                false => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "cannot resolve self-target key `{column}` to a declared database column; use its physical column name with matching SQL quoting"
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -1805,6 +2074,7 @@ pub(crate) fn graphql_relation_target_checks(
     field: &Field,
     metadata: &FieldMetadata,
     target_columns: &[String],
+    server_only: &[bool],
 ) -> syn::Result<proc_macro2::TokenStream> {
     if !metadata.graphql_readable() {
         return Ok(quote! {});
@@ -1818,12 +2088,38 @@ pub(crate) fn graphql_relation_target_checks(
     })?;
     let relation = field.ident.as_ref().unwrap().to_string();
     let case_sensitive = backend == BackendKind::Postgres;
-    let columns = target_columns.iter().map(|column| (column, "key")).chain(
-        metadata
-            .relation_target_condition
-            .iter()
-            .map(|condition| (&condition.member, "condition")),
-    );
+    let server_only_assertions = target_columns
+        .iter()
+        .zip(server_only)
+        .filter(|(_, server_only)| **server_only)
+        .map(|(column, _)| {
+            let identity = relation_column_identity(backend, column, true);
+            let message = format!(
+                "relation `{entity}.{relation}` declares server_only_key target `{target_name}.{column}`, which is not a server-only column; every target field mapping it must be #[graphql_orm(private)] with no filter, order, subscribe or input exposure, and #[graphql(skip)] when the target derive does not generate its object; it cannot be a primary-key column, and the target metadata must declare it; a target certifies no column when its table or any column name is non-ASCII, longer than 63 bytes or starts with `__gom_`"
+            );
+            quote! {
+                const _: () = assert!(
+                    ::graphql_orm::graphql::orm::generated_relation_column_is_server_only(
+                        <#target as ::graphql_orm::graphql::orm::GeneratedRelationReadability>::SERVER_ONLY_COLUMNS,
+                        #identity,
+                        #case_sensitive,
+                    ),
+                    concat!(#message),
+                );
+            }
+        })
+        .collect::<Vec<_>>();
+    let columns = target_columns
+        .iter()
+        .zip(server_only)
+        .filter(|(_, server_only)| !**server_only)
+        .map(|(column, _)| (column, "key"))
+        .chain(
+            metadata
+                .relation_target_condition
+                .iter()
+                .map(|condition| (&condition.member, "condition")),
+        );
     let assertions = columns.map(|(column, role)| {
         let identity = relation_column_identity(backend, column, true);
         let message = format!(
@@ -1840,7 +2136,7 @@ pub(crate) fn graphql_relation_target_checks(
             );
         }
     });
-    Ok(quote! { #(#assertions)* })
+    Ok(quote! { #(#assertions)* #(#server_only_assertions)* })
 }
 
 /// Whether any `#[graphql(...)]` attribute declares `complex`, wherever it
@@ -1923,6 +2219,9 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_filter: bool,
     pub(crate) relation_order_aggregate: Option<RelationOrderAggregateMetadata>,
+    /// `server_only_key(from = "...", to = "...")` pairs: complete-tuple join
+    /// members whose columns have no GraphQL surface.
+    pub(crate) relation_server_only_keys: Vec<RelationServerOnlyKey>,
     pub(crate) skip_db: bool,
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
@@ -1979,6 +2278,15 @@ pub(crate) enum RelationConditionValue {
 pub(crate) struct RelationConditionMetadata {
     pub(crate) member: String,
     pub(crate) value: RelationConditionValue,
+}
+
+/// One relation key pair joined server-side only. `from` is a source Rust
+/// field and `to` a target physical column, as in `from`/`to`.
+#[derive(Clone)]
+pub(crate) struct RelationServerOnlyKey {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) span: proc_macro2::Span,
 }
 
 #[derive(Clone)]
@@ -2108,6 +2416,7 @@ impl Default for FieldMetadata {
             relation_target_condition: None,
             relation_filter: false,
             relation_order_aggregate: None,
+            relation_server_only_keys: Vec::new(),
             skip_db: false,
             skip_input: false,
             is_private: false,
@@ -3115,6 +3424,34 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                     )
                                 })?,
                             });
+                        } else if nested.path.is_ident("server_only_key") {
+                            let span = nested.path.span();
+                            let mut from = None;
+                            let mut to = None;
+                            nested.parse_nested_meta(|option| {
+                                let slot = if option.path.is_ident("from") {
+                                    &mut from
+                                } else if option.path.is_ident("to") {
+                                    &mut to
+                                } else {
+                                    return Err(option.error(
+                                        "unsupported server_only_key option; expected from or to",
+                                    ));
+                                };
+                                if slot.is_some() {
+                                    return Err(option.error("duplicate server_only_key option"));
+                                }
+                                let literal: syn::LitStr = option.value()?.parse()?;
+                                *slot = Some(literal.value());
+                                Ok(())
+                            })?;
+                            let (Some(from), Some(to)) = (from, to) else {
+                                return Err(syn::Error::new(
+                                    span,
+                                    "server_only_key requires from = \"source_field\" and to = \"target_column\"",
+                                ));
+                            };
+                            meta.relation_server_only_keys.push(RelationServerOnlyKey { from, to, span });
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
                         } else {
@@ -3444,6 +3781,25 @@ impl FieldMetadata {
     /// filter/sort capabilities and additional surface-specific restrictions.
     pub(crate) fn graphql_readable(&self) -> bool {
         self.read && !self.is_private && !self.input_only
+    }
+
+    /// A persisted scalar column with no generated GraphQL surface: not
+    /// readable, filterable, orderable, subscribable, searchable, accepted as
+    /// input or a primary-key member. Only such a column may be a relation's
+    /// `server_only_key` target.
+    pub(crate) fn graphql_server_only(&self) -> bool {
+        !self.is_relation
+            && !self.skip_db
+            && !self.is_primary_key
+            && !self.graphql_readable()
+            && !self.input_only
+            && self.skip_input
+            && !(self.filter && self.filterable.is_some())
+            && !(self.sortable && self.order)
+            && !self.subscribe
+            && self.search.is_none()
+            && self.search_json.is_empty()
+            && !self.is_version
     }
 
     pub(crate) fn timestamp_behavior(&self, rust_name: &str) -> TimestampBehavior {
@@ -4582,9 +4938,16 @@ fn generate_entity_tokens(
             let readable = parsed.meta.graphql_readable();
             quote! { (#column, #readable) }
         });
+    let relation_server_only_columns = relation_server_only_columns(
+        backend,
+        raw_table_name,
+        &parsed_fields,
+        schema_only_override || externally_owned_object,
+    );
     let relation_readability_impl = quote! {
         impl ::graphql_orm::graphql::orm::GeneratedRelationReadability for #struct_name {
             const COLUMNS: &'static [(&'static str, bool)] = &[#(#relation_readability_columns),*];
+            const SERVER_ONLY_COLUMNS: &'static [&'static str] = &[#(#relation_server_only_columns),*];
         }
     };
     let mut relation_target_checks = Vec::new();
@@ -4823,6 +5186,12 @@ fn generate_entity_tokens(
                         ));
                     }
                 }
+                let server_only_keys = relation_server_only_key_mask(
+                    &field_meta,
+                    &parsed_fields,
+                    &source_columns,
+                    &target_columns,
+                )?;
                 if !schema_only_override && !has_repository_entity_attribute(&input.attrs) {
                     validate_graphql_relation_keys(
                         backend,
@@ -4832,6 +5201,8 @@ fn generate_entity_tokens(
                         &parsed_fields,
                         &source_columns,
                         &target_columns,
+                        &server_only_keys,
+                        &relation_server_only_columns,
                     )?;
                     relation_target_checks.push(graphql_relation_target_checks(
                         backend,
@@ -4839,6 +5210,7 @@ fn generate_entity_tokens(
                         field,
                         &field_meta,
                         &target_columns,
+                        &server_only_keys,
                     )?);
                 }
                 let source_column = source_columns

@@ -43,6 +43,7 @@ mod schema_only_entity_ui;
 mod search_json_ui;
 mod search_relation_ui;
 mod semantic_catalogue_ui;
+mod server_only_keys_ui;
 mod simple_object_hidden_ui;
 mod skip_false_compat_ui;
 mod spatial_field_ui;

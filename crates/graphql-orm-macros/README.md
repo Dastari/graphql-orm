@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.218.0 adds the `server_only_key(from, to)` relation option.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+Version 0.217.0 enforces required query assurance when traversing generated
+relations into the protected entity.
+See the [migration guide](../../MIGRATION.md#02160-to-02170-relation-target-assurance).
+
 Version 0.216.0 lets PostgreSQL choose the join for native search on
 generated `#[graphql_rls]` entities with a column-based default sort. Both
 RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).

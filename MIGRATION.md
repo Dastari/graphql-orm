@@ -10,6 +10,36 @@ supersedes: []
 
 # Migration Guide
 
+## 0.217.0 to 0.218.0: server-only relation join keys
+
+**No action.** Upgrade ORM and macros together. `server_only_key` is a new,
+opt-in relation option; existing relations, their checks and their SQL are
+unchanged. Hand-written `GeneratedRelationReadability` implementations keep
+compiling: the new `SERVER_ONLY_COLUMNS` constant defaults to empty, so they
+cannot be a server-only target until they list the column. Store server-only
+key members in canonical form on both sides (for example lower-case UUID text
+on SQLite): a target stored in another spelling matches no row.
+See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+## 0.216.0 to 0.217.0: Relation target assurance
+
+**Action needed.** A requirement on *any* generated query root of an entity
+(list, get-by-id, keyset, scan, search or aggregate) now gates every generated
+relation into that entity. If you require assurance on any generated query
+root, clients traversing relations into that root's entity must satisfy the
+same policy. Handle `STEP_UP_REQUIRED` on relation fields, mutation result
+selections, and queries using related-row filters, relation-count ordering,
+or related search sources. Related reads can be issued again after step-up.
+If a relation field in a mutation result needs step-up, refresh it with a
+separate query since the mutation may already have committed. Upgrade ORM
+and macros together.
+
+The runtime GraphQL composer is not covered yet: runtime `node(id:)` checks
+only `Query.node`, runtime child layers do not check the target collection's
+roots, and generated `_entities` checks only get-by-id. Require `Query.node`
+or enforce step-up in `RuntimeReadAuthority` meanwhile
+([#902](https://github.com/Dastari/graphql-orm/issues/902)).
+
 ## Operation catalogue 0.15.0
 
 **No action.** Generated relationships with a declared field policy export
