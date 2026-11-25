@@ -29,6 +29,15 @@ roots, and generated `_entities` checks only get-by-id. Require `Query.node`
 or enforce step-up in `RuntimeReadAuthority` meanwhile
 ([#902](https://github.com/Dastari/graphql-orm/issues/902)).
 
+## Operation catalogue 0.15.0
+
+**No action.** Generated relationships with a declared field policy export
+`subgraph_only` in the resolver catalogue. The resolver catalogue fingerprint
+changes for exports that previously referenced a target root for such a
+relationship. Consumers of older exports should defer authorization to the
+subgraph when `has_field_policy` is true. Rebind any pinned
+resolver-catalogue fingerprint.
+
 ## 0.215.0 to 0.216.0: PostgreSQL RLS search
 
 **No action.** Upgrade ORM and macros together. Native search on generated

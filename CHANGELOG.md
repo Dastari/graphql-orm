@@ -21,6 +21,16 @@ for historical context.
   evaluating existence or counts.
   [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
 
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
 ## Unreleased - ORM/macros 0.216.0
 
 - **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use

@@ -70,9 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.217.0**; **`graphql-orm-macros` 0.217.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.217.0**; **`graphql-orm-macros` 0.217.0**; **`graphql-orm-operation-catalog` 0.15.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
 
 - **Action needed** — ORM/macros 0.217.0 fixes relation traversal assurance (#899). Handle step-up errors when a relation target has required query assurance. [Migration](../../MIGRATION.md#02160-to-02170-relation-target-assurance)
+- **No action** — Operation catalogue 0.15.0 marks field-policy-guarded relationships as `subgraph_only` (#544). [Migration](../../MIGRATION.md#operation-catalogue-0150)
 - **No action** — ORM/macros 0.216.0 let PostgreSQL choose the join for RLS search documents (#555). [Migration](../../MIGRATION.md#02150-to-02160-postgresql-rls-search)
 - **No action** — AI tool profiles 0.30.0 and AI 0.162.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
 - **No action** — ORM/macros 0.215.0 adds opt-in declared SQL Server parameter types and parses column identifiers in the ALTER COLUMN collation lookup (#522, #849). [Migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers)
