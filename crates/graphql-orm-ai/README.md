@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.163.0 adds operator reports for legacy skill schemas and saved provider
+endpoint paths. Existing versions and profiles stay readable. See the
+[migration guide](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints).
+
 AI 0.162.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
 targets with many capability roots. See the
 [benchmark measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark).

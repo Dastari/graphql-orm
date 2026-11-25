@@ -398,3 +398,147 @@ async fn inaccessible_skill_ids_are_masked_like_missing_ids() {
         ));
     }
 }
+
+#[tokio::test]
+async fn legacy_skill_schemas_resolve_and_remain_in_history_after_republication() {
+    use graphql_orm::sqlx;
+
+    let service = service().await;
+    let principal = principal(true);
+    let skill = service
+        .upsert_skill(
+            &principal,
+            UpsertAiSkillInput {
+                id: None,
+                scope: scope_input(),
+                name: "Schema history".to_owned(),
+                description: "Validates inputs and outputs.".to_owned(),
+                expected_version: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let deep_schema = (0..18).fold(
+        json!({"type": "string"}),
+        |child, _| json!({"type": "object", "properties": {"child": child}}),
+    );
+    let long_pattern = json!({"type": "string", "pattern": "a".repeat(257)});
+    let mut invalid = publish_input(skill.id, skill.row_version);
+    invalid.input_schema.0 = deep_schema.clone();
+    assert!(matches!(
+        service.publish_version(&principal, invalid).await,
+        Err(AiError::InvalidInput(_))
+    ));
+
+    let initial = publish_input(skill.id, skill.row_version);
+    let instructions = initial.instructions.clone();
+    let published = service.publish_version(&principal, initial).await.unwrap();
+    let template_version = published.current_version.unwrap();
+    let legacy_id = Uuid::new_v4();
+    let legacy_label = "2026.07.0";
+    let schemas = json!({"version": 1, "input": deep_schema, "output": long_pattern});
+
+    // Recreate a checksum-valid historical row in the test-owned SQLite store.
+    // Current publication cannot create this fixture.
+    let (allowed_tools, data_policy, activation_rule, budgets, provenance): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(
+        "SELECT allowed_tools, data_policy, activation_rule, budgets, provenance
+             FROM graphql_orm_ai_skill_versions WHERE id = ?",
+    )
+    .bind(template_version.id.to_string())
+    .fetch_one(service.database().pool())
+    .await
+    .unwrap();
+    let decode = |stored: String| serde_json::from_str::<serde_json::Value>(&stored).unwrap();
+    let checksum = canonical_json_hash(&json!({
+        "format": "graphql-orm-ai-skill-v1",
+        "version": legacy_label,
+        "instructions": instructions,
+        "allowed_tools": decode(allowed_tools),
+        "data_policy": decode(data_policy),
+        "activation_rule": decode(activation_rule),
+        "schemas": schemas,
+        "budgets": decode(budgets),
+        "provenance": decode(provenance),
+    }));
+    let mut fixture = service.database().pool().begin().await.unwrap();
+    let inserted = sqlx::query(
+        "INSERT INTO graphql_orm_ai_skill_versions
+         (id, skill_id, version, protected_instructions, allowed_tools, data_policy,
+          activation_rule, schemas, budgets, provenance, checksum, published, author_subject, created_at)
+         SELECT ?, skill_id, ?, protected_instructions, allowed_tools, data_policy,
+                activation_rule, ?, budgets, provenance, ?, published, author_subject, created_at
+         FROM graphql_orm_ai_skill_versions WHERE id = ?",
+    )
+    .bind(legacy_id.to_string())
+    .bind(legacy_label)
+    .bind(schemas.to_string())
+    .bind(checksum)
+    .bind(template_version.id.to_string())
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
+    let selected =
+        sqlx::query("UPDATE graphql_orm_ai_skills SET current_version_id = ? WHERE id = ?")
+            .bind(legacy_id.to_string())
+            .bind(skill.id.to_string())
+            .execute(&mut *fixture)
+            .await
+            .unwrap();
+    assert_eq!(selected.rows_affected(), 1);
+    fixture.commit().await.unwrap();
+
+    let resolved = service
+        .resolve_enabled_skills(&principal, skill_scope())
+        .await
+        .unwrap();
+    assert_eq!(resolved.len(), 1);
+    let resolved = &resolved[0];
+    assert!(resolved.has_legacy_schema());
+    assert_eq!(resolved.input_schema, schemas["input"]);
+    assert_eq!(resolved.output_schema, schemas["output"]);
+
+    let mut republished = publish_input(skill.id, published.row_version);
+    republished.version = "2026.07.2".to_owned();
+    republished.output_schema.0 = resolved.output_schema.clone();
+    assert!(matches!(
+        service.publish_version(&principal, republished).await,
+        Err(AiError::InvalidInput(_))
+    ));
+
+    let mut replacement = publish_input(skill.id, published.row_version);
+    replacement.version = "2026.07.2".to_owned();
+    service
+        .publish_version(&principal, replacement)
+        .await
+        .unwrap();
+    let resolved = service
+        .resolve_enabled_skills(&principal, skill_scope())
+        .await
+        .unwrap();
+    assert!(!resolved[0].has_legacy_schema());
+
+    assert_eq!(
+        service
+            .legacy_skill_schemas(&principal, skill_scope(), skill.id)
+            .await
+            .unwrap(),
+        [AiLegacySkillSchema {
+            id: legacy_id,
+            schema_digest: canonical_json_hash(&schemas),
+        }]
+    );
+    assert!(matches!(
+        service
+            .legacy_skill_schemas(&principal, AiScope::new("workspace", "other"), skill.id)
+            .await,
+        Err(AiError::Forbidden)
+    ));
+}

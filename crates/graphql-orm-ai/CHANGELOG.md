@@ -10,6 +10,18 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **No action on upgrade (#817).** Provider profile saves enforce the
+  adapter path contract and return a typed error on mismatch. An operator
+  report identifies grandfathered profiles that need correction before their
+  next save or adapter initialization.
+  [Migration](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
 ## Unreleased - 0.162.0
 
 - Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).

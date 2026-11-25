@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.31.0
+
+- **No action (#817).** Add a content-free provider endpoint path refusal to
+  the shared AI error contract. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
+
 ## Unreleased - 0.30.0
 
 - Validate filter roles and index generated-input ownership once per target

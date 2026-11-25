@@ -959,3 +959,225 @@ impl graphql_orm::graphql::orm::RowPolicy<AiOrmBackend> for PossiblyFilteredProf
         Box::pin(async { Ok(true) })
     }
 }
+
+#[tokio::test]
+async fn profile_saves_enforce_the_adapter_path_contract() {
+    let database = database().await;
+    let service = service(&database, profiles_only());
+    let principal = principal();
+    let long_path = format!("https://provider.example/{}", "a".repeat(2_048));
+
+    for (kind, valid, invalid) in [
+        (
+            AiProviderKindInput::Ollama,
+            "https://provider.example/",
+            ORIGINAL_ENDPOINT,
+        ),
+        (
+            AiProviderKindInput::OpenAiCompatible,
+            ORIGINAL_ENDPOINT,
+            "https://provider.example/",
+        ),
+        (
+            AiProviderKindInput::ChatCompletions,
+            ORIGINAL_ENDPOINT,
+            long_path.as_str(),
+        ),
+    ] {
+        assert!(
+            service
+                .upsert_provider_profile(&principal, input(None, None, kind, Some(invalid)))
+                .await
+                .is_err(),
+            "{kind:?} accepted an invalid path"
+        );
+        let profile = service
+            .upsert_provider_profile(&principal, input(None, None, kind, Some(valid)))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .upsert_provider_profile(
+                    &principal,
+                    input(
+                        Some(profile.id),
+                        Some(profile.row_version),
+                        kind,
+                        Some(invalid)
+                    ),
+                )
+                .await
+                .is_err(),
+            "{kind:?} accepted an invalid path on edit"
+        );
+        assert_eq!(
+            stored(&database, profile.id).await.base_url.as_deref(),
+            Some(valid)
+        );
+    }
+}
+
+#[tokio::test]
+async fn grandfathered_profile_paths_load_and_are_listed_until_corrected() {
+    let database = database().await;
+    let service = service(
+        &database,
+        GrantedActions::new(&[
+            AiConfigurationAction::ManageProviderProfiles,
+            AiConfigurationAction::ReadProviderProfiles,
+        ]),
+    );
+    let principal = principal();
+    let scope: AiScope = scope_input().into();
+
+    for (kind, valid, invalid, reason) in [
+        (
+            AiProviderKindInput::Ollama,
+            "https://provider.example/",
+            ORIGINAL_ENDPOINT,
+            AiProviderEndpointPathError::OriginRequired,
+        ),
+        (
+            AiProviderKindInput::ChatCompletions,
+            ORIGINAL_ENDPOINT,
+            "https://provider.example/",
+            AiProviderEndpointPathError::ExactEndpointRequired,
+        ),
+    ] {
+        let profile = service
+            .upsert_provider_profile(&principal, input(None, None, kind, Some(valid)))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .provider_profile_endpoint_issues(&principal, scope.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        #[cfg(feature = "provider-ollama-core")]
+        if kind == AiProviderKindInput::Ollama {
+            init_ollama(&profile).unwrap();
+        }
+        #[cfg(feature = "provider-chat-completions-core")]
+        if kind == AiProviderKindInput::ChatCompletions {
+            init_chat_completions(&profile).unwrap();
+        }
+
+        // Seed a URL accepted by the old save path in the test-owned database.
+        let seeded = database
+            .transaction(TransactionMode::StateMachine, |tx| {
+                Box::pin(async move {
+                    tx.compare_and_swap::<AiProviderProfileRecord>(
+                        &profile.id,
+                        profile.row_version,
+                        AiProviderProfileRecordWhereInput::default(),
+                        UpdateAiProviderProfileRecordInput {
+                            base_url: Some(Some(invalid.to_owned())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(seeded, ConditionalUpdateOutcome::Updated(_)));
+        let loaded = service
+            .provider_profiles(&principal, scope.clone())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|loaded| loaded.id == profile.id)
+            .unwrap();
+        assert_eq!(loaded.base_url.as_deref(), Some(invalid));
+        assert_eq!(
+            service
+                .provider_profile_endpoint_issues(&principal, scope.clone())
+                .await
+                .unwrap(),
+            [AiProviderProfileEndpointIssue {
+                id: profile.id,
+                reason
+            }]
+        );
+        #[cfg(feature = "provider-ollama-core")]
+        if kind == AiProviderKindInput::Ollama {
+            assert!(matches!(
+                init_ollama(&loaded),
+                Err(crate::ProviderError::InvalidEndpointPath(error)) if error == reason
+            ));
+        }
+        #[cfg(feature = "provider-chat-completions-core")]
+        if kind == AiProviderKindInput::ChatCompletions {
+            assert!(matches!(
+                init_chat_completions(&loaded),
+                Err(crate::ProviderError::InvalidEndpointPath(error)) if error == reason
+            ));
+        }
+
+        let mut metadata_only = input(
+            Some(loaded.id),
+            Some(loaded.row_version),
+            kind,
+            Some(invalid),
+        );
+        metadata_only.display_name = "New display name".to_owned();
+        let error = service
+            .upsert_provider_profile(&principal, metadata_only)
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("provider.example"));
+        assert_eq!(error.public_code(), "AI_INVALID_PROVIDER_ENDPOINT_PATH");
+        assert!(matches!(
+            error,
+            AiError::InvalidProviderEndpointPath(error) if error == reason
+        ));
+        service
+            .upsert_provider_profile(
+                &principal,
+                input(Some(loaded.id), Some(loaded.row_version), kind, Some(valid)),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        service
+            .provider_profile_endpoint_issues(&principal, scope.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let unprivileged = self::service(&database, GrantedActions::new(&[]));
+    assert!(matches!(
+        unprivileged
+            .provider_profile_endpoint_issues(&principal, scope)
+            .await,
+        Err(AiError::Forbidden)
+    ));
+}
+
+#[cfg(feature = "provider-ollama-core")]
+fn init_ollama(profile: &AiProviderProfileView) -> Result<(), crate::ProviderError> {
+    use crate::providers::{OllamaProvider, OllamaProviderConfig};
+
+    OllamaProvider::new(
+        OllamaProviderConfig::new(profile.base_url.clone().unwrap()),
+        Arc::new(AllowEndpoints),
+    )
+    .map(|_| ())
+}
+
+#[cfg(feature = "provider-chat-completions-core")]
+fn init_chat_completions(profile: &AiProviderProfileView) -> Result<(), crate::ProviderError> {
+    use crate::providers::{ChatCompletionsProvider, ChatCompletionsProviderConfig};
+
+    ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::from_profile(profile, None)?,
+        Arc::new(AllowEndpoints),
+        Arc::new(CountingSecretStore::default()),
+    )
+    .map(|_| ())
+}

@@ -10,6 +10,33 @@ supersedes: []
 
 # Migration Guide
 
+## 0.162.0 to 0.163.0 skill schemas and provider endpoints
+
+**No action on upgrade.** No AI schema module or data migration is needed.
+
+- **Skill schemas (#816).** Stored published versions outside the depth or
+  regular-expression bounds remain readable and usable through normal skill
+  resolution. `AiResolvedSkill::has_legacy_schema` marks those versions as
+  legacy. For each skill in an authorized scope, call
+  `OrmAiSkillCatalogService::legacy_skill_schemas` to audit its published
+  history, including superseded versions. It returns only version IDs and
+  SHA-256 digests of the canonical stored schema envelopes. To replace a
+  legacy version, publish a new version with schemas that satisfy the limits
+  of 32 JSON nesting levels and 256 UTF-8 bytes per regular expression.
+- **Provider endpoints (#817).** Profile creates and edits require a root
+  URL for Ollama and a non-root path of at most 2,048 bytes for OpenAI-compatible
+  Responses and Chat Completions. The limit applies to the normalized URL
+  path. Native profile endpoints remain deployment-fixed. A deployment
+  override for Anthropic uses the exact-endpoint path contract at adapter
+  initialization. Existing profiles still load. Use
+  `OrmAiConfigurationService::provider_profile_endpoint_issues` with
+  provider-profile read authority to list profile IDs and path requirements
+  for a scope. Correct any reported URL before saving that profile or
+  initializing its adapter. Writes return
+  `AiError::InvalidProviderEndpointPath` (`AI_INVALID_PROVIDER_ENDPOINT_PATH`
+  in GraphQL), and adapter initialization returns
+  `ProviderError::InvalidEndpointPath`. Both carry a content-free reason.
+
 ## 0.161.0 to 0.162.0 capability catalogue compilation
 
 **No action.** Capability fingerprints, provider definitions, describe output
