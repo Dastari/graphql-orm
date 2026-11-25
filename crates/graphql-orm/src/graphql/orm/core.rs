@@ -1314,6 +1314,48 @@ pub const PRINCIPAL_KEY_BINDING_REFUSAL: &str = "the request principal could not
 #[doc(hidden)]
 pub fn transient_input_argument() {}
 
+/// Refuse an operation that gives a default value to a variable used in a
+/// transient argument: a default is part of the query text, which hosts log
+/// and persist more freely than variables.
+#[doc(hidden)]
+pub fn __refuse_transient_variable_defaults(
+    ctx: &async_graphql::Context<'_>,
+    argument: &str,
+) -> async_graphql::Result<()> {
+    let definitions = &ctx.query_env.operation.node.variable_definitions;
+    if definitions
+        .iter()
+        .all(|definition| definition.node.default_value.is_none())
+    {
+        return Ok(());
+    }
+    // The resolver runs after the argument passed its size bound, so its
+    // literal is small enough to walk by resolving a copy.
+    let mut refused = false;
+    for (_, value) in ctx
+        .item
+        .node
+        .arguments
+        .iter()
+        .filter(|(name, _)| name.node.as_str() == argument)
+    {
+        let _ = value.node.clone().into_const_with(|name| {
+            refused |= definitions.iter().any(|definition| {
+                definition.node.name.node == name && definition.node.default_value.is_some()
+            });
+            Ok::<_, std::convert::Infallible>(async_graphql::Value::Null)
+        });
+    }
+    if refused {
+        return Err(crate::graphql::errors::OrmPublicError::with_message(
+            crate::graphql::errors::OrmErrorCode::InvalidInput,
+            "a variable used in a transient argument must not declare a default value",
+        )
+        .into_graphql_error());
+    }
+    Ok(())
+}
+
 /// A generated transient argument: `T`, refused before coercion when its
 /// request value is larger than `MAX_BYTES` or has more than `MAX_NODES`
 /// values. It has `T`'s GraphQL type.
@@ -1368,6 +1410,10 @@ where
         T::type_name()
     }
 
+    fn qualified_type_name() -> String {
+        T::qualified_type_name()
+    }
+
     fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
         T::create_type_info(registry)
     }
@@ -1382,9 +1428,11 @@ where
                 ));
             }
         }
-        T::parse(value)
-            .map(Self)
-            .map_err(async_graphql::InputValueError::propagate)
+        // `T`'s own coercion error can quote the value it rejected, and a
+        // response error is something hosts log. Report the failure only.
+        T::parse(value).map(Self).map_err(|_| {
+            async_graphql::InputValueError::custom("transient input is not a valid value")
+        })
     }
 
     fn to_value(&self) -> async_graphql::Value {
@@ -2585,12 +2633,19 @@ where
     }
 
     /// Refuse a principal-bound upsert whose conflict lookup or write reached
-    /// a row that does not hold exactly the bound key. The refusal is the
-    /// generic row-write denial, so it does not reveal that another
-    /// principal's row exists, and it blocks the commit.
+    /// a row that does not hold exactly the bound key, or whose written row
+    /// cannot be read back by that key. The refusal is the generic row-write
+    /// denial, so it does not reveal that another principal's row exists, and
+    /// it blocks the commit. Every such refusal is one identical response,
+    /// reported as `refused` whether or not a statement had run: the
+    /// transaction can no longer commit, so nothing was written either way.
     #[doc(hidden)]
-    pub fn __refuse_principal_key_mismatch(&mut self) -> async_graphql::Error {
+    pub fn __refuse_principal_key_mismatch(
+        &mut self,
+        outcome: &crate::graphql::errors::MutationOutcomeTracker,
+    ) -> async_graphql::Error {
         self.runtime_state.refuse_write();
+        outcome.__ownership_refused();
         crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error()
     }
 

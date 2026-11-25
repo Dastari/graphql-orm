@@ -12,11 +12,20 @@ supersedes: []
 
 ## Unreleased - 0.32.0
 
-- **No action (graphql-orm #908).** The GraphQL tool-profile compiler refuses
-  an argument plan that maps an argument declared `@transientInput` in the
-  finished schema. Such an argument is request-only data, and tool arguments
-  are retained with the run. A mutation whose transient argument is required
-  therefore has no profile; an optional one is never sent.
+- **No action (graphql-orm #908).** An argument declared `@transientInput` in
+  the finished schema is request-only data, and tool arguments are retained
+  with the run, so no AI path carries one:
+  - The GraphQL tool-profile compiler refuses an argument plan that maps it.
+    A mutation whose transient argument is required therefore has no profile;
+    an optional one is never sent.
+  - `AiGraphqlToolManifest::validate_against_finished_schema`, and so
+    `AiGraphqlToolManifestSet::aggregate`, check every entry's document
+    against the owning SDL and refuse one that passes such an argument, for
+    example a manifest written by an older compiler. The new
+    `register_into_with_finished_schema` validates and then registers.
+  - The typed query, mutation and subscription capability catalogues fail to
+    compile when an operation admitted for AI execution takes one.
+
   [Migration](MIGRATION.md#0320-transient-mutation-arguments)
 
 ## Unreleased - 0.31.0

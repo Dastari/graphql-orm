@@ -646,12 +646,51 @@ impl AiGraphqlToolManifest {
                 "GraphQL tool manifest version or schema binding is stale",
             ));
         }
-        self.validate_entries()
+        self.validate_entries()?;
+        // A manifest is data: one written by an older compiler, or by hand,
+        // can carry a document the current compiler would refuse. Check each
+        // document's argument uses against the owning schema.
+        let schema = FinishedSchema::parse(finished_sdl)?;
+        for entry in &self.entries {
+            schema.refuse_transient_argument_uses(entry.root_type, &entry.descriptor.document)?;
+        }
+        Ok(())
+    }
+
+    /// Validates this manifest against its owning subgraph's finished SDL,
+    /// then registers it as [`Self::register_into`] does.
+    ///
+    /// Prefer this over [`Self::register_into`] whenever the manifest was not
+    /// compiled in this process from the same SDL: only schema-aware
+    /// validation can refuse a document that maps a `@transientInput`
+    /// argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manifest is stale for `finished_sdl`, maps a
+    /// transient argument, or fails registration.
+    pub fn register_into_with_finished_schema<C>(
+        &self,
+        finished_sdl: &str,
+        catalog: &mut C,
+        operation_catalog: &GraphqlOperationCatalog,
+        operation_policy: &dyn AiGeneratedGraphqlOperationPolicy,
+    ) -> Result<(), AiError>
+    where
+        C: AiGraphqlToolManifestCatalog,
+    {
+        self.validate_against_finished_schema(finished_sdl)?;
+        self.register_into(catalog, operation_catalog, operation_policy)
     }
 
     /// Registers every compiled entry. Generated entries are revalidated
     /// against the current ORM operation catalog and host classification;
     /// custom roots remain bound to the same finished-schema fingerprint.
+    ///
+    /// This method does not see the finished SDL. A manifest that was loaded
+    /// rather than compiled here must first pass
+    /// [`Self::validate_against_finished_schema`], or be registered with
+    /// [`Self::register_into_with_finished_schema`].
     pub fn register_into<C>(
         &self,
         catalog: &mut C,
@@ -1260,6 +1299,76 @@ impl FinishedSchema {
             return Err(configuration_error("finished schema has no query root"));
         }
         Ok(Self { roots, types })
+    }
+
+    /// Refuse an executable document that passes any argument the schema
+    /// declares `@transientInput`, at any selection depth.
+    fn refuse_transient_argument_uses(
+        &self,
+        root: AiGraphqlRootType,
+        document: &str,
+    ) -> Result<(), AiError> {
+        use async_graphql_parser::types::{Selection, SelectionSet};
+        fn walk(
+            schema: &FinishedSchema,
+            parent: &str,
+            selections: &SelectionSet,
+        ) -> Result<(), AiError> {
+            for selection in &selections.items {
+                match &selection.node {
+                    Selection::Field(field) => {
+                        let name = field.node.name.node.as_str();
+                        if name.starts_with("__") {
+                            continue;
+                        }
+                        let schema_field = schema.object_field(parent, name)?;
+                        for (argument, _) in &field.node.arguments {
+                            if schema_field
+                                .arguments
+                                .get(argument.node.as_str())
+                                .is_some_and(|input| input.transient)
+                            {
+                                return Err(configuration_error(
+                                    "GraphQL tool document maps a transient mutation argument",
+                                ));
+                            }
+                        }
+                        if !field.node.selection_set.node.items.is_empty() {
+                            walk(
+                                schema,
+                                named_type(&schema_field.ty)?,
+                                &field.node.selection_set.node,
+                            )?;
+                        }
+                    }
+                    Selection::InlineFragment(fragment) => {
+                        let parent = fragment
+                            .node
+                            .type_condition
+                            .as_ref()
+                            .map_or(parent, |condition| condition.node.on.node.as_str());
+                        walk(schema, parent, &fragment.node.selection_set.node)?;
+                    }
+                    // Compiled tool documents are self-contained.
+                    Selection::FragmentSpread(_) => {
+                        return Err(configuration_error(
+                            "GraphQL tool document uses a fragment spread",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        let document = async_graphql_parser::parse_query(document)
+            .map_err(|_| configuration_error("GraphQL tool document is invalid"))?;
+        for (_, operation) in document.operations.iter() {
+            walk(
+                self,
+                self.root_name(root),
+                &operation.node.selection_set.node,
+            )?;
+        }
+        Ok(())
     }
 
     fn root_name(&self, kind: AiGraphqlRootType) -> &str {
@@ -2074,4 +2183,126 @@ fn validate_model_description(value: &str, label: &str) -> Result<(), AiError> {
 
 fn configuration_error(message: impl Into<String>) -> AiError {
     AiError::InvalidConfiguration(message.into())
+}
+
+#[cfg(test)]
+mod transient_admission_tests {
+    use super::*;
+    use crate::{AiDisclosureRule, AiDisclosureShape, AiToolRisk, DataClassification};
+
+    const MARKED_SDL: &str = r#"
+        directive @transientInput on ARGUMENT_DEFINITION
+        schema { query: Query, mutation: Mutation }
+        type Query { record: Record! }
+        type Mutation { changeRecord(value: String! @transientInput): Record! }
+        type Record { id: ID! }
+    "#;
+
+    /// A manifest is data. One written by a compiler that did not know the
+    /// marker can map a transient argument, and can be sealed consistently
+    /// for the marked schema. Schema-aware admission refuses it before
+    /// anything is registered.
+    #[test]
+    fn manifests_from_older_compilers_cannot_map_transient_arguments() {
+        // The older compiler: the same schema as it saw it, without the marker.
+        let unmarked_sdl = MARKED_SDL.replace(" @transientInput)", ")");
+        let rule = AiDisclosureRule::exportable(DataClassification::Internal);
+        let disclosure = AiDisclosureSchema::new(
+            "change-result-v1",
+            AiDisclosureShape::object(
+                rule,
+                [(
+                    "changeRecord".to_owned(),
+                    AiDisclosureShape::object(
+                        rule,
+                        [("id".to_owned(), AiDisclosureShape::scalar(rule))],
+                    ),
+                )],
+            ),
+        )
+        .unwrap();
+        let profile = AiGraphqlToolProfile::automatic_mutation(
+            "reviewed-change",
+            "changeRecord",
+            "Perform one reviewed record change",
+            vec![AiGraphqlSelection::scalar("id")],
+            disclosure,
+            4096,
+            1,
+            AiToolRisk::NonIdempotentWrite,
+            false,
+        )
+        .unwrap()
+        .with_inputs([AiGraphqlProfileInput::string(
+            "Value",
+            "Reviewed value",
+            true,
+            1,
+            128,
+        )])
+        .with_arguments([AiGraphqlArgumentPlan::new(
+            "value",
+            AiGraphqlArgumentValue::input("Value"),
+        )]);
+        let target = || GraphqlExecutionTargetId::parse("application-graph").unwrap();
+        let mut builder =
+            AiGraphqlToolManifestBuilder::new("records-service", target(), &unmarked_sdl).unwrap();
+        builder.add_custom_profile(profile.clone()).unwrap();
+        let mut manifest = builder.build().unwrap();
+        assert!(
+            manifest.entries[0]
+                .descriptor
+                .document
+                .contains("value: $Value")
+        );
+        manifest
+            .validate_against_finished_schema(&unmarked_sdl)
+            .unwrap();
+
+        // Today's compiler refuses the same profile for the marked schema.
+        let mut current =
+            AiGraphqlToolManifestBuilder::new("records-service", target(), MARKED_SDL).unwrap();
+        assert!(current.add_custom_profile(profile).is_err());
+
+        // Re-seal the old manifest for the marked schema, every fingerprint
+        // consistent, as a stale export or a forged payload would be.
+        let marked = finished_schema_fingerprint(MARKED_SDL);
+        manifest.finished_schema_fingerprint = marked.clone();
+        for entry in &mut manifest.entries {
+            let mut contract = entry
+                .descriptor
+                .graphql_contract
+                .take()
+                .expect("compiled contract");
+            contract.schema_fingerprint = marked.clone();
+            entry.descriptor = entry.descriptor.clone().with_graphql_contract(contract);
+        }
+        manifest.fingerprint = manifest.compute_fingerprint();
+        manifest
+            .validate_entries()
+            .expect("the manifest is internally consistent");
+        let reloaded =
+            AiGraphqlToolManifest::from_extension_payload(manifest.extension_payload().unwrap())
+                .expect("loading alone does not see the schema");
+
+        let refusal = |error: AiError| error.to_string();
+        assert!(
+            refusal(
+                reloaded
+                    .validate_against_finished_schema(MARKED_SDL)
+                    .unwrap_err()
+            )
+            .contains("transient")
+        );
+        assert!(
+            refusal(
+                AiGraphqlToolManifestSet::aggregate(
+                    [reloaded],
+                    &BTreeMap::from([("records-service".to_owned(), MARKED_SDL.to_owned())]),
+                )
+                .unwrap_err()
+            )
+            .contains("transient")
+        );
+    }
 }

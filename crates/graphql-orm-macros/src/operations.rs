@@ -5485,7 +5485,7 @@ fn generate_graphql_operations_unfiltered(
         quote! {
             if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                 if #mismatch {
-                    return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch());
+                    return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome));
                 }
             }
         }
@@ -5501,9 +5501,16 @@ fn generate_graphql_operations_unfiltered(
             let __gom_written_id: ::std::string::String = #pk_id_for_entity;
             if #mismatch || (current_entity.is_none() && __gom_written_id != __gom_created_event_id)
             {
-                return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch());
+                return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome));
             }
         }
+    };
+    // A written row that cannot be read back by the bound key is the same
+    // ownership refusal, not a distinguishable "not found".
+    let upsert_missing_post_image = if upsert_bound_keys.is_empty() {
+        quote! { ::graphql_orm::async_graphql::Error::new("Entity not found after upsert") }
+    } else {
+        quote! { hook_ctx.__refuse_principal_key_mismatch(&__gom_outcome) }
     };
     let principal_key_created_id = if upsert_bound_keys.is_empty() {
         quote! {}
@@ -5519,6 +5526,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { input.#field_name = ::std::default::Default::default(); }
         })
         .collect::<proc_macro2::TokenStream>();
+    let mut transient_default_check = quote! {};
     let (transient_argument, transient_store) = match &entity_meta.transient_input {
         Some(transient) => {
             let ty = &transient.ty;
@@ -5539,14 +5547,22 @@ fn generate_graphql_operations_unfiltered(
                     directive = ::graphql_orm::graphql::orm::transient_input_argument::apply()
                 )]
             };
+            transient_default_check = quote! {
+                ::graphql_orm::graphql::orm::__refuse_transient_variable_defaults(ctx, #name)?;
+            };
+            // The catalogue records the declared type, not the wrapper.
             if transient.required {
                 (
-                    quote! { #attribute __gom_transient: #bounded, },
+                    quote! { #attribute #[__gom_catalogue_type(#ty)] __gom_transient: #bounded, },
                     quote! { hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?; },
                 )
             } else {
                 (
-                    quote! { #attribute __gom_transient: ::std::option::Option<#bounded>, },
+                    quote! {
+                        #attribute
+                        #[__gom_catalogue_type(::std::option::Option<#ty>)]
+                        __gom_transient: ::std::option::Option<#bounded>,
+                    },
                     quote! {
                         if let ::std::option::Option::Some(__gom_transient) = __gom_transient {
                             hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?;
@@ -5594,6 +5610,8 @@ fn generate_graphql_operations_unfiltered(
         principal_key_assignment: &principal_key_assignment,
         principal_key_preimage_check: &principal_key_preimage_check,
         principal_key_created_id: &principal_key_created_id,
+        upsert_missing_post_image: &upsert_missing_post_image,
+        transient_default_check: &transient_default_check,
         principal_key_postimage_check: &principal_key_postimage_check,
         transient_argument: &transient_argument,
         transient_store: &transient_store,

@@ -2183,6 +2183,17 @@ impl AiGraphqlMutationCapabilityCatalog {
                     )
             })
             .collect::<Vec<_>>();
+        // A mutation classified for AI execution must not take a transient
+        // argument: a plan's arguments are retained with the run. Refused
+        // before any plan schema is built, so the argument is never offered.
+        for operation in &executable {
+            let root = schema.mutation_root_field(&operation.field_name)?;
+            if root.arguments.values().any(|input| input.transient) {
+                return Err(configuration_error(
+                    "operation takes a transient argument and cannot be an AI capability",
+                ));
+            }
+        }
         let (executable, diagnostics) =
             admit_input_capabilities(&schema, semantic_catalog, executable, limits, &options)?;
         if executable.len() > limits.maximum_capabilities as usize {
@@ -3394,6 +3405,8 @@ struct SchemaInput {
     ty: String,
     has_default: bool,
     description: Option<String>,
+    /// Declared `@transientInput`: request-only data no plan may carry.
+    transient: bool,
 }
 
 impl FinishedSchema {
@@ -3461,6 +3474,11 @@ impl FinishedSchema {
                                         SchemaInput {
                                             ty: argument.node.ty.node.to_string(),
                                             has_default: argument.node.default_value.is_some(),
+                                            transient: argument.node.directives.iter().any(
+                                                |directive| {
+                                                    directive.node.name.node == "transientInput"
+                                                },
+                                            ),
                                             description: argument
                                                 .node
                                                 .description
@@ -3493,6 +3511,7 @@ impl FinishedSchema {
                                         .node
                                         .description
                                         .map(|description| description.node.to_string()),
+                                    transient: false,
                                 },
                             )
                         })
@@ -3650,6 +3669,14 @@ fn compile_capability(
 ) -> Result<CompiledCapability, AiError> {
     let root_field = schema.operation_root_field(expected_kind, &operation.field_name)?;
     validate_operation_against_schema(operation, root_field, expected_kind)?;
+    // A plan's arguments are retained with the run, so a root that takes a
+    // transient argument has no typed capability: not with the argument in
+    // its plan schema, and not with it silently left out.
+    if root_field.arguments.values().any(|input| input.transient) {
+        return Err(configuration_error(
+            "operation takes a transient argument and cannot be an AI capability",
+        ));
+    }
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
     let compact_argument_schema = build_compact_plan_schema(
@@ -11844,6 +11871,46 @@ mod tests {
             })),
             Err(AiError::InvalidInput(_))
         ));
+    }
+
+    /// A mutation that takes a `@transientInput` argument has no typed
+    /// capability: classifying it for AI execution fails the catalogue.
+    #[test]
+    fn mutation_capabilities_refuse_transient_arguments() {
+        let semantics = mutation_semantic_catalog();
+        let compile = |sdl: &str| {
+            AiGraphqlMutationCapabilityCatalog::compile_with_options(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                sdl,
+                &semantics,
+                AiGraphqlQueryCapabilityLimits::default(),
+                AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                    AiCustomInputDisclosure::new()
+                        .with_exportable_field("ParentMutationInput", "name")
+                        .expect("declared field"),
+                ),
+            )
+        };
+        let marked = |root: &str, argument: &str| {
+            let plain = format!("{root}({argument})");
+            assert!(SDL.contains(&plain), "{plain}");
+            SDL.replace(&plain, &format!("{root}({argument} @transientInput)"))
+        };
+        // Automatic and approval-required roots are both refused.
+        for root in ["CreateParent", "UpdateParent"] {
+            assert!(matches!(
+                compile(&marked(root, "input: ParentMutationInput!")),
+                Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
+            ));
+        }
+        // A prohibited root stays structurally absent, marker or not.
+        let catalog = compile(&marked("DeleteParent", "id: ID!")).expect("prohibited root");
+        assert_eq!(catalog.capabilities().count(), 2);
+        for capability in catalog.capabilities() {
+            let schema = serde_json::to_string(capability.argument_schema()).expect("schema");
+            assert!(!schema.contains("transient"), "{schema}");
+        }
     }
 
     #[test]

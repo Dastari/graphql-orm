@@ -27,7 +27,8 @@ for historical context.
     policy, read or write, with a fixed `FORBIDDEN` that carries nothing from
     the binding's own error. A row the database matched but whose stored key
     is not exactly the bound value is refused with `FORBIDDEN`, so a
-    case-insensitive collation cannot merge two principals. Generated updates
+    case-insensitive collation cannot merge two principals. Every ownership
+    refusal is one identical response. Generated updates
     never assign the column, whatever their input transform does. Every
     existing write authorization still applies. Unsafe declarations are
     compile errors, including an entity that also generates `create` or takes
@@ -39,9 +40,11 @@ for historical context.
     transaction. It is never stored or published in `Changed` events or the
     change journal. The argument is marked `secret`, so async-graphql's
     rendered execution document redacts it, and `@transientInput`, so AI tool
-    profiles cannot map it. A request value over `max_bytes` (default 64 KiB)
-    or `max_nodes` (default 1024) is refused before coercion. Transaction code
-    can set one with `MutationContext::set_transient_input`.
+    profiles and typed AI capabilities cannot carry it. A request value over
+    `max_bytes` (default 64 KiB) or `max_nodes` (default 1024) is refused
+    before coercion, a value that does not coerce is refused without being
+    quoted, and a defaulted variable in the argument is refused. Transaction
+    code can set one with `MutationContext::set_transient_input`.
   - `upsert_acknowledge = true`: the `Before` hook may call
     `MutationContext::acknowledge_without_write` on the update branch. The
     upsert then writes nothing, publishes nothing and returns the existing row

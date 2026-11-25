@@ -40,6 +40,10 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) principal_key_assignment: &'a TokenStream,
     /// Refuses an existing row that does not hold the bound key exactly.
     pub(in crate::operations) principal_key_preimage_check: &'a TokenStream,
+    /// The error when the written row cannot be read back.
+    pub(in crate::operations) upsert_missing_post_image: &'a TokenStream,
+    /// Refuses a defaulted variable in the transient argument.
+    pub(in crate::operations) transient_default_check: &'a TokenStream,
     /// Remembers the ID an insert would create, for the post-image check.
     pub(in crate::operations) principal_key_created_id: &'a TokenStream,
     /// Refuses a written row that does not hold the bound key exactly.
@@ -90,6 +94,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         principal_key_assignment,
         principal_key_preimage_check,
         principal_key_created_id,
+        upsert_missing_post_image,
+        transient_default_check,
         principal_key_postimage_check,
         transient_argument,
         transient_store,
@@ -139,6 +145,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
                 let __gom_result: ::graphql_orm::async_graphql::Result<#upsert_result_type> = async {
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
+                #transient_default_check
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #upsert_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -266,7 +273,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 let entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &lookup_input)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
-                    .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
+                    .ok_or_else(|| #upsert_missing_post_image)?;
                 #principal_key_postimage_check
                 #graphql_post_image_check
                 #struct_name::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)

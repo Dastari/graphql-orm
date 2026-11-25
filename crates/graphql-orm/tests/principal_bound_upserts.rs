@@ -1177,6 +1177,21 @@ async fn key_has_no_public_surface(base: &Database<Backend>) -> TestResult {
         for argument in generated.arguments() {
             if argument.graphql_type().contains("SnapshotProof") {
                 transient_arguments += 1;
+                // The declared type, not the generated wrapper.
+                assert!(
+                    [
+                        "SnapshotProof",
+                        ":: std :: option :: Option < SnapshotProof >"
+                    ]
+                    .contains(&argument.rust_type()),
+                    "{}",
+                    argument.rust_type()
+                );
+                assert!(
+                    ["SnapshotProof!", "SnapshotProof"].contains(&argument.graphql_type()),
+                    "{}",
+                    argument.graphql_type()
+                );
                 assert!(
                     generated
                         .field_name()
@@ -1401,6 +1416,72 @@ async fn database_equality_cannot_merge_principals(base: &Database<Backend>) -> 
     Ok(())
 }
 
+/// Every ownership-specific refusal is one identical response: an existing
+/// row whose key only the database considers equal, a written row whose key
+/// is not exactly the bound one, and a written row that cannot be read back.
+#[cfg(feature = "sqlite")]
+async fn ownership_refusals_are_indistinguishable(base: &Database<Backend>) -> TestResult {
+    // Triggers stand in for whatever lets a write land somewhere else.
+    for trigger in [
+        "CREATE TRIGGER notes_vanish AFTER INSERT ON machine_notes WHEN NEW.note = 'vanish' \
+         BEGIN DELETE FROM machine_notes WHERE id = NEW.id; END",
+        "CREATE TRIGGER notes_rekey AFTER INSERT ON machine_notes WHEN NEW.note = 'rekey' \
+         BEGIN UPDATE machine_notes SET machine_key = upper(machine_key) WHERE id = NEW.id; END",
+    ] {
+        sqlx::query(trigger).execute(base.pool()).await?;
+    }
+    let probe = Probe::default();
+    let db =
+        configured(base, AuthorizationMode::default(), &probe).with_mutation_error_outcome(true);
+    let note = |text: &str| {
+        format!(
+            "mutation {{ {}({}: {{ {}: \"{text}\" }}) {{ success action }} }}",
+            r("upsertMachineNote"),
+            a("input"),
+            f("note"),
+        )
+    };
+    let seeded = execute(&db, &probe, "Owned-Machine", &note("mine")).await;
+    assert!(seeded.errors.is_empty(), "{:?}", seeded.errors);
+    let rows_before = MachineNote::find_many(&db, MachineNoteWhereInput::default())
+        .await?
+        .len();
+    let mut responses = Vec::new();
+    for (who, text) in [
+        // Pre-image: the lookup returns another principal's row.
+        ("owned-machine", "taken"),
+        // Post-image: the written row no longer holds the bound key exactly.
+        ("rekey-machine", "rekey"),
+        // Missing post-image: the written row cannot be read back.
+        ("vanish-machine", "vanish"),
+    ] {
+        let response = execute(&db, &probe, who, &note(text)).await;
+        assert_eq!(
+            code(&response).as_deref(),
+            Some("FORBIDDEN"),
+            "{who}: {:?}",
+            response.errors
+        );
+        responses.push((who, serde_json::to_value(&response)?));
+    }
+    for (who, response) in &responses {
+        assert_eq!(response, &responses[0].1, "{who} is distinguishable");
+        assert_eq!(
+            response["errors"][0]["extensions"]["outcome"],
+            json!("refused")
+        );
+    }
+    // None of them wrote anything.
+    let rows = MachineNote::find_many(&db, MachineNoteWhereInput::default()).await?;
+    assert_eq!(rows.len(), rows_before, "{rows:?}");
+    for trigger in ["notes_vanish", "notes_rekey"] {
+        sqlx::query(&format!("DROP TRIGGER {trigger}"))
+            .execute(base.pool())
+            .await?;
+    }
+    Ok(())
+}
+
 /// Captures the execution document the way a logging extension renders it.
 struct RenderDocuments;
 
@@ -1504,6 +1585,53 @@ async fn transient_argument_is_secret_and_bounded(base: &Database<Backend>) -> T
         );
     }
     assert_eq!(probe.counts(), before, "refused before the resolver ran");
+    assert_eq!(stored_for(&db, "bounded-machine").await?[0].sequence, 1);
+    // A value of the wrong shape is refused without being quoted back, and
+    // so is a variable default, which would put the value in the query text.
+    let before = probe.counts();
+    const LEAK: &str = "leak-9f2c-not-for-logs";
+    let mut malformed = proof("d2", 0);
+    malformed["sequence"] = json!(LEAK);
+    let wrong_shape = run(with_variable.clone(), json!({ "proof": malformed })).await;
+    assert!(!wrong_shape.errors.is_empty());
+    assert!(
+        !serde_json::to_string(&wrong_shape)?.contains(LEAK),
+        "{:?}",
+        wrong_shape.errors
+    );
+    let wrong_literal = run(
+        snapshot_mutation("x", 2, "d2").replace("sequence: 2", &format!("sequence: \"{LEAK}\"")),
+        json!({}),
+    )
+    .await;
+    assert!(!wrong_literal.errors.is_empty());
+    assert!(
+        !serde_json::to_string(&wrong_literal)?.contains(LEAK),
+        "{:?}",
+        wrong_literal.errors
+    );
+    let defaulted = run(
+        with_variable.replace(
+            "$proof: SnapshotProof!",
+            &format!(
+                "$proof: SnapshotProof! = {{ sequence: 2, digest: \"{LEAK}\", nonce: \"n\" }}"
+            ),
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        code(&defaulted).as_deref(),
+        Some("INVALID_INPUT"),
+        "{:?}",
+        defaulted.errors
+    );
+    assert!(!serde_json::to_string(&defaulted)?.contains(LEAK));
+    assert_eq!(
+        probe.counts(),
+        before,
+        "none reached a binding, policy or hook"
+    );
     assert_eq!(stored_for(&db, "bounded-machine").await?[0].sequence, 1);
     // A value inside both limits is accepted.
     let mut inside = proof(&"y".repeat(300), 8);
@@ -1772,6 +1900,10 @@ async fn every_contract_step(
     database_equality_cannot_merge_principals(&fixture.db)
         .await
         .map_err(|error| ("database equality", error))?;
+    #[cfg(feature = "sqlite")]
+    ownership_refusals_are_indistinguishable(&fixture.db)
+        .await
+        .map_err(|error| ("ownership refusals", error))?;
     transient_argument_is_secret_and_bounded(&fixture.db)
         .await
         .map_err(|error| ("secret and bounded transient input", error))?;

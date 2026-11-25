@@ -646,13 +646,22 @@ value using the key type's exact Rust equality:
   not return.
 
 A mismatch is refused with `FORBIDDEN` and the default message, the same refusal as a row write
-denial, so the response does not reveal that another principal's row exists. Nothing is written,
-and the transaction cannot commit.
+denial. Nothing is written, and the transaction cannot commit. The three ownership refusals (an
+existing row with a different exact key, a written row with a different exact key, and a written
+row that cannot be read back by the bound key) are one identical response, including
+`extensions.outcome: "refused"` where the host enables outcomes.
 
-Store bound-key columns so that equality preserves identity: a binary or case- and
-accent-sensitive collation on SQL Server (for example `Latin1_General_100_BIN2`), no `NOCASE` on
-SQLite, and a deterministic collation on PostgreSQL. With such a column the check never fires.
-Without one, the second principal is locked out instead of sharing a row.
+**Prerequisite: identity-preserving equality.** Store bound-key columns so that the database's
+equality preserves identity: a binary or case- and accent-sensitive collation on SQL Server (for
+example `Latin1_General_100_BIN2`), no `NOCASE` on SQLite, and a deterministic collation on
+PostgreSQL. With such a column the check never fires, and an upsert tells a caller nothing about
+any other principal.
+
+Without it, the check still keeps principals apart, but it cannot hide that a key is taken. A
+caller whose key is collation-equal to an occupied key is refused, where an unused key would have
+inserted. That difference reveals that some principal holds an equivalent key. The guarantee that
+an upsert reveals nothing about other principals therefore holds only on identity-preserving
+columns; on any other column the check is a safety net that locks the second principal out.
 
 **PostgreSQL RLS.** If a policy hides the conflicting row from the caller, the lookup returns no
 row and the upsert takes its insert branch. PostgreSQL then refuses the `ON CONFLICT DO UPDATE`
@@ -711,6 +720,11 @@ value is refused with `transient input exceeds its size limit` before it is coer
 and before the resolver, the binding or any policy runs. This holds for literals and for variables.
 The bound applies to the parsed request, so keep your HTTP body limit as the first line of defence.
 
+A value that does not coerce into your type is refused with `transient input is not a valid value`.
+Your type's own coercion error is discarded, because it can quote the value it rejected. An
+operation that declares a default value for a variable used in the transient argument is refused
+with `INVALID_INPUT`: a default is part of the query text.
+
 The resolver stores the value on the upsert's own transaction before the input transform runs:
 
 ```rust,ignore
@@ -728,10 +742,17 @@ let proof = hook_ctx.transient_input::<SnapshotProof>();
   the change journal, `notify_with` or the mutation result. It is dropped with the transaction,
   before the commit, so deferred post-commit actions do not see it.
 - In catalogues it appears only as the upsert's argument and its input type.
-- The argument carries the schema directive `@transientInput`. The AI tool-profile compiler refuses
-  any argument plan that maps such an argument, because tool arguments are retained with the run.
-  An upsert with a required transient input therefore cannot be an AI tool; with an optional one,
-  a tool never sends it.
+- The argument carries the schema directive `@transientInput`, because AI tool arguments are
+  retained with the run:
+  - The tool-profile compiler refuses any argument plan that maps such an argument. An upsert with
+    a required transient input therefore has no profile; with an optional one, a profile never
+    sends it.
+  - A loaded manifest is checked again against the owning subgraph's SDL
+    (`validate_against_finished_schema`, `AiGraphqlToolManifestSet::aggregate`,
+    `register_into_with_finished_schema`), so one written by an older compiler cannot map it.
+  - The typed mutation capability catalogue fails to compile when a mutation classified for AI
+    execution (`ai_mutations(upsert = "automatic" | "approval_required")`) takes one. Leave such
+    an upsert prohibited, which is the default.
 
 Where the value can still be seen:
 
@@ -741,6 +762,11 @@ Where the value can still be seen:
 - **Not redacted: the raw request.** `Debug` of an `async_graphql::Request`, its `query` text and
   its `variables`, and anything your HTTP layer logs before the schema runs, still contain the
   value. Do not log raw requests for a schema that accepts transient input.
+- **Not redacted: variable defaults in a logging extension.** async-graphql's opt-in `Logger`
+  extension, and any extension that prints the rendered document, prints variable definitions with
+  their default values verbatim. Only the argument is redacted. The upsert refuses such an
+  operation, but the extension has already printed the document by then. Enable these extensions
+  only where their output is treated like the raw request.
 - **Not redacted: your own callbacks.** The ORM never formats the value into an error or a log
   line. An error that your transform or hook builds from it is your text: with a public code it
   reaches the client, and without one it is a server-side diagnostic that
