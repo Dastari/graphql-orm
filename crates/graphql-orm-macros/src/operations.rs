@@ -5498,8 +5498,8 @@ fn generate_graphql_operations_unfiltered(
     } else {
         let mismatch = principal_key_mismatch(quote! { entity });
         quote! {
-            if #mismatch
-                || (current_entity.is_none() && #pk_id_for_entity != __gom_created_event_id)
+            let __gom_written_id: ::std::string::String = #pk_id_for_entity;
+            if #mismatch || (current_entity.is_none() && __gom_written_id != __gom_created_event_id)
             {
                 return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch());
             }
