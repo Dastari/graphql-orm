@@ -120,9 +120,16 @@ async fn service() -> OrmAiSkillCatalogService {
     .readiness_proof()
     .await
     .expect("a test store should record its first live epoch");
+    service_with_access(database, Arc::new(ExactScopeAccess))
+}
+
+fn service_with_access(
+    database: Database<SqliteBackend>,
+    access_policy: Arc<dyn AiSkillAccessPolicy>,
+) -> OrmAiSkillCatalogService {
     OrmAiSkillCatalogService::new(
         database,
-        Arc::new(ExactScopeAccess),
+        access_policy,
         Arc::new(ProtectionPolicy),
         Arc::new(DatabaseManagedContentProtector),
         RecentMfaPolicy {
@@ -360,22 +367,7 @@ async fn inaccessible_skill_ids_are_masked_like_missing_ids() {
         )
         .await
         .unwrap();
-    let denied = OrmAiSkillCatalogService::new(
-        administrator.database().clone(),
-        Arc::new(DenySkills),
-        Arc::new(ProtectionPolicy),
-        Arc::new(DatabaseManagedContentProtector),
-        RecentMfaPolicy {
-            maximum_age: Duration::minutes(5),
-            clock_skew: Duration::seconds(30),
-            allowed_amr: vec!["otp".to_owned()],
-            allowed_acr: vec!["urn:test:loa:2".to_owned()],
-            required_amr: Vec::new(),
-            required_context: None,
-            match_mode: AssuranceMatchMode::All,
-        },
-        Arc::new(FixedClock::new(now())),
-    );
+    let denied = service_with_access(administrator.database().clone(), Arc::new(DenySkills));
     for id in [created.id, Uuid::new_v4()] {
         assert!(matches!(
             denied
@@ -435,8 +427,7 @@ async fn legacy_skill_schemas_resolve_and_remain_in_history_after_republication(
     let instructions = initial.instructions.clone();
     let published = service.publish_version(&principal, initial).await.unwrap();
     let template_version = published.current_version.unwrap();
-    let legacy_id = Uuid::new_v4();
-    let legacy_label = "2026.07.0";
+    let legacy_id = Uuid::from_u128(100);
     let schemas = json!({"version": 1, "input": deep_schema, "output": long_pattern});
 
     // Recreate a checksum-valid historical row in the test-owned SQLite store.
@@ -456,9 +447,8 @@ async fn legacy_skill_schemas_resolve_and_remain_in_history_after_republication(
     .await
     .unwrap();
     let decode = |stored: String| serde_json::from_str::<serde_json::Value>(&stored).unwrap();
-    let checksum = canonical_json_hash(&json!({
+    let mut checksum_payload = json!({
         "format": "graphql-orm-ai-skill-v1",
-        "version": legacy_label,
         "instructions": instructions,
         "allowed_tools": decode(allowed_tools),
         "data_policy": decode(data_policy),
@@ -466,25 +456,37 @@ async fn legacy_skill_schemas_resolve_and_remain_in_history_after_republication(
         "schemas": schemas,
         "budgets": decode(budgets),
         "provenance": decode(provenance),
-    }));
+    });
     let mut fixture = service.database().pool().begin().await.unwrap();
-    let inserted = sqlx::query(
-        "INSERT INTO graphql_orm_ai_skill_versions
-         (id, skill_id, version, protected_instructions, allowed_tools, data_policy,
-          activation_rule, schemas, budgets, provenance, checksum, published, author_subject, created_at)
-         SELECT ?, skill_id, ?, protected_instructions, allowed_tools, data_policy,
-                activation_rule, ?, budgets, provenance, ?, published, author_subject, created_at
-         FROM graphql_orm_ai_skill_versions WHERE id = ?",
-    )
-    .bind(legacy_id.to_string())
-    .bind(legacy_label)
-    .bind(schemas.to_string())
-    .bind(checksum)
-    .bind(template_version.id.to_string())
-    .execute(&mut *fixture)
-    .await
-    .unwrap();
-    assert_eq!(inserted.rows_affected(), 1);
+
+    // Place more than one page of versions at the same timestamp. The lowest
+    // ID is older so the assertion also distinguishes ID order from time order.
+    let mut legacy_ids = vec![legacy_id];
+    legacy_ids.extend((1..=17).rev().map(Uuid::from_u128));
+    for id in &legacy_ids {
+        let ordinal = id.as_u128();
+        let label = format!("2026.06.{ordinal}");
+        checksum_payload["version"] = json!(label);
+        let checksum = canonical_json_hash(&checksum_payload);
+        let inserted = sqlx::query(
+            "INSERT INTO graphql_orm_ai_skill_versions
+             (id, skill_id, version, protected_instructions, allowed_tools, data_policy,
+              activation_rule, schemas, budgets, provenance, checksum, published, author_subject, created_at)
+             SELECT ?, skill_id, ?, protected_instructions, allowed_tools, data_policy,
+                    activation_rule, ?, budgets, provenance, ?, published, author_subject, created_at - ?
+             FROM graphql_orm_ai_skill_versions WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .bind(label)
+        .bind(schemas.to_string())
+        .bind(checksum)
+        .bind(i64::from(ordinal == 1))
+        .bind(template_version.id.to_string())
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+        assert_eq!(inserted.rows_affected(), 1);
+    }
     let selected =
         sqlx::query("UPDATE graphql_orm_ai_skills SET current_version_id = ? WHERE id = ?")
             .bind(legacy_id.to_string())
@@ -525,20 +527,80 @@ async fn legacy_skill_schemas_resolve_and_remain_in_history_after_republication(
         .unwrap();
     assert!(!resolved[0].has_legacy_schema());
 
+    legacy_ids.sort_unstable();
+    let digest = canonical_json_hash(&schemas);
+    let expected: Vec<_> = legacy_ids
+        .into_iter()
+        .map(|id| AiLegacySkillSchema {
+            id,
+            schema_digest: digest.clone(),
+        })
+        .collect();
     assert_eq!(
         service
             .legacy_skill_schemas(&principal, skill_scope(), skill.id)
             .await
             .unwrap(),
-        [AiLegacySkillSchema {
-            id: legacy_id,
-            schema_digest: canonical_json_hash(&schemas),
-        }]
+        expected
     );
     assert!(matches!(
         service
             .legacy_skill_schemas(&principal, AiScope::new("workspace", "other"), skill.id)
             .await,
         Err(AiError::Forbidden)
+    ));
+}
+
+struct AllowSkillAction(AiSkillAction);
+
+#[async_trait]
+impl AiSkillAccessPolicy for AllowSkillAction {
+    async fn can_access_skill(
+        &self,
+        _: &AuthPrincipal,
+        _: &AiScope,
+        action: AiSkillAction,
+    ) -> bool {
+        action == self.0
+    }
+}
+
+#[tokio::test]
+async fn legacy_skill_schema_report_requires_operator_access() {
+    let administrator = service().await;
+    let principal = principal(true);
+    let skill = administrator
+        .upsert_skill(
+            &principal,
+            UpsertAiSkillInput {
+                id: None,
+                scope: scope_input(),
+                name: "Private history".to_owned(),
+                description: "Skill with operator-only history.".to_owned(),
+                expected_version: None,
+            },
+        )
+        .await
+        .unwrap();
+    let reader = service_with_access(
+        administrator.database().clone(),
+        Arc::new(AllowSkillAction(AiSkillAction::Read)),
+    );
+    assert!(matches!(
+        reader
+            .legacy_skill_schemas(&principal, skill_scope(), skill.id)
+            .await,
+        Err(AiError::Forbidden)
+    ));
+
+    let operator = service_with_access(
+        administrator.database().clone(),
+        Arc::new(AllowSkillAction(AiSkillAction::ManageSkill)),
+    );
+    assert!(matches!(
+        operator
+            .legacy_skill_schemas(&principal, AiScope::new("workspace", "other"), skill.id)
+            .await,
+        Err(AiError::NotFound)
     ));
 }

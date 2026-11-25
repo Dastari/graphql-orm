@@ -12,8 +12,8 @@ supersedes: []
 
 ## Unreleased - 0.31.0
 
-- **No action (#817).** Add a content-free provider endpoint path refusal to
-  the shared AI error contract. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
+- **No action (#817).** Add content-free endpoint validation reasons to the
+  shared AI error contract for provider profile saves and reports. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
 
 ## Unreleased - 0.30.0
 

@@ -16,11 +16,14 @@ supersedes: []
   or regex length bounds remain usable. The resolved skill and a scoped
   operator report identify them as legacy. New publications and republications
   must satisfy the bounds.
-- **No action on upgrade (#817).** Provider profile saves enforce the
-  adapter path contract and return a typed error on mismatch. An operator
-  report identifies grandfathered profiles that need correction before their
-  next save or adapter initialization.
-  [Migration](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
 
 ## Unreleased - 0.162.0
 

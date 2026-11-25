@@ -14,7 +14,8 @@ supersedes: []
 
 **No action.** The shared, non-exhaustive `AiError` adds
 `InvalidProviderEndpointPath` for adapter path validation on provider profile
-saves. Capability catalogues and their persisted identities are unaffected.
+saves. The non-exhaustive `AiProviderEndpointPathError` also includes
+`MalformedEndpoint` for reports on missing or malformed stored URLs.
 No schema or data migration is needed.
 
 ## 0.30.0 capability catalogue compilation

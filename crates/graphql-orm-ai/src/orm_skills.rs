@@ -188,22 +188,28 @@ impl OrmAiSkillCatalogService {
 
     /// Lists legacy schemas across the published history of one skill.
     ///
-    /// Requires the host's skill read authority for the exact scope. Returns
-    /// only version IDs and schema digests. Includes superseded versions and
-    /// versions of disabled skills, and never opens protected instructions.
+    /// This operator API requires [`AiSkillAction::ManageSkill`] in the exact
+    /// scope. It returns only version IDs and schema digests, including for
+    /// superseded versions and disabled skills, and never opens protected
+    /// instructions.
+    ///
+    /// The scan runs in a state-machine transaction. It holds the write lock
+    /// for the scan on SQLite and uses serializable isolation on PostgreSQL
+    /// and SQL Server.
     ///
     /// # Errors
     ///
-    /// Returns an access or not-found error when the principal cannot read
-    /// the skill in this scope. Fails closed on persistence errors, unsupported
-    /// schema envelopes, or a history exceeding the scan bounds.
+    /// Returns an access error when the principal lacks operator authority or
+    /// a not-found error when the skill is absent from the scope. Fails closed
+    /// on persistence errors, unsupported schema envelopes, or a history
+    /// exceeding the scan bounds.
     pub async fn legacy_skill_schemas(
         &self,
         principal: &AuthPrincipal,
         scope: AiScope,
         skill_id: Uuid,
     ) -> Result<Vec<AiLegacySkillSchema>, AiError> {
-        self.require_access(principal, &scope, AiSkillAction::Read)
+        self.require_access(principal, &scope, AiSkillAction::ManageSkill)
             .await?;
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -760,6 +766,7 @@ async fn scan_legacy_skill_schemas(
     let mut offset = 0;
     loop {
         let limit = LEGACY_SCHEMA_SCAN_PAGE_ROWS.min(maximum + 1 - offset);
+        // Without a custom sort, the ORM orders by the unique primary key.
         let page = tx
             .query::<AiSkillVersionRecord>()
             .filter(AiSkillVersionRecordWhereInput {
@@ -769,7 +776,6 @@ async fn scan_legacy_skill_schemas(
                 }),
                 ..Default::default()
             })
-            .default_order()
             .internal_limit(limit)
             .offset(offset)
             .fetch_sql_page_with_byte_limit(LEGACY_SCHEMA_SCAN_PAGE_BYTES)

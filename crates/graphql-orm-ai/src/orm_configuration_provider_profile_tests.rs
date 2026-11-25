@@ -965,32 +965,35 @@ async fn profile_saves_enforce_the_adapter_path_contract() {
     let database = database().await;
     let service = service(&database, profiles_only());
     let principal = principal();
-    let long_path = format!("https://provider.example/{}", "a".repeat(2_048));
+    let encoded_limit = format!("https://provider.example/{}x", "é".repeat(341));
+    let over_limit = format!("{encoded_limit}x");
 
-    for (kind, valid, invalid) in [
+    for (kind, valid, invalid, reason) in [
         (
             AiProviderKindInput::Ollama,
             "https://provider.example/",
             ORIGINAL_ENDPOINT,
+            AiProviderEndpointPathError::OriginRequired,
         ),
         (
             AiProviderKindInput::OpenAiCompatible,
             ORIGINAL_ENDPOINT,
             "https://provider.example/",
+            AiProviderEndpointPathError::ExactEndpointRequired,
         ),
         (
             AiProviderKindInput::ChatCompletions,
-            ORIGINAL_ENDPOINT,
-            long_path.as_str(),
+            encoded_limit.as_str(),
+            over_limit.as_str(),
+            AiProviderEndpointPathError::ExactEndpointRequired,
         ),
     ] {
-        assert!(
+        assert!(matches!(
             service
                 .upsert_provider_profile(&principal, input(None, None, kind, Some(invalid)))
-                .await
-                .is_err(),
-            "{kind:?} accepted an invalid path"
-        );
+                .await,
+            Err(AiError::InvalidProviderEndpointPath(error)) if error == reason
+        ));
         let profile = service
             .upsert_provider_profile(&principal, input(None, None, kind, Some(valid)))
             .await
@@ -1012,9 +1015,138 @@ async fn profile_saves_enforce_the_adapter_path_contract() {
         );
         assert_eq!(
             stored(&database, profile.id).await.base_url.as_deref(),
-            Some(valid)
+            Some(url::Url::parse(valid).unwrap().as_str())
         );
+        if kind == AiProviderKindInput::ChatCompletions {
+            assert_eq!(
+                url::Url::parse(profile.base_url.as_deref().unwrap())
+                    .unwrap()
+                    .path()
+                    .len(),
+                2_048
+            );
+            assert_eq!(url::Url::parse(invalid).unwrap().path().len(), 2_049);
+        }
     }
+}
+
+#[tokio::test]
+async fn profile_saves_validate_normalized_ipv6_endpoints() {
+    let database = database().await;
+    let service = service(&database, profiles_only());
+    let principal = principal();
+
+    for endpoint in ["http://[::1]:11434/v1/..", "http://[::1]:11434/%2e%2e"] {
+        for kind in [
+            AiProviderKindInput::OpenAiCompatible,
+            AiProviderKindInput::ChatCompletions,
+        ] {
+            assert!(matches!(
+                service
+                    .upsert_provider_profile(&principal, input(None, None, kind, Some(endpoint)))
+                    .await,
+                Err(AiError::InvalidProviderEndpointPath(
+                    AiProviderEndpointPathError::ExactEndpointRequired
+                ))
+            ));
+        }
+        let ollama = service
+            .upsert_provider_profile(
+                &principal,
+                input(None, None, AiProviderKindInput::Ollama, Some(endpoint)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ollama.base_url.as_deref(), Some("http://[::1]:11434/"));
+    }
+
+    assert!(matches!(
+        service
+            .upsert_provider_profile(
+                &principal,
+                input(
+                    None,
+                    None,
+                    AiProviderKindInput::ChatCompletions,
+                    Some("https://user:pass@[::1]/v1/chat/completions"),
+                ),
+            )
+            .await,
+        Err(AiError::InvalidInput(message)) if message == "unsafe provider endpoint"
+    ));
+}
+
+#[tokio::test]
+async fn endpoint_report_includes_malformed_stored_urls() {
+    let database = database().await;
+    let service = service(
+        &database,
+        GrantedActions::new(&[
+            AiConfigurationAction::ManageProviderProfiles,
+            AiConfigurationAction::ReadProviderProfiles,
+        ]),
+    );
+    let principal = principal();
+    let scope: AiScope = scope_input().into();
+    let mut expected = Vec::new();
+    for invalid in [None, Some("unparseable stored endpoint")] {
+        let profile = service
+            .upsert_provider_profile(
+                &principal,
+                input(
+                    None,
+                    None,
+                    AiProviderKindInput::ChatCompletions,
+                    Some(ORIGINAL_ENDPOINT),
+                ),
+            )
+            .await
+            .unwrap();
+        seed_profile_endpoint(&database, &profile, invalid).await;
+        expected.push(profile.id);
+    }
+
+    let issues = service
+        .provider_profile_endpoint_issues(&principal, scope)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for issue in issues {
+        assert_eq!(issue.reason, AiProviderEndpointPathError::MalformedEndpoint);
+        ids.push(issue.id);
+    }
+    ids.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+}
+
+async fn seed_profile_endpoint(
+    database: &Database<SqliteBackend>,
+    profile: &AiProviderProfileView,
+    endpoint: Option<&str>,
+) {
+    let id = profile.id;
+    let row_version = profile.row_version;
+    let endpoint = endpoint.map(str::to_owned);
+    let seeded = database
+        .transaction(TransactionMode::StateMachine, move |tx| {
+            Box::pin(async move {
+                tx.compare_and_swap::<AiProviderProfileRecord>(
+                    &id,
+                    row_version,
+                    AiProviderProfileRecordWhereInput::default(),
+                    UpdateAiProviderProfileRecordInput {
+                        base_url: Some(endpoint),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(OrmPublicError::from)
+            })
+        })
+        .await
+        .unwrap();
+    assert!(matches!(seeded, ConditionalUpdateOutcome::Updated(_)));
 }
 
 #[tokio::test]
@@ -1065,26 +1197,7 @@ async fn grandfathered_profile_paths_load_and_are_listed_until_corrected() {
         }
 
         // Seed a URL accepted by the old save path in the test-owned database.
-        let seeded = database
-            .transaction(TransactionMode::StateMachine, |tx| {
-                Box::pin(async move {
-                    tx.compare_and_swap::<AiProviderProfileRecord>(
-                        &profile.id,
-                        profile.row_version,
-                        AiProviderProfileRecordWhereInput::default(),
-                        UpdateAiProviderProfileRecordInput {
-                            base_url: Some(Some(invalid.to_owned())),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .map_err(OrmPublicError::from)
-                })
-            })
-            .await
-            .unwrap();
-
-        assert!(matches!(seeded, ConditionalUpdateOutcome::Updated(_)));
+        seed_profile_endpoint(&database, &profile, Some(invalid)).await;
         let loaded = service
             .provider_profiles(&principal, scope.clone())
             .await

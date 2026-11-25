@@ -28,7 +28,7 @@ impl AiRetryRefusalReason {
     }
 }
 
-/// Content-free reason a provider endpoint path was refused.
+/// Content-free reason a provider endpoint fails validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum AiProviderEndpointPathError {
@@ -38,6 +38,9 @@ pub enum AiProviderEndpointPathError {
     /// An exact-endpoint adapter requires a path other than root.
     #[error("use a provider endpoint with a non-root path of at most 2048 bytes")]
     ExactEndpointRequired,
+    /// The stored configurable endpoint is missing, unparseable, or has an unsafe URL shape.
+    #[error("stored provider endpoint is missing or malformed")]
+    MalformedEndpoint,
 }
 
 /// Stable library error.

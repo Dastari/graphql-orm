@@ -51,9 +51,11 @@ those bounds is rejected with `InvalidInput` on publication or republication.
 
 Stored versions that exceed the limits remain usable. `AiResolvedSkill::has_legacy_schema`
 identifies them at resolution time. Operators can call
-`OrmAiSkillCatalogService::legacy_skill_schemas` for each skill in an authorized
-scope to find affected versions, including superseded versions. The report
-returns only version IDs and SHA-256 digests of the stored schema envelopes.
+`OrmAiSkillCatalogService::legacy_skill_schemas` with `AiSkillAction::ManageSkill`
+in the exact scope to find affected versions, including superseded versions.
+The report scans inside a state-machine transaction, holds the write lock on
+SQLite for the scan, and returns only version IDs and SHA-256 digests of the
+stored schema envelopes.
 Operators can publish a new version after bringing both schemas within bounds.
 
 Reads return at most 100 redacted skills for one exact scope. Instruction text,

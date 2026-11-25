@@ -1,6 +1,7 @@
 //! ORM-backed GraphQL-managed AI configuration service.
 
 use crate::AiOrmBackend;
+use crate::configuration::ProviderEndpointPathContract;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_orm, map_transaction, principal_kind};
 use std::sync::Arc;
@@ -51,12 +52,12 @@ pub struct AiPendingSecretCleanupPage {
     pub next_cursor: Option<String>,
 }
 
-/// Identifies a saved profile that would fail endpoint path validation.
+/// Identifies a saved profile with an invalid configurable endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AiProviderProfileEndpointIssue {
     /// Profile ID.
     pub id: Uuid,
-    /// Adapter path requirement. Contains no configured URL or credentials.
+    /// Endpoint validation reason. Contains no configured URL or credentials.
     pub reason: AiProviderEndpointPathError,
 }
 
@@ -492,17 +493,17 @@ impl OrmAiConfigurationService {
             .map_err(|_| AiError::RecentMfaRequired)
     }
 
-    /// Lists saved profiles in one exact scope that would fail the current path contract.
+    /// Lists saved profiles with invalid configurable endpoints in one exact scope.
     ///
     /// Requires the host's provider-profile read authority. Includes disabled
-    /// profiles. The result contains only profile IDs and content-free path reasons.
+    /// profiles. The result contains only profile IDs and content-free reasons
+    /// for malformed endpoints or paths that fail the adapter's contract.
     /// It does not evaluate deployment endpoint policy or credential readiness.
     ///
     /// # Errors
     ///
     /// Returns an access, bounded-read, or persistence error if the profiles
-    /// cannot be read. A malformed stored configurable URL is a configuration
-    /// error distinct from a path mismatch.
+    /// cannot be read.
     pub async fn provider_profile_endpoint_issues(
         &self,
         principal: &AuthPrincipal,
@@ -517,18 +518,16 @@ impl OrmAiConfigurationService {
             else {
                 continue;
             };
+            let contract = profile_endpoint_path_contract(kind)?;
             let url = row
                 .base_url
                 .as_deref()
-                .and_then(|value| crate::configuration::parse_provider_endpoint(value).ok())
-                .ok_or_else(|| {
-                    AiError::InvalidConfiguration("invalid stored provider endpoint".to_owned())
-                })?;
-            if let Err(reason) = kind
-                .endpoint_path_contract()
-                .expect("configurable endpoint kind")
-                .validate(&url)
-            {
+                .and_then(|value| crate::configuration::parse_provider_endpoint(value).ok());
+            let reason = match url {
+                Some(url) => contract.validate(&url).err(),
+                None => Some(AiProviderEndpointPathError::MalformedEndpoint),
+            };
+            if let Some(reason) = reason {
                 issues.push(AiProviderProfileEndpointIssue { id: row.id, reason });
             }
         }
@@ -2320,6 +2319,16 @@ const CONFIGURABLE_PROFILE_ENDPOINT_KINDS: [AiProviderKindInput; 3] = [
     AiProviderKindInput::ChatCompletions,
 ];
 
+fn profile_endpoint_path_contract(
+    kind: AiProviderKindInput,
+) -> Result<ProviderEndpointPathContract, AiError> {
+    kind.endpoint_path_contract().ok_or_else(|| {
+        AiError::InvalidConfiguration(
+            "configurable provider endpoint has no path contract".to_owned(),
+        )
+    })
+}
+
 fn normalize_endpoint(
     kind: AiProviderKindInput,
     base_url: Option<String>,
@@ -2349,9 +2358,7 @@ fn normalize_endpoint(
             .to_owned(),
         )
     })?;
-    kind.endpoint_path_contract()
-        .expect("configurable endpoint kind")
-        .validate(&url)?;
+    profile_endpoint_path_contract(kind)?.validate(&url)?;
     if !crate::configuration::provider_endpoint_permitted(endpoint_policy, kind, &url) {
         return Err(AiError::Forbidden);
     }

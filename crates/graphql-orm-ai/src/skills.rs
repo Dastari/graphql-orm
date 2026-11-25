@@ -15,7 +15,7 @@ use crate::{AiError, AiScope, AiScopeInput};
 pub enum AiSkillAction {
     /// Read redacted skill/version metadata.
     Read,
-    /// Create or rename a logical skill.
+    /// Create or rename a logical skill, or audit its legacy schema history.
     ManageSkill,
     /// Publish an immutable protected instruction version.
     PublishVersion,
