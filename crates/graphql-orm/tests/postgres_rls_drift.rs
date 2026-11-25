@@ -998,16 +998,37 @@ async fn schema_introspection_uses_catalog_operators_under_any_search_path()
             .iter()
             .find(|candidate| candidate.table_name == "drift_tags")
             .expect("drift_tags is introspected");
-        let predicate = |index: &str| {
+        // Every filtered index keeps a predicate (#880): one the parser cannot
+        // accept is retained as opaque rather than dropped.
+        let filtered = |index: &str| {
             tags.indexes
                 .iter()
                 .find(|candidate| candidate.name == index)
                 .map(|candidate| candidate.predicate.is_some())
         };
-        // A closed-set predicate is reported only for the catalog's equality.
+        for index in [
+            "drift_tags_catalog",
+            "drift_tags_public_operator",
+            "drift_tags_public_class",
+        ] {
+            assert_eq!(filtered(index), Some(true), "{index}");
+        }
+        // Whether the predicate was accepted as a portable closed set.
+        let predicate = |index: &str| {
+            tags.indexes
+                .iter()
+                .find(|candidate| candidate.name == index)
+                .map(|candidate| {
+                    candidate
+                        .predicate
+                        .as_ref()
+                        .is_some_and(|predicate| !predicate.column.is_empty())
+                })
+        };
+        // A closed-set predicate is accepted only for the catalog's equality.
         // A session whose path puts another `=(text, text)` first sees the
-        // catalog's rendered schema-qualified, which is reported without a
-        // predicate rather than accepted.
+        // catalog's rendered schema-qualified, which is kept opaque rather
+        // than accepted.
         assert_eq!(
             predicate("drift_tags_catalog"),
             Some(std::ptr::eq(pool, &owner))

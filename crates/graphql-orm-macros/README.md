@@ -10,6 +10,14 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.225.0 aligns with the ORM's
+[partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
+
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
 Version 0.223.0 selects the ORM's seek-capable exact string filter renderer for
 declared SQL Server BIN2 Unicode key columns (#867).
 [Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)

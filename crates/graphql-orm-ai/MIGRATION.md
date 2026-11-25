@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.164.0 to 0.166.0 approved generated mutations
+## 0.166.0 to 0.167.0 approved generated mutations
 
 **No action** for hosts using `OrmAiConsequentialToolCallService`. Existing
 pending and approved-but-unconsumed approvals already store the canonical
@@ -34,6 +34,25 @@ generated capability fingerprint, the exact compiled operation contract, the
 tool call, session, scope, principal reference fingerprint, delegated actor
 and grant reference, policy version, authorization state, and preview hash.
 The principal fingerprint is SHA-256 of the serialized `PrincipalReference`.
+
+## 0.165.0 to 0.166.0
+
+**No action** for the AI schema or stored data. The legacy approval-index
+upgrade still admits the original plain index and refuses a filtered index.
+If you prepared a migration plan against an existing SQLite or PostgreSQL
+database, follow the [ORM migration guidance](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+and replan against the live database.
+
+## 0.164.0 to 0.165.0: authority-aware host field decisions
+
+**No action** unless the host `FieldPolicy` overrides
+`can_read_repository_field_with_authority` or
+`can_write_repository_field_with_authority` (new in ORM 0.224.0). Those
+overrides now also decide the host-owned fields this crate reads and writes
+through its internal handle: fields of host entities, and any field that
+declares a policy key. A policy that refuses calls without an authority there
+must admit the access this crate presents, or keep allowing those fields.
+The crate's own key-less fields are still answered by the crate.
 
 ## 0.163.0 to 0.164.0
 

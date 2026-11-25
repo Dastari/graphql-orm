@@ -10,6 +10,63 @@ supersedes: []
 
 # Migration Guide
 
+## 0.224.0 to 0.225.0: Opaque partial-index predicates
+
+**Action needed.** Review schema validation and migration plans before applying
+the upgrade to existing databases. SQLite and PostgreSQL now retain filters
+they cannot represent as portable predicates. SQL Server retains the presence
+of a filter even when its definition is unavailable. For a same-name live
+index whose filter differs from the declaration, a replacement plan contains
+a destructive `DropIndex` followed by `CreateIndex`. Confirm who owns the index
+and whether the declared index should replace it before applying the plan
+with `allow_destructive`.
+
+Re-plan against the live database after upgrading if you prepared the plan
+before the upgrade. The owned apply path checks the source hash and refuses an
+older plan when the live hash changes because introspection now retains its
+filter.
+
+`build_migration_plan` and `render_migration_step` return a refusal statement
+that fails on execution when rendering would recreate an opaque predicate the
+backend cannot reproduce. Opaque SQLite and PostgreSQL predicates are
+inspection metadata. Use explicitly reviewed DDL to recreate one.
+
+SQL Server `INCLUDE` columns are still unrepresented in the schema model.
+The follow-up on `next/breaking` will add an included-columns field and mark
+the public index structs `#[non_exhaustive]`.
+
+## 0.223.0 to 0.224.0: explicit authority for hooks and workers
+
+**No action.** Upgrade ORM and macros together. Existing policies decide
+exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
+`RowPolicy` and `FieldPolicy` have defaults that call the existing methods
+with the same arguments, and nothing is propagated unless the host opts in.
+
+To let a mutation hook's nested writes be authorized from the GraphQL request
+that caused them, set
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
+`Database::with_request_authority_propagated_to_hooks(true)`) on the handle
+the schema serves. Then:
+
+- `ScopeEntityPolicy` applies its scope requirement to the originating
+  subject for the hook's nested operations.
+- A host `EntityPolicy` or `RowPolicy` reads `PolicyAuthority::hook_request()`
+  in a `*_with_authority` method and decides. Repository field decisions do
+  not receive the request. A policy that wraps another forwards
+  the authority to the inner policy's `*_with_authority` method.
+- Under `AgqlCurrentAuthorityPolicy`, also implement
+  `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
+
+Do not call `MutationContext::__run_generated_mutation_hook` from host code.
+It is macro-internal: it attaches the caller's request authority after only
+an entity write-policy check, without the generated resolver's scope,
+assurance or target admission. Host code that dispatches hooks itself uses
+`run_mutation_hook`, which attaches none.
+[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
+admission into the runtime and seal that entry.
+
+See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
+
 ## 0.222.0 to 0.223.0: SQL Server exact string filter seeks
 
 Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL

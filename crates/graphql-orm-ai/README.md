@@ -10,8 +10,15 @@ supersedes: []
 
 # graphql-orm-ai
 
-AI 0.166.0 verifies the stored provider plan hash when executing an approved
-generated mutation. See the [migration guide](MIGRATION.md#01640-to-01660-approved-generated-mutations).
+AI 0.167.0 verifies the stored provider plan hash when executing an approved
+generated mutation. See the [migration guide](MIGRATION.md#01660-to-01670-approved-generated-mutations).
+
+AI 0.166.0 tests legacy approval-index upgrades with ORM 0.225.0's partial-index
+introspection. See the [migration guide](MIGRATION.md#01650-to-01660).
+
+AI 0.165.0 forwards host-owned repository field decisions to the host
+policy's authority-aware methods (ORM 0.224.0). See the
+[migration guide](MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
 
 AI 0.164.0 uses the ORM's exact string filters to seek on SQL Server run-state
 indexes (#867). See the [migration guide](MIGRATION.md#01630-to-01640).

@@ -83,10 +83,11 @@ plan drop/recreate work.
 
 Canonicalization recognizes only the complete generated closed-set grammar. Identifier quoting,
 whitespace, redundant balanced outer parentheses, value ordering/deduplication, and PostgreSQL's
-catalog-generated `= ANY (ARRAY[...])` text-literal form are harmless. Leading or trailing boolean
-expressions, functions, comments retained by SQLite, additional predicates, and unsupported casts
-are not interpreted as equivalent. PostgreSQL removes comments from stored index expressions, so a
-comment-only source spelling cannot be observed during live introspection there.
+catalog-generated `= ANY (ARRAY[...])` and single-value `= 'value'::text` forms are harmless.
+Leading or trailing boolean expressions, functions, comments retained by SQLite, additional
+predicates, and unsupported casts are not interpreted as equivalent. PostgreSQL removes comments
+from stored index expressions, so a comment-only source spelling cannot be observed during live
+introspection there.
 
 Adding a unique conditional index can fail when existing rows inside the selected set have duplicate
 keys. Validate and repair data before applying the migration. SQLite and PostgreSQL support this

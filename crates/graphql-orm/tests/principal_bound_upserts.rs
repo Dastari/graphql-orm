@@ -294,6 +294,7 @@ struct Probe {
     transforms: Arc<AtomicUsize>,
     before_hooks: Arc<AtomicUsize>,
     after_hooks: Arc<AtomicUsize>,
+    hook_subjects: Arc<Mutex<Vec<String>>>,
     /// Everything an `After` hook could publish, rendered as text.
     published: Arc<Mutex<Vec<String>>>,
     /// The proof nonce each hook phase read.
@@ -336,6 +337,31 @@ impl EntityPolicy<Backend> for Entities {
         }
         let allowed = !(kind == EntityAccessKind::Write && subject(ctx) == "no-entity");
         Box::pin(async move { Ok(allowed) })
+    }
+
+    fn can_access_entity_with_authority<'a>(
+        &'a self,
+        authority: PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a Database<Backend>,
+        entity: &'static str,
+        key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        if let Some(subject) = authority
+            .hook_request()
+            .and_then(|request| request.subject())
+        {
+            assert!(ctx.is_none());
+            assert_eq!(surface, EntityAccessSurface::Repository);
+            self.0
+                .hook_subjects
+                .lock()
+                .unwrap()
+                .push(subject.id.clone());
+        }
+        self.can_access_entity(ctx, db, entity, key, kind, surface)
     }
 }
 
@@ -508,6 +534,18 @@ impl MutationHook<Backend> for ProofHook {
         Box::pin(async move {
             if ctx.is_none() {
                 return Ok(());
+            }
+            if hook_ctx.database().propagates_request_authority_to_hooks() {
+                hook_ctx
+                    .__policy()
+                    .ensure_entity_access(
+                        None,
+                        event.entity_name,
+                        event.metadata.write_policy,
+                        EntityAccessKind::Write,
+                        EntityAccessSurface::Repository,
+                    )
+                    .await?;
             }
             if event.entity_name == "MachineNote" {
                 // No acknowledgement is armed for this entity.
@@ -772,6 +810,7 @@ async fn one_current_row_per_principal(
 ) -> TestResult {
     let probe = Probe::default();
     let db = configured(base, mode, &probe);
+    let db = db.with_request_authority_propagated_to_hooks(true);
     let label = format!("{mode:?}");
     let alpha = format!("alpha-{label}");
     let beta = format!("beta-{label}");
@@ -782,6 +821,10 @@ async fn one_current_row_per_principal(
     // First snapshot: the insert branch, keyed by the caller.
     let created = upsert(&db, &probe, &alpha, "first", 1, "d1").await?;
     assert_eq!(created["success"], json!(true), "{label}");
+    assert_eq!(
+        *probe.hook_subjects.lock().unwrap(),
+        [alpha.clone(), alpha.clone()]
+    );
     assert_eq!(created["action"], json!("CREATED"), "{label}");
     assert_eq!(created[f("statusSnapshot")][f("sequence")], json!(1));
     let id = created[f("statusSnapshot")][f("id")].clone();
@@ -829,7 +872,12 @@ async fn one_current_row_per_principal(
 
     // An idempotent retry is acknowledged: success, no action, the existing
     // row, no After hook and no Changed event.
+    probe.hook_subjects.lock().unwrap().clear();
     let retried = upsert(&db, &probe, &alpha, "second", 2, "d2").await?;
+    assert_eq!(
+        probe.hook_subjects.lock().unwrap().as_slice(),
+        std::slice::from_ref(&alpha)
+    );
     assert_eq!(retried["success"], json!(true), "{label}");
     assert_eq!(retried["action"], Value::Null, "{label}");
     assert_eq!(retried[f("statusSnapshot")][f("id")], id, "{label}");

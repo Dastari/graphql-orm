@@ -156,7 +156,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                hook_ctx.run_mutation_hook(
+                hook_ctx.__run_generated_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -186,7 +186,7 @@ pub(in crate::operations) fn create(input: CreateInput<'_>) -> (TokenStream, Tok
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                 );
 
-                hook_ctx.run_mutation_hook(
+                hook_ctx.__run_generated_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::After,
