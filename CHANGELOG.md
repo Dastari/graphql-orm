@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.224.0 and AI 0.164.0
+## Unreleased - ORM/macros 0.224.0 and AI 0.165.0
 
 - **Added (#291).** A mutation hook's nested writes can be authorized from
   the request that caused them. With
@@ -50,9 +50,21 @@ for historical context.
 - **Fixed (#291), AI 0.164.0.** The AI crate's internal handle forwards
   host-owned repository field decisions to the host policy's
   `*_with_authority` methods; see the
-  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01630-to-01640-authority-aware-host-field-decisions).
+  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
   **No action.** See the
-  [migration guide](MIGRATION.md#02220-to-02240-explicit-authority-for-hooks-and-workers).
+  [migration guide](MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+## Unreleased - ORM/macros 0.223.0
+
+- **Fixed (#867).** Generated exact SQL Server equality and membership filters
+  include a seek predicate for Unicode key columns declared with BIN2 collation.
+  SQL text changes for all opted-in exact comparisons, including non-BIN2
+  columns, `ne` and `not_in`, and the AI crate's opted-in entities. Review
+  SQL Server plan guides and Query Store forced plans that match by statement
+  text. The exactness check always uses Unicode. On a live `VARCHAR` column
+  declared as Unicode, exact filters and read policies now accept true matches
+  that the old byte-length check rejected and reject padded false matches.
+  [Migration](MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
 
 ## Unreleased - ORM/macros 0.222.0
 

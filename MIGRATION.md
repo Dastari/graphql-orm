@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.222.0 to 0.224.0: explicit authority for hooks and workers
+## 0.223.0 to 0.224.0: explicit authority for hooks and workers
 
 **No action.** Upgrade ORM and macros together. Existing policies decide
 exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
@@ -41,6 +41,28 @@ assurance or target admission. Host code that dispatches hooks itself uses
 admission into the runtime and seal that entry.
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
+
+## 0.222.0 to 0.223.0: SQL Server exact string filter seeks
+
+Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL
+Server can seek on declared BIN2 Unicode key columns for `eq` and nonempty
+`in_list` filters (#867). The SQL text changes for every opted-in exact
+comparison, including on non-BIN2 columns and for `ne` and `not_in`. This
+also applies to the AI crate's opted-in entities. Review SQL Server plan
+guides and Query Store forced plans for these queries because they match on
+statement text. The generated SQL always converts the column to Unicode
+for the exactness check, including the byte-length check on non-seek paths.
+
+**Action needed** if a live column has drifted. Compare the live column
+types with the ORM declarations for opted-in entities and review affected
+read policies. On a live `VARCHAR` column declared as `NVARCHAR`, the old
+length check compared bytes across encodings. It rejected true matches when
+the byte counts differed, including every nonempty single-byte exact match.
+It could also admit a space-padded value whose byte count happened to
+match, such as stored `'bob   '` for operand `'bob'`. Exact comparisons now
+accept the true match and reject the padded value. A read policy that
+matches an owner exactly can now return rows to the true owner that it
+previously denied. The upgrade itself requires no schema or data migration.
 
 ## 0.221.0 to 0.222.0: principal-bound upserts
 

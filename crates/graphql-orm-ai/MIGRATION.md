@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.163.0 to 0.164.0: authority-aware host field decisions
+## 0.164.0 to 0.165.0: authority-aware host field decisions
 
 **No action** unless the host `FieldPolicy` overrides
 `can_read_repository_field_with_authority` or
@@ -20,6 +20,18 @@ through its internal handle: fields of host entities, and any field that
 declares a policy key. A policy that refuses calls without an authority there
 must admit the access this crate presents, or keep allowing those fields.
 The crate's own key-less fields are still answered by the crate.
+
+## 0.163.0 to 0.164.0
+
+The ORM now supplies the seek predicate for SQL Server run-state filters
+(#867). The SQL text changes for all opted-in exact comparisons. Review plan
+guides and Query Store forced plans for those queries. **Action needed** if a
+live column has drifted. Check the live column types, especially for
+`VARCHAR` columns declared as `NVARCHAR`, and review the affected read
+policies. See the [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks).
+This update requires no additional schema or data migration. Hosts still
+running a pre-0.158.0 schema should follow the upgrade below to install the
+run candidate indexes.
 
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 
