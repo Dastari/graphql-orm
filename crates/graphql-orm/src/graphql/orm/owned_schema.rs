@@ -6,16 +6,26 @@ use super::core::*;
 use super::dialect::DatabaseBackend;
 use std::fmt;
 
-/// Owned closed-set partial-index predicate.
+/// Owned partial-index predicate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexPredicateModel {
-    /// Physical column. SQL Server introspection uses an empty column to mark
-    /// an opaque catalog filter that cannot be expressed as a closed set.
+    /// Physical column. Introspection uses an empty column for an opaque
+    /// catalog filter that cannot be expressed as a closed set.
     pub column: String,
     /// Literal values, quoted by the database dialect. An empty list represents
-    /// `IS NOT NULL`. For an opaque SQL Server
-    /// filter this contains one entry, the verbatim catalog predicate.
+    /// `IS NOT NULL` when a column is present. For an opaque filter this
+    /// holds the catalog expression or definition, if available.
     pub values: Vec<String>,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl IndexPredicateModel {
+    pub(super) fn opaque(expression: Option<String>) -> Self {
+        Self {
+            column: String::new(),
+            values: expression.into_iter().collect(),
+        }
+    }
 }
 
 /// Owned storage form of [`IndexDef`]; it is the same physical contract.
@@ -33,7 +43,7 @@ pub struct IndexModel {
     pub method: IndexMethod,
     /// Whether this is a spatial index.
     pub is_spatial: bool,
-    /// Optional closed-set predicate.
+    /// Optional closed-set predicate or opaque catalog filter.
     pub predicate: Option<IndexPredicateModel>,
 }
 impl IndexModel {

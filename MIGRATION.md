@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.224.0 to 0.225.0: Opaque partial-index predicates
+
+**Action needed.** Review schema validation and migration plans before applying
+the upgrade to existing databases. SQLite and PostgreSQL now retain filters
+they cannot represent as portable predicates. SQL Server retains the presence
+of a filter even when its definition is unavailable. For a same-name live
+index whose filter differs from the declaration, a replacement plan contains
+a destructive `DropIndex` followed by `CreateIndex`. Confirm who owns the index
+and whether the declared index should replace it before applying the plan
+with `allow_destructive`.
+
+Re-plan against the live database after upgrading if you prepared the plan
+before the upgrade. The owned apply path checks the source hash and refuses an
+older plan when the live hash changes because introspection now retains its
+filter.
+
+`build_migration_plan` and `render_migration_step` return a refusal statement
+that fails on execution when rendering would recreate an opaque predicate the
+backend cannot reproduce. Opaque SQLite and PostgreSQL predicates are
+inspection metadata. Use explicitly reviewed DDL to recreate one.
+
+SQL Server `INCLUDE` columns are still unrepresented in the schema model.
+The follow-up on `next/breaking` will add an included-columns field and mark
+the public index structs `#[non_exhaustive]`.
+
 ## 0.223.0 to 0.224.0: explicit authority for hooks and workers
 
 **No action.** Upgrade ORM and macros together. Existing policies decide

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.166.0
+
+- Updated the legacy approval-index upgrade tests for ORM 0.225.0. On SQLite
+  and PostgreSQL, a filter on that index changes the source schema hash and
+  prevents automatic admission of the replacement. [Migration](MIGRATION.md#01650-to-01660)
+
 ## Unreleased - 0.165.0
 
 Requires ORM 0.224.0. No public API, GraphQL SDL, persistent schema, broker

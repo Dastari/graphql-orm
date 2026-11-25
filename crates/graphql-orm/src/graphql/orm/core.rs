@@ -5504,7 +5504,8 @@ pub struct IndexDef {
     pub is_unique: bool,
     pub method: IndexMethod,
     pub is_spatial: bool,
-    /// Optional portable closed-set predicate for a partial index.
+    /// Optional partial-index predicate. Declarations use the portable
+    /// closed-set form.
     pub predicate: Option<IndexPredicateDef>,
 }
 
@@ -5516,8 +5517,11 @@ impl PartialEq for IndexDef {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexPredicateDef {
+    /// Physical column, or empty for an opaque catalog filter.
     pub column: &'static str,
-    /// Closed-set literals. An empty list represents `IS NOT NULL`.
+    /// Closed-set literals. An empty list represents `IS NOT NULL` when a
+    /// column is present. For an opaque filter this holds the catalog
+    /// expression or definition, if available.
     pub values: &'static [&'static str],
 }
 

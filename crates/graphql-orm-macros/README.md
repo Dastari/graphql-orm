@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.225.0 aligns with the ORM's
+[partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
+
 Version 0.224.0 lets a mutation hook's nested writes be authorized from the
 originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
 entity, row and repository field policies. See the

@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.165.0 to 0.166.0
+
+**No action** for the AI schema or stored data. The legacy approval-index
+upgrade still admits the original plain index and refuses a filtered index.
+If you prepared a migration plan against an existing SQLite or PostgreSQL
+database, follow the [ORM migration guidance](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+and replan against the live database.
+
 ## 0.164.0 to 0.165.0: authority-aware host field decisions
 
 **No action** unless the host `FieldPolicy` overrides

@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.225.0
+
+- **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters
+  during introspection. SQL Server distinguishes a filtered index when the
+  catalog indicates a filter and the definition is unavailable. SQLite and
+  PostgreSQL emit a failing statement if asked to render an opaque predicate.
+  PostgreSQL preserves declared single-value filters through introspection.
+  [Migration](MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+
 ## Unreleased - ORM/macros 0.224.0 and AI 0.165.0
 
 - **Added (#291).** A mutation hook's nested writes can be authorized from
