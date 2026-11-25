@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.222.0 lets a generated upsert bind a private conflict key from the
+verified request, carry a typed transient input for its transform and hooks,
+and acknowledge a retry without writing.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
 Version 0.221.0 adds `changed_replay = true` for generated Changed streams
 with `changed_started = true`. Clients can resume from an opaque cursor
 within the process-local retention window.

@@ -14,6 +14,45 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.222.0
+
+- **Added (#908).** A generated GraphQL upsert can take a private conflict key
+  from the verified request, carry a typed transient input, and let its hook
+  acknowledge a retry without writing. All three are opt-in entity options.
+  - `upsert_bound_key(field = "...", binding = "path::Type")`: the resolver
+    fills that conflict-key member from `PrincipalKeyBinding::bind` before the
+    conflict lookup, and again after the input transform. The column must be
+    `#[graphql_orm(private)]` with no other GraphQL surface, so no client input
+    can set or replace it. A failed binding refuses the mutation before any
+    policy, read or write, with a fixed `FORBIDDEN` that carries nothing from
+    the binding's own error. A row the database matched but whose stored key
+    is not exactly the bound value is refused with `FORBIDDEN`, so a
+    case-insensitive collation cannot merge two principals. Every ownership
+    refusal is one identical response. Generated updates
+    never assign the column, whatever their input transform does. Every
+    existing write authorization still applies. Unsafe declarations are
+    compile errors, including an entity that also generates `create` or takes
+    part in a nested create, and a key column shared with another field or an
+    implicit timestamp or version writer.
+  - `transient_input(type = "...", on = "upsert")`: a typed argument that
+    `WriteInputContext::transient_input` and `MutationContext::transient_input`
+    expose to the input transform and both hook phases, inside the write
+    transaction. It is never stored or published in `Changed` events or the
+    change journal. The argument is marked `secret`, so async-graphql's
+    rendered execution document redacts it, and `@transientInput`, so AI tool
+    profiles and typed AI capabilities cannot carry it. A request value over
+    `max_bytes` (default 64 KiB) or `max_nodes` (default 1024) is refused
+    before coercion, a value that does not coerce is refused without being
+    quoted, and a defaulted variable in the argument is refused. Transaction
+    code can set one with `MutationContext::set_transient_input`.
+  - `upsert_acknowledge = true`: the `Before` hook may call
+    `MutationContext::acknowledge_without_write` on the update branch. The
+    upsert then writes nothing, publishes nothing and returns the existing row
+    with `action: null`. A call made where it is not allowed also blocks the
+    commit, so a hook that ignores the refusal cannot let the write through.
+
+  [Migration](MIGRATION.md#02210-to-02220-principal-bound-upserts)
+
 ## Unreleased - ORM/macros 0.221.0 and operation catalogue 0.16.0
 
 - **Added (#668).** Generated Changed subscriptions can opt in to an opaque

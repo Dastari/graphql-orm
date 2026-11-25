@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.222.0 adds the `upsert_bound_key`, `transient_input` and
+`upsert_acknowledge` entity options.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
 Version 0.221.0 adds `changed_replay = true` for generated Changed streams
 with `changed_started = true`. Clients can resume from an opaque cursor
 within the process-local retention window.
