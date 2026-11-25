@@ -1764,21 +1764,21 @@ where
         };
         let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
 
-        let mut totals = vec![0i64; group.len()];
-        if selection.count {
+        // Both statements are rendered first: when a page needs its count
+        // and its rows, they run together in one transaction with the
+        // database auth context applied once, as on the ordinary loader.
+        let count = selection.count.then(|| {
             let mut values = Vec::new();
             let from = from_and_where(&mut values);
-            let sql = format!(
-                "SELECT {ordinal} AS {RELATION_ORDINAL}, COUNT(*) AS __gom_relation_total_count \
-                 FROM {from} GROUP BY {ordinal}"
-            );
-            for row in fetch(sql, values).await? {
-                let index = relation_ordinal_of::<B>(&row, group.len())?;
-                totals[index] = B::try_get_i64(&row, "__gom_relation_total_count")
-                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
-            }
-        }
-        if needs_rows {
+            (
+                format!(
+                    "SELECT {ordinal} AS {RELATION_ORDINAL}, COUNT(*) AS __gom_relation_total_count \
+                     FROM {from} GROUP BY {ordinal}"
+                ),
+                values,
+            )
+        });
+        let page = needs_rows.then(|| {
             // Rank only the complete primary key per ordinal, then join the
             // bounded keys back to the entity table for full rows.
             let mut values = Vec::new();
@@ -1818,22 +1818,49 @@ where
                 })
                 .collect::<Vec<_>>()
                 .join(" AND ");
-            let sql = format!(
-                "SELECT * FROM (SELECT {entity_columns}, __gom_relation_page.{RELATION_ORDINAL}, \
-                 __gom_relation_page.__gom_relation_row_number FROM (SELECT * FROM (SELECT \
-                 {ranked_keys}, {ordinal} AS {RELATION_ORDINAL}, ROW_NUMBER() OVER (PARTITION BY \
-                 {ordinal} ORDER BY {sort_sql}) AS __gom_relation_row_number FROM {from}) \
-                 __gom_relation_ranked WHERE {bounds}) __gom_relation_page INNER JOIN {} \
-                 __gom_relation_entity ON {join}) __gom_relation_rows ORDER BY {RELATION_ORDINAL} \
-                 ASC, __gom_relation_row_number ASC",
-                dialect.render_identifier_path(T::TABLE_NAME),
-            );
-            for row in fetch(sql, values).await? {
-                let index = relation_ordinal_of::<B>(&row, group.len())?;
-                grouped[index].push(
-                    T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?,
-                );
+            (
+                format!(
+                    "SELECT * FROM (SELECT {entity_columns}, __gom_relation_page.{RELATION_ORDINAL}, \
+                     __gom_relation_page.__gom_relation_row_number FROM (SELECT * FROM (SELECT \
+                     {ranked_keys}, {ordinal} AS {RELATION_ORDINAL}, ROW_NUMBER() OVER (PARTITION BY \
+                     {ordinal} ORDER BY {sort_sql}) AS __gom_relation_row_number FROM {from}) \
+                     __gom_relation_ranked WHERE {bounds}) __gom_relation_page INNER JOIN {} \
+                     __gom_relation_entity ON {join}) __gom_relation_rows ORDER BY {RELATION_ORDINAL} \
+                     ASC, __gom_relation_row_number ASC",
+                    dialect.render_identifier_path(T::TABLE_NAME),
+                ),
+                values,
+            )
+        });
+        let (count_rows, page_rows) = match (count, page) {
+            (Some((count_sql, count_values)), Some((page_sql, page_values))) => {
+                ensure_within_bind_limit(dialect, count_values.len())?;
+                ensure_within_bind_limit(dialect, page_values.len())?;
+                crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
+                    db.pool(),
+                    &count_sql,
+                    &count_values,
+                    &page_sql,
+                    &page_values,
+                    sample.auth_context.as_ref(),
+                )
+                .await
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?
             }
+            (Some((sql, values)), None) => (fetch(sql, values).await?, Vec::new()),
+            (None, Some((sql, values))) => (Vec::new(), fetch(sql, values).await?),
+            (None, None) => (Vec::new(), Vec::new()),
+        };
+        let mut totals = vec![0i64; group.len()];
+        for row in count_rows {
+            let index = relation_ordinal_of::<B>(&row, group.len())?;
+            totals[index] = B::try_get_i64(&row, "__gom_relation_total_count")
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+        }
+        for row in page_rows {
+            let index = relation_ordinal_of::<B>(&row, group.len())?;
+            grouped[index]
+                .push(T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?);
         }
         return Ok(grouped
             .into_iter()

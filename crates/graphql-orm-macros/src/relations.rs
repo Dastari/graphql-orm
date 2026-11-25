@@ -345,7 +345,12 @@ pub(crate) fn generate_graphql_relations(
             &to_cols,
             &server_only_keys,
             // A relation object is always a SimpleObject the host derives.
-            &relation_server_only_columns(backend, &parsed_fields, true),
+            &relation_server_only_columns(
+                backend,
+                entity_meta.table_name.as_deref().unwrap_or("unknown"),
+                &parsed_fields,
+                true,
+            ),
         )?;
         relation_target_checks.push(graphql_relation_target_checks(
             backend,

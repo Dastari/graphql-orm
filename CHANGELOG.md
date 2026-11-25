@@ -23,7 +23,8 @@ for historical context.
   in another partition resolves to `null` or an empty list. The column stays
   out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
   with `filter`, `order_aggregate`, `search_relation` or upward propagation is
-  refused at compile time. So are floating-point key members, and a source
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
   member that is skipped, read-transformed or decoded (JSON, date, boolean
   field, decimal, spatial). A target column is refused when any field mapping
   exposes it, however its name is spelled, or when it belongs to the primary

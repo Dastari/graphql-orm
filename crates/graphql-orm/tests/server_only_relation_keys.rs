@@ -829,7 +829,8 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
          ('t-lower', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')",
         "INSERT INTO uuid_keyed_sources (id, target_id, part) VALUES \
          ('s-upper', 't-upper', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'), \
-         ('s-lower', 't-lower', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')",
+         ('s-lower', 't-lower', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'), \
+         ('s-upper-source', 't-lower', 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE')",
     ] {
         sqlx::query(statement).execute(db.pool()).await?;
     }
@@ -1380,11 +1381,16 @@ async fn loader_agrees_with_database_equality(base: &Database<Backend>) -> TestR
             pairs(&[("s-exact", Some("t")), ("s-rounded", None)]),
             "direct={direct}"
         );
-        // A non-canonically stored UUID partition matches nothing: the
-        // source's UUID is bound in canonical form.
+        // UUID members compare by decoded value: a non-canonically stored
+        // source is bound in canonical form and matches its target by value,
+        // while a non-canonically stored target matches nothing.
         assert_eq!(
             related_targets(&api(direct), "uuidSources").await?,
-            pairs(&[("s-lower", Some("t-lower")), ("s-upper", None)]),
+            pairs(&[
+                ("s-lower", Some("t-lower")),
+                ("s-upper", None),
+                ("s-upper-source", Some("t-lower")),
+            ]),
             "direct={direct}"
         );
     }

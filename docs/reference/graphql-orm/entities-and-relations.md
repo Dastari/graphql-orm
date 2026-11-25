@@ -760,24 +760,33 @@ Each `server_only_key` names one `from`/`to` pair of the relation, in the same
 position. Every other pair keeps the ordinary readability checks, and at least
 one pair must stay public. The macro also requires:
 
-- **An exact key.** Every member of such a relation is an integer, string,
-  UUID or boolean; floating-point members are refused. Equality is the
+- **An exact key.** Every member of such a relation is an integer, string or
+  UUID. Floating-point and boolean members are refused. Equality is the
   database's own comparison of the complete tuple. SQLite applies column
-  affinity, and SQL Server's default collation ignores case and trailing
-  spaces, so `Tenant`, `TENANT` and `Tenant  ` are one partition there. Use
-  identifiers that compare exactly, or a binary collation, where that matters.
+  affinity. SQL Server's default collation ignores case, so `Tenant` and
+  `TENANT` are one partition there; a binary collation distinguishes case.
+  SQL Server's `=` ignores trailing spaces under every collation, binary ones
+  included, so `Tenant` and `Tenant  ` are always one partition. Use partition
+  values that differ by more than case or trailing spaces where that matters.
 - **The stored source value.** The pair's source member is exempt from the
   readability rule. It must be a persisted scalar field read as stored, with
   no `skip_db`, `#[transform(read = ...)]`, `json`, `date_field`,
   `boolean_field`, decimal or spatial mapping, so the join binds the value the
-  row stores. Members are bound in their canonical form. A UUID is bound as
-  lower-case hyphenated text on SQLite, and a boolean as `1` or `0`. A key
-  stored in any other spelling matches no row, so its relation is `null`,
-  never another row. Store server-only key members in canonical form.
+  row stores. Members are compared by their decoded value and bound in
+  canonical form: on SQLite a UUID is bound as lower-case hyphenated text.
+  A source UUID stored in another spelling therefore still matches its target
+  by value. A target UUID stored in another spelling matches no source, so the
+  relation is `null`, never another row. Store server-only key members in
+  canonical form on both sides.
 - **A server-only target column.** Eligibility belongs to the physical column,
   not to one Rust field. Names resolve as the generated SQL resolves them:
   own-table qualifiers are dropped, quoting is honoured, and bare PostgreSQL
-  names are case-folded. Every field that maps the column, including a
+  names are case-folded; SQL Server and SQLite names compare without ASCII
+  case. A target certifies no column at all when its table name or any of
+  its column names is non-ASCII, longer than 63 bytes (PostgreSQL truncates
+  longer identifiers) or starts with the reserved `__gom_` prefix, because
+  those names cannot be told apart reliably or could meet the loader's own
+  aliases. Every field that maps the column, including a
   `db_column` alias spelled any of those ways, must be declared
   `#[graphql_orm(private)]` and must not be reopened for reads, filters,
   ordering, subscriptions or inputs. The column

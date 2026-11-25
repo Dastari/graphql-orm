@@ -1,4 +1,4 @@
-error: server_only_key relations require exactly comparable key members; `score` is floating-point, use an integer, string, UUID or boolean key
+error: server_only_key relations require exactly comparable key members; `score` is floating-point, use an integer, string or UUID key
   --> tests/ui/server_only_keys/float_key.rs:29:9
    |
 29 |         server_only_key(from = "partition", to = "partition"),
