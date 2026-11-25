@@ -17,6 +17,10 @@ with a freshness bound. Review process retention before enabling it.
 [Entity reference delivery](docs/entity-references.md#adapters-for-a-local-process) ·
 [Codex host migration](MIGRATION.md#breaking-release-unreleased)
 
+SQL Server hosts with a customized covering legacy approval index must review
+its replacement before applying the upgrade.
+[Approval index migration](MIGRATION.md#sql-server-covering-approval-lookup-index)
+
 AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
 provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.
 Editing a reported profile requires correcting its URL. See the

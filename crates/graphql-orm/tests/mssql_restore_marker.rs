@@ -903,3 +903,133 @@ async fn unique_index_preflight_obeys_restore_gate() -> Result<(), Box<dyn std::
     server.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "starts a test-owned SQL Server 2022 container"]
+async fn include_index_differs_from_plain_index() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{
+        IndexDef, IndexDirection, IndexModel, IntrospectionBackend, MigrationRisk, MigrationStep,
+        SchemaDiagnosticKind,
+    };
+
+    const MANAGED: &str = "dbo.GraphqlOrmRestoredRecords";
+    const UNMANAGED: &str = "dbo.HostRecords";
+    const INDEX: &str = "idx_restored_value";
+
+    let mut server = OwnedSqlServer::start().await?;
+    let connection = &server.connection_string;
+    execute_batch(
+        connection,
+        "CREATE TABLE dbo.GraphqlOrmRestoredRecords (
+             id NVARCHAR(32) PRIMARY KEY, value BIGINT NOT NULL,
+             payload BIGINT NOT NULL, [extra.data] BIGINT NOT NULL
+         );
+         CREATE INDEX idx_restored_value ON dbo.GraphqlOrmRestoredRecords (value DESC)
+             INCLUDE ([extra.data], payload);
+         CREATE TABLE dbo.HostRecords (id INT PRIMARY KEY, value BIGINT NOT NULL, payload BIGINT NOT NULL);
+         CREATE INDEX idx_restored_value ON dbo.HostRecords (value) INCLUDE (payload);",
+    )
+    .await?;
+    let db = writable(connection).await?;
+    let declared_tables = [MANAGED, UNMANAGED];
+    let inspect = || MssqlBackend::introspect_schema_including(db.pool(), &declared_tables);
+    let current = inspect().await?;
+    let mut plain = current.clone();
+    plain.tables.retain(|table| table.table_name == MANAGED);
+    plain.tables[0].indexes =
+        vec![IndexDef::new(INDEX, &["value"]).with_directions(&[IndexDirection::Desc])];
+
+    let covering = &current
+        .tables
+        .iter()
+        .find(|table| table.table_name == MANAGED)
+        .unwrap()
+        .indexes[0];
+    assert_eq!(covering.columns, ["value"]);
+    assert_eq!(covering.column_directions, [IndexDirection::Desc]);
+    assert_eq!(covering.included_columns, ["[extra.data]", "payload"]);
+    assert_ne!(covering, &plain.tables[0].indexes[0]);
+    assert_ne!(
+        IndexModel::from(covering),
+        IndexModel::from(&plain.tables[0].indexes[0])
+    );
+
+    let mut covering_target = plain.clone();
+    covering_target.tables[0].indexes[0] = IndexDef::new(INDEX, &["value"])
+        .with_directions(&[IndexDirection::Desc])
+        .with_included_columns(&["[extra.data]", "payload"]);
+    assert_ne!(plain.stable_hash(), covering_target.stable_hash());
+    let schema = db.schema();
+    assert!(
+        schema
+            .validate(&current, &plain)?
+            .diagnostics
+            .iter()
+            .any(|d| { d.kind == SchemaDiagnosticKind::IndexMismatch })
+    );
+    assert!(
+        schema
+            .plan_migration("covered", "keep covering index", &current, &covering_target)?
+            .steps
+            .is_empty()
+    );
+
+    let plan = schema.plan_migration("plain", "replace covering index", &current, &plain)?;
+    let [drop, create] = plan.steps.as_slice() else {
+        panic!(
+            "expected exactly the managed index replacement: {:#?}",
+            plan.steps
+        );
+    };
+    assert!(
+        matches!(&drop.step, MigrationStep::DropIndex { table_name, index_name }
+        if table_name == MANAGED && index_name == INDEX)
+    );
+    assert_eq!(drop.risk, MigrationRisk::Destructive);
+    assert!(
+        matches!(&create.step, MigrationStep::CreateIndex { index, .. }
+        if index.included_columns.is_empty())
+    );
+
+    // SQL Server migration DDL is applied by the host.
+    for statement in &plan.statements {
+        execute_batch(connection, statement).await?;
+    }
+    let applied = inspect().await?;
+    assert!(
+        schema
+            .plan_migration("plain-again", "check plain index", &applied, &plain)?
+            .steps
+            .is_empty()
+    );
+
+    let recreate = schema.plan_migration(
+        "covering",
+        "create covering index",
+        &applied,
+        &covering_target,
+    )?;
+    for statement in &recreate.statements {
+        execute_batch(connection, statement).await?;
+    }
+    let reapplied = inspect().await?;
+    assert!(
+        schema
+            .plan_migration(
+                "covering-again",
+                "check covering index",
+                &reapplied,
+                &covering_target
+            )?
+            .steps
+            .is_empty()
+    );
+    let unmanaged = reapplied
+        .tables
+        .iter()
+        .find(|table| table.table_name == UNMANAGED)
+        .unwrap();
+    assert_eq!(unmanaged.indexes[0].included_columns, ["payload"]);
+    server.cleanup()?;
+    Ok(())
+}

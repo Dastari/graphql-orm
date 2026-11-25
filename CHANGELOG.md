@@ -16,6 +16,13 @@ for historical context.
 
 ## Unreleased - next breaking ORM/macros release
 
+- **Breaking (#905):** Generated relation search documents reject statically
+  unreadable target fields unless the target field opts in with
+  `#[graphql_orm(allow_search_document)]`.
+- **Breaking (#880):** SQL Server index introspection retains `INCLUDE`
+  columns for drift checks and migration plans. `IndexDef` and `IndexModel`
+  are non-exhaustive and expose the included columns separately.
+
 - **Breaking (#833):** `TransactionMode` is non-exhaustive. Its new
   `ReadSnapshot` variant runs the same policy-aware, read-only transaction
   as the dedicated snapshot methods. The general callback supports generated
@@ -31,6 +38,13 @@ for historical context.
   with a literal dot must be explicitly delimited as a single identifier.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
+## Unreleased - ORM/macros 0.220.0
+
+- PostgreSQL hosts can opt into canonical change-journal keys (#592). The
+  recorder and full snapshot use the same encoding for single-column keys.
+  The cutover retires legacy cursors and requires a new full backup.
+  [Migration](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys)
 
 ## Unreleased - ORM/macros 0.219.0
 

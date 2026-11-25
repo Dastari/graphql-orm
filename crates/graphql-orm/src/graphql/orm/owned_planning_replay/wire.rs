@@ -630,6 +630,8 @@ pub(super) struct Index {
     name: String,
     columns: Vec<String>,
     column_directions: Vec<DirectionWire>,
+    #[serde(default)]
+    included_columns: Vec<String>,
     is_unique: bool,
     method: MethodWire,
     is_spatial: bool,
@@ -643,6 +645,7 @@ impl Decode for Index {
             name: self.name.finish(),
             columns: self.columns.finish(),
             column_directions: self.column_directions.finish(),
+            included_columns: self.included_columns.finish(),
             is_unique: self.is_unique.finish(),
             method: self.method.finish(),
             is_spatial: self.is_spatial.finish(),
@@ -652,7 +655,8 @@ impl Decode for Index {
 }
 impl Wire for IndexModel {
     fn emit<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut o = s.serialize_struct("Index", 7)?;
+        let mut o =
+            s.serialize_struct("Index", 7 + usize::from(!self.included_columns.is_empty()))?;
         o.serialize_field("name", &Enc(&self.name))?;
         o.serialize_field("columns", &Enc(&self.columns))?;
         o.serialize_field("columnDirections", &Enc(&self.column_directions))?;
@@ -660,6 +664,9 @@ impl Wire for IndexModel {
         o.serialize_field("method", &Enc(&self.method))?;
         o.serialize_field("isSpatial", &Enc(&self.is_spatial))?;
         o.serialize_field("predicate", &Enc(&self.predicate))?;
+        if !self.included_columns.is_empty() {
+            o.serialize_field("includedColumns", &Enc(&self.included_columns))?;
+        }
         o.end()
     }
     fn inventory(&self, i: &mut Inventory) -> R<()> {
@@ -678,6 +685,10 @@ impl Wire for IndexModel {
         self.is_spatial.inventory(i)?;
         i.member("predicate")?;
         self.predicate.inventory(i)?;
+        if !self.included_columns.is_empty() {
+            i.member("includedColumns")?;
+            self.included_columns.inventory(i)?;
+        }
         Ok(())
     }
 }
@@ -1650,4 +1661,24 @@ impl<'de> Deserialize<'de> for Step {
         }
         d.deserialize_map(ObjectVisitor)
     }
+}
+
+#[test]
+fn index_wire_preserves_included_columns_and_legacy_plain_indexes() {
+    let plain = IndexModel::new("lookup", vec!["key".into()]);
+    let plain_json = serde_json::to_value(Enc(&plain)).unwrap();
+    assert!(plain_json.get("includedColumns").is_none());
+    let decoded = serde_json::from_value::<Index>(plain_json)
+        .unwrap()
+        .finish();
+    assert!(exact_index(&plain, &decoded));
+
+    let mut covering = plain.clone();
+    covering.included_columns = vec!["secondary".into(), "payload".into()];
+    let covering_json = serde_json::to_value(Enc(&covering)).unwrap();
+    let decoded = serde_json::from_value::<Index>(covering_json)
+        .unwrap()
+        .finish();
+    assert!(exact_index(&covering, &decoded));
+    assert!(!exact_index(&plain, &decoded));
 }

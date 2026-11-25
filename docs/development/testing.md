@@ -356,6 +356,10 @@ PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
 `scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
 unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
 predicate column, duplicate keys inside the filter, and duplicates outside it.
+`scripts/run-owned-database-lanes.sh index-introspection` runs the PostgreSQL
+conditional-index suite and the SQL Server covering-index regression. The
+SQL Server test checks drift, destructive replacement, unmanaged-table
+preservation, and replanning after the host executes both index definitions.
 
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order

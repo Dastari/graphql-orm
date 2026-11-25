@@ -82,6 +82,17 @@ thread until deletion. See [entity reference delivery](docs/entity-references.md
 for the deadline and frame-size fallback. No GraphQL SDL, schema-module,
 or data migration is needed.
 
+### SQL Server covering approval lookup index
+
+**Action needed** if your SQL Server store has the pre-0.83
+`idx_graphql_orm_ai_approvals_tool_call_id` index with `INCLUDE` columns.
+The plan's source schema hash now reflects those columns. Automatic admission
+declines destructive replacement of the customized index. Follow the reviewed
+SQL Server upgrade path below, including duplicate-key preflight and explicit
+authorization of the destructive steps before applying the plan in an external
+transaction. No data backfill is required.
+[Pre-0.83 approval index upgrade](#01560-to-01570)
+
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 
 **Action needed** when host code matches `ProviderError::InvalidConfiguration`

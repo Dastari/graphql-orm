@@ -448,7 +448,25 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
             .plan_migration_to_entities("catalog-index", "upgrade catalog fixture", &entities)
             .await
             .expect("plan upgrade for catalog fixture");
-        assert_eq!(plan.source_schema_hash, upgrade.source_schema_hash);
+        if cfg!(feature = "mssql") && !suffix.is_empty() {
+            assert_eq!(
+                plan.source_schema_hash,
+                Some(live_schema(database).await.stable_hash())
+            );
+            assert_ne!(plan.source_schema_hash, upgrade.source_schema_hash);
+        } else {
+            // The unparsed predicate on PostgreSQL and SQLite needs the
+            // separate catalog check even when the source hash matches.
+            assert_eq!(plan.source_schema_hash, upgrade.source_schema_hash);
+        }
+        assert!(plan.steps.iter().any(|step| {
+            step.risk == MigrationRisk::Destructive
+                && matches!(
+                    &step.step,
+                    MigrationStep::DropIndex { table_name, index_name }
+                        if table_name == TABLE && index_name == LEGACY_NAME
+                )
+        }));
         let options = module
             .admit_index_replacements_with_live_schema(database, &plan, ApplyOptions::default())
             .await

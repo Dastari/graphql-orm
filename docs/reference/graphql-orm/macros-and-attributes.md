@@ -124,6 +124,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated GraphQL inputs (Rust repository inputs keep it); `graphql(skip)` also supports relation implementation fields. See [read-only and zero-input entities](#read-only-and-zero-input-entities) |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
+| `#[graphql_orm(allow_search_document)]` | opts a persisted target field into generated relation search documents, including when its ordinary read exposure is disabled. Use only when search callers may discover matches on that text |
 | `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
 | `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
 | `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |

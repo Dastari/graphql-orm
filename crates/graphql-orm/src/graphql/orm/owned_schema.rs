@@ -1,6 +1,5 @@
 //! Owned storage and borrowed views of the canonical physical schema contract.
 //!
-//! Legacy enums and struct literals retain their original public definitions.
 //! Both storage forms use the same validation, hashing, diffing and SQL renderer.
 use super::core::*;
 use super::dialect::DatabaseBackend;
@@ -20,6 +19,7 @@ pub struct IndexPredicateModel {
 
 /// Owned storage form of [`IndexDef`]; it is the same physical contract.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct IndexModel {
     /// Physical index name.
     pub name: String,
@@ -27,6 +27,8 @@ pub struct IndexModel {
     pub columns: Vec<String>,
     /// Empty means ascending, as for [`IndexDef`].
     pub column_directions: Vec<IndexDirection>,
+    /// SQL Server covering columns, stored separately from the ordered key.
+    pub included_columns: Vec<String>,
     /// Whether the index enforces uniqueness.
     pub is_unique: bool,
     /// Backend index method.
@@ -43,6 +45,7 @@ impl IndexModel {
             name: name.into(),
             columns,
             column_directions: vec![],
+            included_columns: vec![],
             is_unique: false,
             method: IndexMethod::Default,
             is_spatial: false,
@@ -61,6 +64,7 @@ impl IndexModel {
             name: &self.name,
             columns: self.columns.iter().map(String::as_str).collect(),
             column_directions: &self.column_directions,
+            included_columns: self.included_columns.iter().map(String::as_str).collect(),
             is_unique: self.is_unique,
             method: self.method,
             is_spatial: self.is_spatial,
@@ -83,6 +87,17 @@ impl IndexModel {
                     .into_boxed_slice(),
             ),
             column_directions: Box::leak(self.column_directions.into_boxed_slice()),
+            included_columns: if self.included_columns.is_empty() {
+                &[]
+            } else {
+                Box::leak(
+                    self.included_columns
+                        .into_iter()
+                        .map(|c| &*Box::leak(c.into_boxed_str()))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                )
+            },
             is_unique: self.is_unique,
             method: self.method,
             is_spatial: self.is_spatial,
@@ -294,6 +309,7 @@ pub(super) struct IndexRef<'a> {
     pub name: &'a str,
     pub columns: Vec<&'a str>,
     pub column_directions: &'a [IndexDirection],
+    pub included_columns: Vec<&'a str>,
     pub is_unique: bool,
     pub method: IndexMethod,
     pub is_spatial: bool,
@@ -311,6 +327,7 @@ impl IndexRef<'_> {
             name: self.name.into(),
             columns: self.columns.iter().map(|c| (*c).into()).collect(),
             column_directions: self.column_directions.into(),
+            included_columns: self.included_columns.iter().map(|c| (*c).into()).collect(),
             is_unique: self.is_unique,
             method: self.method,
             is_spatial: self.is_spatial,
@@ -325,6 +342,7 @@ impl IndexRef<'_> {
     pub(super) fn same_definition(&self, other: &Self, predicates_match: bool) -> bool {
         self.name == other.name
             && self.columns == other.columns
+            && self.included_columns == other.included_columns
             && (self.column_directions.is_empty()
                 || self.column_directions.len() == self.columns.len())
             && (other.column_directions.is_empty()
@@ -347,6 +365,7 @@ impl<'a> From<&'a IndexDef> for IndexRef<'a> {
             name: i.name,
             columns: i.columns.to_vec(),
             column_directions: i.column_directions,
+            included_columns: i.included_columns.to_vec(),
             is_unique: i.is_unique,
             method: i.method,
             is_spatial: i.is_spatial,
@@ -359,15 +378,20 @@ impl<'a> From<&'a IndexDef> for IndexRef<'a> {
 }
 impl fmt::Debug for IndexRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IndexDef")
+        let mut index = f.debug_struct("IndexDef");
+        index
             .field("name", &self.name)
             .field("columns", &self.columns)
             .field("column_directions", &self.column_directions)
             .field("is_unique", &self.is_unique)
             .field("method", &self.method)
             .field("is_spatial", &self.is_spatial)
-            .field("predicate", &self.predicate)
-            .finish()
+            .field("predicate", &self.predicate);
+        // Plain indexes retain their original plan and replay fingerprints.
+        if !self.included_columns.is_empty() {
+            index.field("included_columns", &self.included_columns);
+        }
+        index.finish()
     }
 }
 #[derive(Clone)]
@@ -483,7 +507,7 @@ impl SchemaRef<'_> {
                     )));
                 }
                 let mut index_members = std::collections::BTreeSet::new();
-                for column_name in &index.columns {
+                for column_name in index.columns.iter().chain(&index.included_columns) {
                     if !index_members.insert(*column_name)
                         || !table
                             .columns
@@ -738,6 +762,14 @@ pub(super) fn stable_schema_view_hash(schema: &SchemaRef<'_>) -> String {
                 canonical.push_str(&predicate.values.join(","));
             } else {
                 canonical.push_str("no_predicate");
+            }
+            if !index.included_columns.is_empty() {
+                canonical.push_str("|include:");
+                for column in &index.included_columns {
+                    canonical.push_str(&column.len().to_string());
+                    canonical.push(':');
+                    canonical.push_str(column);
+                }
             }
             canonical.push('\n');
         }
