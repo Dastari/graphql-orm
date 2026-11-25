@@ -2170,23 +2170,25 @@ impl AiGraphqlMutationCapabilityCatalog {
                 "finished GraphQL Mutation roots and semantic operations differ",
             ));
         }
-        let executable = semantic_mutations
-            .into_iter()
-            .filter(|operation| {
-                operation_result_is_provider_exportable(operation)
-                    && matches!(
-                        operation.ai_mutation_execution,
-                        Some(
-                            AiMutationExecutionPolicy::Automatic
-                                | AiMutationExecutionPolicy::ApprovalRequired
-                        )
-                    )
-            })
-            .collect::<Vec<_>>();
+        let classified_for_ai = |operation: &GraphqlSemanticOperationDescriptor| {
+            matches!(
+                operation.ai_mutation_execution,
+                Some(
+                    AiMutationExecutionPolicy::Automatic
+                        | AiMutationExecutionPolicy::ApprovalRequired
+                )
+            )
+        };
         // A mutation classified for AI execution must not take a transient
-        // argument: a plan's arguments are retained with the run. Refused
-        // before any plan schema is built, so the argument is never offered.
-        for operation in &executable {
+        // argument: a plan's arguments are retained with the run. Checked on
+        // every classified mutation, before the result-disclosure filter, so
+        // such a declaration is always an error and never a silent omission,
+        // and before any plan schema is built, so the argument is never
+        // offered.
+        for operation in semantic_mutations
+            .iter()
+            .filter(|operation| classified_for_ai(operation))
+        {
             let root = schema.mutation_root_field(&operation.field_name)?;
             if root.arguments.values().any(|input| input.transient) {
                 return Err(configuration_error(
@@ -2194,6 +2196,12 @@ impl AiGraphqlMutationCapabilityCatalog {
                 ));
             }
         }
+        let executable = semantic_mutations
+            .into_iter()
+            .filter(|operation| {
+                operation_result_is_provider_exportable(operation) && classified_for_ai(operation)
+            })
+            .collect::<Vec<_>>();
         let (executable, diagnostics) =
             admit_input_capabilities(&schema, semantic_catalog, executable, limits, &options)?;
         if executable.len() > limits.maximum_capabilities as usize {
@@ -11904,6 +11912,17 @@ mod tests {
                 Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
             ));
         }
+        // A classified root whose result is not exportable would be left out
+        // of the catalogue anyway. With a marked argument it is still an
+        // error, not a silent omission.
+        assert!(SDL.contains("HiddenMutation: String!"));
+        assert!(matches!(
+            compile(&SDL.replace(
+                "HiddenMutation: String!",
+                "HiddenMutation(proof: String @transientInput): String!"
+            )),
+            Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
+        ));
         // A prohibited root stays structurally absent, marker or not.
         let catalog = compile(&marked("DeleteParent", "id: ID!")).expect("prohibited root");
         assert_eq!(catalog.capabilities().count(), 2);

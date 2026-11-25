@@ -743,13 +743,17 @@ let proof = hook_ctx.transient_input::<SnapshotProof>();
   before the commit, so deferred post-commit actions do not see it.
 - In catalogues it appears only as the upsert's argument and its input type.
 - The argument carries the schema directive `@transientInput`, because AI tool arguments are
-  retained with the run:
+  retained with the run. The marker covers only the field argument the ORM generates. Arguments of
+  executable directives, and arguments you declare yourself on handwritten fields, are not marked
+  and not checked:
   - The tool-profile compiler refuses any argument plan that maps such an argument. An upsert with
     a required transient input therefore has no profile; with an optional one, a profile never
     sends it.
   - A loaded manifest is checked again against the owning subgraph's SDL
     (`validate_against_finished_schema`, `AiGraphqlToolManifestSet::aggregate`,
     `register_into_with_finished_schema`), so one written by an older compiler cannot map it.
+    `AiGraphqlToolManifest::register_into` and `from_extension_payload` do not see the SDL: a
+    manifest that this process did not compile must go through one of the three checks first.
   - The typed mutation capability catalogue fails to compile when a mutation classified for AI
     execution (`ai_mutations(upsert = "automatic" | "approval_required")`) takes one. Leave such
     an upsert prohibited, which is the default.
@@ -767,6 +771,12 @@ Where the value can still be seen:
   their default values verbatim. Only the argument is redacted. The upsert refuses such an
   operation, but the extension has already printed the document by then. Enable these extensions
   only where their output is treated like the raw request.
+- **Not redacted: async-graphql's validation errors.** async-graphql validates arguments and
+  variable defaults against the schema before the generated argument type runs. Its messages can
+  quote the rejected value. An invalid enum value is quoted, including one nested inside an input
+  object. So an error for a malformed transient input can echo the caller's own submitted value
+  back in the response, and into anything that logs response errors. The ORM does not rewrite
+  these messages. Avoid enum fields in a transient input type if that matters to you.
 - **Not redacted: your own callbacks.** The ORM never formats the value into an error or a log
   line. An error that your transform or hook builds from it is your text: with a public code it
   reaches the client, and without one it is a server-side diagnostic that

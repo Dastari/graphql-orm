@@ -1363,6 +1363,20 @@ impl FinishedSchema {
         let document = async_graphql_parser::parse_query(document)
             .map_err(|_| configuration_error("GraphQL tool document is invalid"))?;
         for (_, operation) in document.operations.iter() {
+            // Walk from the root the document actually executes on. An entry
+            // that claims another root would otherwise be checked against
+            // the wrong type's fields.
+            use async_graphql_parser::types::OperationType;
+            let executes_on = match operation.node.ty {
+                OperationType::Query => Some(AiGraphqlRootType::Query),
+                OperationType::Mutation => Some(AiGraphqlRootType::Mutation),
+                OperationType::Subscription => None,
+            };
+            if executes_on != Some(root) {
+                return Err(configuration_error(
+                    "GraphQL tool document does not execute on its entry's root type",
+                ));
+            }
             walk(
                 self,
                 self.root_name(root),
@@ -2224,9 +2238,41 @@ mod transient_admission_tests {
             "{ records { ... on Record { children(proof: \"x\") { id } } } }",
             "{ records { ...Fields } } fragment Fields on Record { id }",
             "{ records { unknown } }",
+            // A document that executes on another root than its entry claims.
+            "mutation { records(page: 1) { id } }",
+            "subscription { records(page: 1) { id } }",
         ] {
             assert!(check(document).is_err(), "{document}");
         }
+        // The wrong root is refused for what it is, before any field lookup:
+        // a mutation document cannot be passed off as a query entry in order
+        // to be checked against the query root's unmarked arguments.
+        let schema = FinishedSchema::parse(
+            r#"
+            schema { query: Query, mutation: Mutation }
+            type Query { change(proof: String): Record! }
+            type Mutation { change(proof: String @transientInput): Record! }
+            type Record { id: ID! }
+            "#,
+        )
+        .unwrap();
+        let document = "mutation { change(proof: \"x\") { id } }";
+        for (root, expected) in [
+            (AiGraphqlRootType::Query, "root type"),
+            (AiGraphqlRootType::Mutation, "transient"),
+        ] {
+            let refusal = schema
+                .refuse_transient_argument_uses(root, document)
+                .unwrap_err()
+                .to_string();
+            assert!(refusal.contains(expected), "{root:?}: {refusal}");
+        }
+        schema
+            .refuse_transient_argument_uses(
+                AiGraphqlRootType::Query,
+                "{ change(proof: \"x\") { id } }",
+            )
+            .unwrap();
     }
 
     /// A manifest is data. One written by a compiler that did not know the
