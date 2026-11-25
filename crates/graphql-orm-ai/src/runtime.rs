@@ -706,6 +706,7 @@ impl AiRuntime {
     ///
     /// Fails closed as [`Self::execute_query_capability`] does, for a root
     /// without continuation, and for a response without its page info.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_query_capability_page(
         &self,
         principal_reference: &PrincipalReference,
