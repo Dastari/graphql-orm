@@ -10,9 +10,19 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.222.0 lets SQL Server seek on BIN2 Unicode key columns when using
+Version 0.223.0 lets SQL Server seek on BIN2 Unicode key columns when using
 generated exact string filters (#867).
-[Migration](../../MIGRATION.md#02200-to-02220-sql-server-exact-string-filter-seeks)
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+Version 0.222.0 lets a generated upsert bind a private conflict key from the
+verified request, carry a typed transient input for its transform and hooks,
+and acknowledge a retry without writing.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
 
 Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
 full backups. Call `Database::enable_canonical_change_journal_keys` as the

@@ -17,7 +17,7 @@ The ORM now supplies the seek predicate for SQL Server run-state filters
 guides and Query Store forced plans for those queries. **Action needed** if a
 live column has drifted. Check the live column types, especially for
 `VARCHAR` columns declared as `NVARCHAR`, and review the affected read
-policies. See the [ORM migration](../../MIGRATION.md#02200-to-02220-sql-server-exact-string-filter-seeks).
+policies. See the [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks).
 This update requires no additional schema or data migration. Hosts still
 running a pre-0.158.0 schema should follow the upgrade below to install the
 run candidate indexes.

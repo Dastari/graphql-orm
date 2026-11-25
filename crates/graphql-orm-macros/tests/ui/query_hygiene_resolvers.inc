@@ -1125,7 +1125,7 @@ impl RecordMutations {
             } else {
                 ::graphql_orm::graphql::orm::mutation_changes(&["id", "title"], &bind_values)
             };
-            hook_ctx
+            let __gom_before_hook = hook_ctx
                 .run_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
@@ -1141,7 +1141,8 @@ impl RecordMutations {
                     },
                 )
                 .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback);
+            __gom_before_hook?;
             if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                 Record::__gom_require_managed_version_headroom(current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;

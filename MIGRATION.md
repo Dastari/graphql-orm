@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.220.0 to 0.222.0: SQL Server exact string filter seeks
+## 0.222.0 to 0.223.0: SQL Server exact string filter seeks
 
 Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL
 Server can seek on declared BIN2 Unicode key columns for `eq` and nonempty
@@ -31,6 +31,33 @@ match, such as stored `'bob   '` for operand `'bob'`. Exact comparisons now
 accept the true match and reject the padded value. A read policy that
 matches an owner exactly can now return rows to the true owner that it
 previously denied. The upgrade itself requires no schema or data migration.
+
+## 0.221.0 to 0.222.0: principal-bound upserts
+
+**No action.** Upgrade ORM and macros together. `upsert_bound_key`,
+`transient_input` and `upsert_acknowledge` are new, opt-in entity options.
+Entities that declare none of them generate the same schema, SQL, hooks and
+operation fingerprints as before. An entity that declares one changes its own
+upsert's arguments and its operation `schema_signature`, so rebind a pinned
+fingerprint for that entity. An upsert result can have `success: true` with
+`action: null` only on an entity that declares `upsert_acknowledge`.
+See [principal-bound upserts](docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+## 0.220.0 to 0.221.0: generated Changed replay
+
+**No action.** Upgrade ORM and macros together. No data migration is needed.
+To adopt replay, set `changed_started = true, changed_replay = true` on the
+entity. Update clients to save `Cursor`, resume with `After` and resubscribe
+without a cursor before refetching on `SUBSCRIPTION_REPLAY_RESET`. Operation
+catalogue 0.16.0 describes the replay window in exported client metadata.
+
+A resume waits for the authority tick within the advertised 120-second
+window. Base intervals of 120 seconds or more make every resume age out.
+The reset bit is visible at tick granularity. Parallel probes with reusable
+cursors can estimate when total writes after a checkpoint cross the 128-event
+bound, including hidden and other-tenant writes. An oversized delete preimage
+or a value whose storage cannot be measured clears the ring.
+[Changed replay reference](docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
 
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 

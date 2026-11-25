@@ -129,6 +129,9 @@ pub struct GraphqlChangedStreamMetadata {
     pub identity_carried: bool,
     /// Whether the root accepts the opt-in started signal (`Started: true`).
     pub started_signal: bool,
+    /// Bounded replay advertised only by explicitly opted-in generated streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<GraphqlChangedReplayMetadata>,
 }
 
 impl GraphqlChangedStreamMetadata {
@@ -144,8 +147,45 @@ impl GraphqlChangedStreamMetadata {
             carried_fields,
             identity_carried,
             started_signal,
+            replay: None,
         }
     }
+}
+
+/// Retention window for an opted-in generated Changed stream.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct GraphqlChangedReplayMetadata {
+    /// Scope in which a cursor can be resumed.
+    pub scope: GraphqlChangedReplayScope,
+    /// Maximum number of retained events.
+    pub maximum_events: usize,
+    /// Maximum accounted bytes of retained witnesses.
+    pub maximum_bytes: usize,
+    /// Maximum age of a resumable cursor.
+    pub maximum_age_seconds: u64,
+}
+
+impl GraphqlChangedReplayMetadata {
+    /// Describes bounded, process-local retention.
+    pub fn process(maximum_events: usize, maximum_bytes: usize, maximum_age_seconds: u64) -> Self {
+        Self {
+            scope: GraphqlChangedReplayScope::Process,
+            maximum_events,
+            maximum_bytes,
+            maximum_age_seconds,
+        }
+    }
+}
+
+/// Scope in which a generated Changed cursor may be resumed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum GraphqlChangedReplayScope {
+    /// The same database handle family in the same server process.
+    Process,
 }
 
 /// How an expiry field encodes its time. Every encoding is UTC.
@@ -537,7 +577,13 @@ fn validate_changed_stream(
         previous = position;
         ordered
     });
-    if !root || !ordered {
+    let valid_replay = stream.replay.as_ref().is_none_or(|replay| {
+        stream.started_signal
+            && replay.maximum_events > 0
+            && replay.maximum_bytes > 0
+            && replay.maximum_age_seconds > 0
+    });
+    if !root || !ordered || !valid_replay {
         return Err(GraphqlSemanticError::new(
             "client metadata changed stream does not match the catalogue",
         ));

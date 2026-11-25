@@ -225,6 +225,12 @@ impl TemporalValue {
         }
     }
 
+    pub(crate) fn text_capacity(&self) -> usize {
+        match &self.text {
+            TemporalText::Input(text) | TemporalText::Chrono(text) => text.capacity(),
+        }
+    }
+
     #[cfg(feature = "mssql")]
     pub(crate) fn is_chrono(&self) -> bool {
         matches!(self.text, TemporalText::Chrono(_))
@@ -1141,15 +1147,16 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-struct DeferredEvent<T, const COMMIT_ONLY: bool>
+struct DeferredEvent<T, B: OrmBackend, const COMMIT_ONLY: bool>
 where
     T: Clone + Send + Sync + 'static,
 {
     event: T,
+    publish: fn(&crate::db::Database<B>, T),
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, COMMIT_ONLY>
+impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, B, COMMIT_ONLY>
 where
     B: OrmBackend,
     T: Clone + Send + Sync + 'static,
@@ -1159,7 +1166,7 @@ where
     }
 
     fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
-        db.emit_event(self.event);
+        (self.publish)(db, self.event);
     }
 }
 
@@ -1232,6 +1239,215 @@ impl TransactionExtensions {
             .remove(&std::any::TypeId::of::<T>())
             .and_then(|value| value.downcast::<T>().ok())
             .map(|value| *value)
+    }
+}
+
+/// A mutation's typed transient input, stored apart from host-set
+/// transaction extensions so request data never reads as one.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+struct TransientMutationInput<T>(T);
+
+/// Whether the running generated write may be, or was, acknowledged without
+/// writing; see [`MutationContext::acknowledge_without_write`].
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Clone, Copy)]
+enum WriteAcknowledgement {
+    /// The `Before` hook running at this hook depth may acknowledge.
+    Armed(usize),
+    Acknowledged,
+}
+
+/// The acknowledgement state an enclosing generated write restores.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub struct __WriteAcknowledgementScope(Option<WriteAcknowledgement>);
+
+/// The server-side source of a principal-bound upsert conflict key.
+///
+/// An entity that declares
+/// `upsert_bound_key(field = "...", binding = "path::Type")` gets a generated
+/// GraphQL upsert whose key column is absent from the input. The resolver
+/// calls [`Self::bind`] with the request context after resolver
+/// authentication, scopes and operation assurance, and before the entity
+/// policy, the transaction, the conflict lookup and any other read or write.
+/// The value it returns is the key on both the insert and the update branch,
+/// and is written again after the input transform, so no request input and no
+/// transform can replace it.
+///
+/// Derive the key only from verified request data, such as the authenticated
+/// subject or a value the host's own middleware attached. Return an error when
+/// there is no such value: the mutation is then refused and nothing is read
+/// or written. Every binding error reaches the client as the same fixed
+/// `FORBIDDEN` refusal. The error's own code, message and extensions are
+/// discarded, so a binding cannot leak a diagnostic.
+///
+/// Two principals must never share a key. Scope the key yourself: when
+/// subject IDs are unique only within a tenant or an issuer, encode that
+/// tenant or issuer into the key. Store the column with a binary or otherwise
+/// identity-preserving comparison. Under a case- or accent-insensitive
+/// collation the database treats distinct keys as one; the generated upsert
+/// then refuses the second principal instead of sharing the row.
+pub trait PrincipalKeyBinding: Send + Sync + 'static {
+    /// The key column's Rust type. Stored keys are compared with the bound
+    /// value by this type's exact equality, whatever the database collation.
+    type Key: Clone + PartialEq + Send + Sync + 'static;
+
+    /// The key for this request's principal.
+    fn bind(ctx: &async_graphql::Context<'_>) -> async_graphql::Result<Self::Key>;
+}
+
+/// Resolve a principal-bound key for a generated resolver, failing closed.
+#[doc(hidden)]
+pub fn __bind_principal_key<K: PrincipalKeyBinding>(
+    ctx: &async_graphql::Context<'_>,
+) -> async_graphql::Result<K::Key> {
+    // The host's error is dropped whole: no message, code or extension of it
+    // reaches the client or a diagnostic under any compatibility setting.
+    K::bind(ctx).map_err(|_| {
+        crate::graphql::errors::OrmPublicError::with_message(
+            crate::graphql::errors::OrmErrorCode::Forbidden,
+            PRINCIPAL_KEY_BINDING_REFUSAL,
+        )
+        .into_graphql_error()
+    })
+}
+
+/// The fixed message of a refused principal-key binding.
+pub const PRINCIPAL_KEY_BINDING_REFUSAL: &str = "the request principal could not be bound";
+
+/// Marks a generated argument as a transient mutation input in the schema:
+/// `@transientInput`. Tool-profile compilers refuse to map such an argument.
+#[async_graphql::TypeDirective(name = "transientInput", location = "ArgumentDefinition")]
+#[doc(hidden)]
+pub fn transient_input_argument() {}
+
+/// Refuse an operation that gives a default value to a variable used in a
+/// transient argument: a default is part of the query text, which hosts log
+/// and persist more freely than variables.
+#[doc(hidden)]
+pub fn __refuse_transient_variable_defaults(
+    ctx: &async_graphql::Context<'_>,
+    argument: &str,
+) -> async_graphql::Result<()> {
+    let definitions = &ctx.query_env.operation.node.variable_definitions;
+    if definitions
+        .iter()
+        .all(|definition| definition.node.default_value.is_none())
+    {
+        return Ok(());
+    }
+    // The resolver runs after the argument passed its size bound, so its
+    // literal is small enough to walk by resolving a copy.
+    let mut refused = false;
+    for (_, value) in ctx
+        .item
+        .node
+        .arguments
+        .iter()
+        .filter(|(name, _)| name.node.as_str() == argument)
+    {
+        let _ = value.node.clone().into_const_with(|name| {
+            refused |= definitions.iter().any(|definition| {
+                definition.node.name.node == name && definition.node.default_value.is_some()
+            });
+            Ok::<_, std::convert::Infallible>(async_graphql::Value::Null)
+        });
+    }
+    if refused {
+        return Err(crate::graphql::errors::OrmPublicError::with_message(
+            crate::graphql::errors::OrmErrorCode::InvalidInput,
+            "a variable used in a transient argument must not declare a default value",
+        )
+        .into_graphql_error());
+    }
+    Ok(())
+}
+
+/// A generated transient argument: `T`, refused before coercion when its
+/// request value is larger than `MAX_BYTES` or has more than `MAX_NODES`
+/// values. It has `T`'s GraphQL type.
+#[doc(hidden)]
+pub struct BoundedTransientInput<T, const MAX_BYTES: usize, const MAX_NODES: usize>(pub T);
+
+/// Whether a request value stays within a byte and node budget. Bytes count
+/// string, enum and binary contents and object keys, and eight per number;
+/// nodes count every value, list item and object member. Stops at the first
+/// excess.
+fn transient_value_within(
+    value: &async_graphql::Value,
+    bytes: &mut usize,
+    nodes: &mut usize,
+) -> bool {
+    fn take(budget: &mut usize, amount: usize) -> bool {
+        match budget.checked_sub(amount) {
+            Some(rest) => {
+                *budget = rest;
+                true
+            }
+            None => false,
+        }
+    }
+    if !take(nodes, 1) {
+        return false;
+    }
+    match value {
+        async_graphql::Value::Null => true,
+        async_graphql::Value::Boolean(_) => take(bytes, 1),
+        async_graphql::Value::Number(_) => take(bytes, 8),
+        async_graphql::Value::String(text) => take(bytes, text.len()),
+        async_graphql::Value::Enum(name) => take(bytes, name.len()),
+        async_graphql::Value::Binary(data) => take(bytes, data.len()),
+        async_graphql::Value::List(items) => items
+            .iter()
+            .all(|item| transient_value_within(item, bytes, nodes)),
+        async_graphql::Value::Object(members) => members.iter().all(|(key, member)| {
+            take(bytes, key.len()) && transient_value_within(member, bytes, nodes)
+        }),
+    }
+}
+
+impl<T, const MAX_BYTES: usize, const MAX_NODES: usize> async_graphql::InputType
+    for BoundedTransientInput<T, MAX_BYTES, MAX_NODES>
+where
+    T: async_graphql::InputType,
+{
+    type RawValueType = T::RawValueType;
+
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn qualified_type_name() -> String {
+        T::qualified_type_name()
+    }
+
+    fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
+        T::create_type_info(registry)
+    }
+
+    fn parse(value: Option<async_graphql::Value>) -> async_graphql::InputValueResult<Self> {
+        // Measured on the request value, before `T` clones or coerces it.
+        if let Some(value) = &value {
+            let (mut bytes, mut nodes) = (MAX_BYTES, MAX_NODES);
+            if !transient_value_within(value, &mut bytes, &mut nodes) {
+                return Err(async_graphql::InputValueError::custom(
+                    "transient input exceeds its size limit",
+                ));
+            }
+        }
+        // `T`'s own coercion error can quote the value it rejected, and a
+        // response error is something hosts log. Report the failure only.
+        T::parse(value).map(Self).map_err(|_| {
+            async_graphql::InputValueError::custom("transient input is not a valid value")
+        })
+    }
+
+    fn to_value(&self) -> async_graphql::Value {
+        self.0.to_value()
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        self.0.as_raw_value()
     }
 }
 
@@ -1914,6 +2130,15 @@ where
             .cloned()
     }
 
+    /// The typed transient input of the mutation being shaped; see
+    /// [`MutationContext::transient_input`]. `None` outside a transaction.
+    pub fn transient_input<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.mutation_ctx.as_deref()?.transient_input::<T>()
+    }
+
     pub fn auth_user(&self) -> async_graphql::Result<String> {
         self.graphql_ctx
             .ok_or_else(|| async_graphql::Error::new("missing GraphQL context for auth user"))?
@@ -2282,6 +2507,155 @@ where
         Ok(self.extensions.remove::<T>())
     }
 
+    /// The typed transient input of the mutation this transaction is running.
+    ///
+    /// A generated GraphQL mutation that declares
+    /// `transient_input(type = "...")` stores its argument here before the
+    /// input transform runs. Trusted code that owns the transaction can set
+    /// one with [`Self::set_transient_input`], so the same hooks serve
+    /// repository writes. The value is request data: it is never persisted,
+    /// never part of a `Changed` event or the change journal, and is dropped
+    /// with the transaction before the commit or rollback, so no deferred
+    /// post-commit action or queued event sees it. It is kept apart from
+    /// [`Self::extension`], which no request input can set.
+    pub fn transient_input<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions
+            .get::<TransientMutationInput<T>>()
+            .map(|slot| &slot.0)
+    }
+
+    /// Attach a typed transient mutation input for this transaction's hooks
+    /// and input transforms, returning the value it replaces.
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running.
+    pub fn set_transient_input<T>(
+        &mut self,
+        value: T,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self
+            .extensions
+            .insert(TransientMutationInput(value))
+            .map(|slot| slot.0))
+    }
+
+    /// Remove and return this transaction's transient input of type `T`.
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` while a mutation hook is running.
+    pub fn take_transient_input<T>(
+        &mut self,
+    ) -> Result<Option<T>, crate::graphql::errors::OrmPublicError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()?;
+        Ok(self
+            .extensions
+            .remove::<TransientMutationInput<T>>()
+            .map(|slot| slot.0))
+    }
+
+    /// Whether the running `Before` hook may call
+    /// [`Self::acknowledge_without_write`].
+    pub fn can_acknowledge_without_write(&self) -> bool {
+        matches!(
+            self.extensions.get::<WriteAcknowledgement>(),
+            Some(WriteAcknowledgement::Armed(depth))
+                if *depth == self.hook_depth.load(std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
+    /// Acknowledge the current request without writing: the generated
+    /// mutation skips its statement, its `After` hook and its `Changed`
+    /// event, commits whatever the hook itself wrote, and returns the locked
+    /// existing row with no action.
+    ///
+    /// Only the `Before` hook of a generated GraphQL upsert whose entity
+    /// declares `upsert_acknowledge = true` may call this, and only on the
+    /// update branch, where a locked existing row is the answer. Use it to
+    /// acknowledge an idempotent retry.
+    ///
+    /// # Errors
+    ///
+    /// Refused with `CONFLICT` everywhere else, including the insert branch,
+    /// repository and transaction writes, other mutations, the `After` phase
+    /// and the nested writes a hook makes. The refusal also marks the
+    /// transaction refused: a hook that swallows the error cannot let the
+    /// write through, because the commit then rolls back with `FORBIDDEN`. An
+    /// acknowledgement is never silently replaced by a write.
+    pub fn acknowledge_without_write(
+        &mut self,
+    ) -> Result<(), crate::graphql::errors::OrmPublicError> {
+        if !self.can_acknowledge_without_write() {
+            // A hook that ignores this error still cannot let the write
+            // through: the transaction no longer commits.
+            self.runtime_state.refuse_write();
+            return Err(crate::graphql::errors::OrmPublicError::with_message(
+                crate::graphql::errors::OrmErrorCode::Conflict,
+                "this write cannot be acknowledged without writing",
+            ));
+        }
+        self.extensions.insert(WriteAcknowledgement::Acknowledged);
+        Ok(())
+    }
+
+    /// Let the next `Before` hook acknowledge this generated write.
+    #[doc(hidden)]
+    pub fn __arm_write_acknowledgement(&mut self) -> __WriteAcknowledgementScope {
+        let depth = self.hook_depth.load(std::sync::atomic::Ordering::Relaxed) + 1;
+        __WriteAcknowledgementScope(self.extensions.insert(WriteAcknowledgement::Armed(depth)))
+    }
+
+    /// Close an acknowledgement scope, reporting whether the hook used it.
+    #[doc(hidden)]
+    pub fn __finish_write_acknowledgement(&mut self, scope: __WriteAcknowledgementScope) -> bool {
+        let state = match scope.0 {
+            Some(previous) => self.extensions.insert(previous),
+            None => self.extensions.remove::<WriteAcknowledgement>(),
+        };
+        matches!(state, Some(WriteAcknowledgement::Acknowledged))
+    }
+
+    /// Store a generated mutation's transient argument. Like
+    /// [`Self::set_transient_input`], refused inside a mutation hook.
+    #[doc(hidden)]
+    pub fn __set_transient_input<T>(&mut self, value: T) -> async_graphql::Result<()>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.require_transaction_owner()
+            .map_err(crate::graphql::errors::OrmPublicError::into_graphql_error)?;
+        self.extensions.insert(TransientMutationInput(value));
+        Ok(())
+    }
+
+    /// Refuse a principal-bound upsert whose conflict lookup or write reached
+    /// a row that does not hold exactly the bound key, or whose written row
+    /// cannot be read back by that key. The refusal is the generic row-write
+    /// denial, so it does not reveal that another principal's row exists, and
+    /// it blocks the commit. Every such refusal is one identical response,
+    /// reported as `refused` whether or not a statement had run: the
+    /// transaction can no longer commit, so nothing was written either way.
+    #[doc(hidden)]
+    pub fn __refuse_principal_key_mismatch(
+        &mut self,
+        outcome: &crate::graphql::errors::MutationOutcomeTracker,
+    ) -> async_graphql::Error {
+        self.runtime_state.refuse_write();
+        outcome.__ownership_refused();
+        crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error()
+    }
+
     fn require_transaction_owner(&self) -> Result<(), crate::graphql::errors::OrmPublicError> {
         if self.hook_depth.load(std::sync::atomic::Ordering::Relaxed) > 0 {
             return Err(crate::graphql::errors::OrmPublicError::with_message(
@@ -2393,7 +2767,22 @@ where
     {
         if super::ensure_write_allowed().is_ok() {
             self.deferred_events
-                .push(Box::new(DeferredEvent::<T, false> { event }));
+                .push(Box::new(DeferredEvent::<T, B, false> {
+                    event,
+                    publish: crate::db::Database::emit_event,
+                }));
+        }
+    }
+
+    /// Queue an opted-in Changed witness for publication only after commit.
+    #[doc(hidden)]
+    pub fn queue_changed_replay<T>(&mut self, event: T, publish: fn(&crate::db::Database<B>, T))
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        if super::ensure_write_allowed().is_ok() {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, B, true> { event, publish }));
         }
     }
 
@@ -2413,7 +2802,10 @@ where
                 .insert((std::any::TypeId::of::<T>(), key))
         {
             self.deferred_events
-                .push(Box::new(DeferredEvent::<T, true> { event }));
+                .push(Box::new(DeferredEvent::<T, B, true> {
+                    event,
+                    publish: crate::db::Database::emit_event,
+                }));
         }
     }
 
