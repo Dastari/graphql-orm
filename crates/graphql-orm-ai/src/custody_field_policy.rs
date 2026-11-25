@@ -13,6 +13,7 @@
 //! The wrapped handle never leaves the crate: public `database()` accessors
 //! return the handle the host supplied.
 
+use crate::AiOrmBackend;
 use std::any::Any;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -20,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 use graphql_orm::db::Database;
 use graphql_orm::futures::future::BoxFuture;
 use graphql_orm::graphql::auth::AccessContext;
-use graphql_orm::graphql::orm::{DefaultWriteBackend, FieldPolicy, OrmSchemaModule};
+use graphql_orm::graphql::orm::{FieldPolicy, OrmSchemaModule};
 
 use crate::persistence::AiSchemaModule;
 
@@ -49,10 +50,10 @@ fn is_custody_entity(entity_name: &str) -> bool {
 /// The host field policy, with repository decisions for this crate's own
 /// key-less fields answered by the crate.
 struct CustodyFieldPolicy {
-    host: Arc<dyn FieldPolicy<DefaultWriteBackend>>,
+    host: Arc<dyn FieldPolicy<AiOrmBackend>>,
 }
 
-impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
+impl FieldPolicy<AiOrmBackend> for CustodyFieldPolicy {
     fn ignore_denied_field_write(
         &self,
         entity_name: &'static str,
@@ -64,7 +65,7 @@ impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
     fn can_read_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
-        db: &'a Database<DefaultWriteBackend>,
+        db: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -78,7 +79,7 @@ impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
     fn can_write_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
-        db: &'a Database<DefaultWriteBackend>,
+        db: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -92,7 +93,7 @@ impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
     fn can_read_repository_field<'a>(
         &'a self,
         access: Option<AccessContext<'a>>,
-        db: &'a Database<DefaultWriteBackend>,
+        db: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -109,7 +110,7 @@ impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
     fn can_write_repository_field<'a>(
         &'a self,
         access: Option<AccessContext<'a>>,
-        db: &'a Database<DefaultWriteBackend>,
+        db: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         field_name: &'static str,
         policy_key: Option<&'static str>,
@@ -136,9 +137,7 @@ impl FieldPolicy<DefaultWriteBackend> for CustodyFieldPolicy {
 /// Without a host field policy the handle is returned unchanged: this
 /// crate's entities declare no field policy key, and key-less fields are
 /// readable and writable without a provider in every authorization mode.
-pub(crate) fn custody_database(
-    mut database: Database<DefaultWriteBackend>,
-) -> Database<DefaultWriteBackend> {
+pub(crate) fn custody_database(mut database: Database<AiOrmBackend>) -> Database<AiOrmBackend> {
     if let Some(host) = database.field_policy().cloned() {
         database.set_field_policy(CustodyFieldPolicy { host });
     }
@@ -154,11 +153,11 @@ pub(crate) mod tests {
 
     /// A host policy that refuses every field decision on every surface.
     pub(crate) struct DenyEverything;
-    impl FieldPolicy<DefaultWriteBackend> for DenyEverything {
+    impl FieldPolicy<AiOrmBackend> for DenyEverything {
         fn can_read_field<'a>(
             &'a self,
             _: &'a async_graphql::Context<'_>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -169,7 +168,7 @@ pub(crate) mod tests {
         fn can_write_field<'a>(
             &'a self,
             _: &'a async_graphql::Context<'_>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -181,7 +180,7 @@ pub(crate) mod tests {
         fn can_read_repository_field<'a>(
             &'a self,
             _: Option<AccessContext<'a>>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -192,7 +191,7 @@ pub(crate) mod tests {
         fn can_write_repository_field<'a>(
             &'a self,
             _: Option<AccessContext<'a>>,
-            _: &'a Database<DefaultWriteBackend>,
+            _: &'a Database<AiOrmBackend>,
             _: &'static str,
             _: &'static str,
             _: Option<&'static str>,
@@ -203,7 +202,7 @@ pub(crate) mod tests {
         }
     }
 
-    async fn host() -> Database<DefaultWriteBackend> {
+    async fn host() -> Database<AiOrmBackend> {
         let mut database = Database::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -298,7 +297,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_database_without_a_field_policy_is_used_unchanged() {
-        let database = Database::<DefaultWriteBackend>::connect_sqlite("sqlite::memory:")
+        let database = Database::<AiOrmBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
         assert!(custody_database(database).field_policy().is_none());

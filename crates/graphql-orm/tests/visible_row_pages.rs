@@ -1525,6 +1525,46 @@ async fn run_all(database: &Database) {
 mod sqlite_cases {
     use super::*;
 
+    #[tokio::test]
+    async fn byte_guard_preflights_residual_page_before_any_row_callback() {
+        let (database, _owner) = fixture().await.unwrap();
+        for decision in [Decision::Residual, Decision::UnrestrictedRefusing] {
+            let (database, checks) = with_policy(&database, decision);
+            let result = database
+                .transaction(TransactionMode::StateMachine, |tx| {
+                    Box::pin(async move {
+                        tx.query::<PageRow>()
+                            .default_order()
+                            .limit(2)
+                            .with_max_scanned_rows(8)
+                            .fetch_sql_page_with_byte_limit(2 * (size_of::<PageRow>() + 16))
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await;
+            assert!(
+                matches!(result, Err(error) if error.public_error().code == OrmErrorCode::InternalError)
+            );
+            assert_eq!(checks.load(Ordering::SeqCst), 0);
+            let page = database
+                .transaction(TransactionMode::StateMachine, |tx| {
+                    Box::pin(async move {
+                        tx.query::<PageRow>()
+                            .default_order()
+                            .limit(2)
+                            .with_max_scanned_rows(8)
+                            .fetch_sql_page_with_byte_limit(4096)
+                            .await
+                            .map_err(OrmPublicError::from)
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(ranks(&page), vec![0, 3]);
+        }
+    }
+
     macro_rules! case {
         ($name:ident) => {
             #[tokio::test]

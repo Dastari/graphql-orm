@@ -1,7 +1,6 @@
 //! ORM-only bounded pruning of protected session, tool, checkpoint, and message content.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::AiProviderSessionState;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_orm, map_transaction};
@@ -17,8 +16,8 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, EntityAccessKind, EntityAccessSurface,
-    EntityPolicy, MutationLimit, OrderDirection, RetentionPurgeOutcome, TransactionMode,
+    ConditionalUpdateOutcome, EntityAccessKind, EntityAccessSurface, EntityPolicy, MutationLimit,
+    OrderDirection, RetentionPurgeOutcome, TransactionMode,
 };
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use uuid::Uuid;
@@ -104,7 +103,7 @@ macro_rules! bounded_retention_rows {
     }};
 }
 
-fn retention_query_page_size(database: &Database<DefaultWriteBackend>) -> Result<i64, AiError> {
+fn retention_query_page_size(database: &Database<AiOrmBackend>) -> Result<i64, AiError> {
     let configured = database
         .pagination_config()
         .max_limit
@@ -450,14 +449,14 @@ impl Default for AiSessionRetentionLimits {
 
 #[derive(Clone)]
 struct SessionRetentionEntityPolicy {
-    delegate: Option<Arc<dyn EntityPolicy<DefaultWriteBackend>>>,
+    delegate: Option<Arc<dyn EntityPolicy<AiOrmBackend>>>,
 }
 
-impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
+impl EntityPolicy<AiOrmBackend> for SessionRetentionEntityPolicy {
     fn can_access_entity<'a>(
         &'a self,
         context: Option<&'a async_graphql::Context<'_>>,
-        database: &'a Database<DefaultWriteBackend>,
+        database: &'a Database<AiOrmBackend>,
         entity_name: &'static str,
         policy_key: Option<&'static str>,
         kind: EntityAccessKind,
@@ -509,7 +508,7 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
 /// ambiguous local/provider deletion remain blocked. Redacted audit,
 /// usage, egress, attempt, pricing, and skill facts remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiSessionRetentionLimits,
     stored_response_deletion: Option<Arc<dyn crate::AiStoredProviderResponseDeletionService>>,
@@ -519,7 +518,7 @@ pub struct OrmAiSessionRetentionService {
 impl OrmAiSessionRetentionService {
     /// Creates a bounded trusted retention worker.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         clock: Arc<dyn Clock>,
         limits: AiSessionRetentionLimits,
     ) -> Self {
@@ -3039,19 +3038,18 @@ impl OrmAiSessionRetentionService {
                     }
                     let maximum = u32::try_from(checkpoint_ids.len())
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let outcome = maintenance
-                        .purge::<AiRunCheckpointRecord>(
-                            AiRunCheckpointRecordWhereInput {
-                                id: Some(UuidFilter {
-                                    in_list: Some(checkpoint_ids),
-                                    ..Default::default()
-                                }),
+                    let outcome = purge_checkpoint_rows(
+                        maintenance,
+                        AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                in_list: Some(checkpoint_ids),
                                 ..Default::default()
-                            },
-                            MutationLimit::new(maximum)?,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
+                            }),
+                            ..Default::default()
+                        },
+                        MutationLimit::new(maximum)?,
+                    )
+                    .await?;
                     let RetentionPurgeOutcome::Purged { affected } = outcome else {
                         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     };
@@ -3710,19 +3708,18 @@ impl OrmAiSessionRetentionService {
                         .collect::<Vec<_>>();
                     let maximum = u32::try_from(checkpoint_ids.len())
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let purge = maintenance
-                        .purge::<AiRunCheckpointRecord>(
-                            AiRunCheckpointRecordWhereInput {
-                                id: Some(UuidFilter {
-                                    in_list: Some(checkpoint_ids),
-                                    ..Default::default()
-                                }),
+                    let purge = purge_checkpoint_rows(
+                        maintenance,
+                        AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                in_list: Some(checkpoint_ids),
                                 ..Default::default()
-                            },
-                            MutationLimit::new(maximum)?,
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
+                            }),
+                            ..Default::default()
+                        },
+                        MutationLimit::new(maximum)?,
+                    )
+                    .await?;
                     let RetentionPurgeOutcome::Purged { affected } = purge else {
                         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     };
@@ -3755,12 +3752,37 @@ impl OrmAiSessionRetentionService {
     }
 }
 
+async fn purge_checkpoint_rows(
+    maintenance: &mut graphql_orm::graphql::orm::RetentionContext<'_, AiOrmBackend>,
+    filter: AiRunCheckpointRecordWhereInput,
+    limit: MutationLimit,
+) -> Result<RetentionPurgeOutcome, OrmPublicError> {
+    #[cfg(not(feature = "mssql"))]
+    return maintenance
+        .purge::<AiRunCheckpointRecord>(filter, limit)
+        .await
+        .map_err(OrmPublicError::from);
+    #[cfg(feature = "mssql")]
+    {
+        let _ = (maintenance, filter, limit);
+        Err(OrmPublicError::with_message(
+            OrmErrorCode::ServiceUnavailable,
+            "SQL Server does not support append-only checkpoint purge",
+        ))
+    }
+}
+
 #[async_trait]
 impl AiSessionRetentionService for OrmAiSessionRetentionService {
     async fn prune_session_content(
         &self,
         after_session_cursor: Option<String>,
     ) -> Result<AiSessionRetentionReport, AiError> {
+        if cfg!(feature = "mssql") {
+            return Err(AiError::InvalidConfiguration(
+                "SQL Server does not support the required append-only checkpoint purge for AI session retention".to_owned(),
+            ));
+        }
         let candidates = self.candidates(after_session_cursor).await?;
         let mut report = AiSessionRetentionReport {
             sessions_scanned: u32::try_from(candidates.sessions.len())
@@ -4230,7 +4252,7 @@ fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
 /// Moves an idle retained provider-side thread to exact-reference cleanup
 /// because retention purged content it still holds.
 async fn retire_purged_provider_session(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     binding: &AiProviderSessionBindingRecord,
     now: i64,
 ) -> Result<(), OrmPublicError> {
@@ -4278,7 +4300,7 @@ async fn retire_purged_provider_session(
 }
 
 async fn purge_terminal_subscription_waits(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     session_id: Uuid,
     page_size: i64,
 ) -> Result<bool, OrmPublicError> {
@@ -4374,7 +4396,7 @@ async fn purge_terminal_subscription_waits(
 }
 
 async fn purge_native_candidate_payload(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     call: &AiToolCallRecord,
     now: i64,
 ) -> Result<(), OrmPublicError> {
@@ -5128,7 +5150,7 @@ mod tests {
         fail: AtomicBool,
         not_found: AtomicBool,
         deleted: Mutex<Vec<String>>,
-        database: Mutex<Option<Database<DefaultWriteBackend>>>,
+        database: Mutex<Option<Database<AiOrmBackend>>>,
         evidence: Mutex<Vec<bool>>,
     }
 
@@ -6540,11 +6562,11 @@ mod tests {
     #[derive(Clone)]
     struct RepositoryOnlyHostPolicy;
 
-    impl EntityPolicy<DefaultWriteBackend> for RepositoryOnlyHostPolicy {
+    impl EntityPolicy<AiOrmBackend> for RepositoryOnlyHostPolicy {
         fn can_access_entity<'a>(
             &'a self,
             _context: Option<&'a async_graphql::Context<'_>>,
-            _database: &'a Database<DefaultWriteBackend>,
+            _database: &'a Database<AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _kind: EntityAccessKind,

@@ -86,7 +86,6 @@ pub struct AiSessionTitleWorkInput {
 }
 
 impl AiSessionTitleWorkInput {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         session_id: AiSessionId,
         text: String,

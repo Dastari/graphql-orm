@@ -111,8 +111,8 @@ impl AnthropicProvider {
     /// such as an approved gateway, a regional endpoint or a local fake server.
     ///
     /// The endpoint must be `http` or `https` with a host, no user
-    /// information, query or fragment, and a non-root path, and the deployment
-    /// policy must approve its normalized form for
+    /// information, query or fragment, and a non-root path of at most 2048 bytes. The
+    /// deployment policy must approve its normalized form for
     /// [`AiProviderKindInput::Anthropic`]. Redirects stay disabled and the
     /// request shape and version header are unchanged. Every egress manifest
     /// for a request must name the normalized endpoint as its destination.
@@ -122,13 +122,18 @@ impl AnthropicProvider {
     ///
     /// Returns [`ProviderError::InvalidConfiguration`] for an unsafe or denied
     /// endpoint, an invalid timeout or HTTP-client construction failure.
+    /// Returns [`ProviderError::InvalidEndpointPath`] when the path
+    /// does not meet this adapter's requirement.
     pub fn with_endpoint(
         config: AnthropicProviderConfig,
         endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
         secrets: Arc<dyn AiSecretStore>,
         endpoint: &str,
     ) -> Result<Self, ProviderError> {
-        let endpoint = super::endpoint::normalized_provider_endpoint(endpoint)?;
+        let endpoint = super::endpoint::normalized_provider_endpoint(
+            endpoint,
+            AiProviderKindInput::Anthropic,
+        )?;
         let guard = super::endpoint::ProviderEndpointGuard::authorize(
             endpoint_policy,
             AiProviderKindInput::Anthropic,

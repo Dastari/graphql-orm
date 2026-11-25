@@ -1,53 +1,53 @@
 [
   {
     "finding": "RUSTSEC-2023-0071:rsa:0.9.10",
-    "review_by": "2026-12-04",
-    "reason": "JWT verification/signing and optional SMB NTLM paths do not expose a private RSA decryption oracle; no fixed compatible release. Review crypto API/key reuse changes."
+    "review_by": "2026-12-23",
+    "reason": "Rechecked 2026-11-24: agql-auth 0.27.0 drops its direct rsa edge. JWT 11 RustCrypto, the ORM JWT 10 test dependency, SMB SSPI/picky and lock-only SQLx MySQL 0.8.6 still require ^0.9. The fix is in rsa 0.10.0. The router verifies public-key JWTs including via AccessTokenValidator, and the ORM consumes verified principals; only router tests and the fuzz harness sign with synthetic RSA keys. External agql-auth can issue RS256 tokens and sign RS256/PS256 client assertions, outside these runtime paths. SMB uses username/password NTLM with symmetric crypto. Host private-key decryption, key reuse or new private operations require a fresh review."
   },
   {
     "finding": "RUSTSEC-2023-0089:atomic-polyfill:1.0.3",
-    "review_by": "2026-12-04",
-    "reason": "Optional heapless/rstar spatial compatibility bridge; obsolete upstream owner. Retained in fixture/root resolution, not a claim of selected runtime reachability."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: unmaintained notice with no patched release. geo-types 0.7.19 weak serde features retain rstar 0.9/0.10/0.11 and heapless 0.7.17 in the locks; those compatibility paths are unselected. The built geo path uses rstar 0.12 and heapless 0.8, which uses portable-atomic. The archived crate has no drop-in upgrade and current geo-types still declares the older rstar ranges."
   },
   {
     "finding": "RUSTSEC-2024-0449:unsafe-libyaml:0.2.11",
-    "review_by": "2026-12-04",
-    "reason": "Hive telemetry/VRL serde_yaml owner is unmaintained; replacement crosses owning dependency/API boundaries. No universal unreachable claim."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: unmaintained notice with no patched release. Router locks select serde_yaml 0.9.34 via Datadog/libdd and the VRL build, and serde_yaml_ng 0.10.0 via Hive/VRL. Both retain unsafe-libyaml, including the YAML path of newer VRL, and switching to serde-saphyr requires owner migrations. The typed router supplies no Datadog exporter and loads its own JSON configuration; the notice remains applicable to the resolved parser and does not establish universal unreachability."
   },
   {
     "finding": "RUSTSEC-2026-0194:quick-xml:0.39.4",
-    "review_by": "2026-12-04",
-    "reason": "Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: the duplicate-attribute CPU fix starts at quick-xml 0.41 (Rust 1.79), accepted by object_store 0.14.1. Hive 0.2.19 and current 0.3.19 require object_store ^0.13.2, which selects quick-xml ^0.39. The router creates no Hive storage map; its optional persisted documents use a validated local JSON snapshot and cannot create an S3 XML reader. Standalone Hive and host storage extensions fall outside this exception."
   },
   {
     "finding": "RUSTSEC-2026-0195:quick-xml:0.39.4",
-    "review_by": "2026-12-04",
-    "reason": "Hive object_store 0.13 reader requires quick-xml 0.39; fixed owner 0.14 crosses its range. Typed router config excludes storage/credential XML initialization; host extensions invalidate this condition."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: the NsReader namespace-allocation fix starts at quick-xml 0.41 (Rust 1.79), accepted by object_store 0.14.1. Hive 0.2.19 and current 0.3.19 require object_store ^0.13.2, which selects quick-xml ^0.39. The router creates no Hive storage map; its optional persisted documents use a validated local JSON snapshot and cannot initialize the S3 credential reader. Standalone Hive and host storage extensions fall outside this exception."
   },
   {
     "finding": "RUSTSEC-2026-0253:lru:0.16.3",
-    "review_by": "2026-12-04",
-    "reason": "async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: async-graphql 7.2.1 requires lru ^0.16.2; Datadog 0.5.2 and libdd-sampling 6.0.0 require ^0.16.3. Current releases of those owners still exclude fixed 0.18.2 (Rust 1.85). Generated DataLoader::new selects NoCache and the typed router supplies no Datadog exporter. The AWS copy is already on 0.18.5. Host caches with panicking key destructors fall outside this exception."
   },
   {
     "finding": "RUSTSEC-2026-0253:lru:0.16.4",
-    "review_by": "2026-12-04",
-    "reason": "async-graphql/libdd retain incompatible old ranges; fixed lru starts at 0.18.2. Generated DataLoaders use NoCache; router does not initialize Datadog. Generic host caches remain exposed to panicking-key destructors."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: fixture async-graphql 7.2.1 requires lru ^0.16.2; pinned Hive 0.2.19 owners datadog-opentelemetry 0.5.2 and libdd-sampling 6.0.0 require ^0.16.3. Fixed 0.18.2 needs Rust 1.85 but is outside those ranges. Generated DataLoader::new selects NoCache, the cross-crate cache test selects HashMapCache, and build_hive_config supplies no Datadog exporter. Host-installed LRU caches with panicking key destructors remain outside this exception."
   },
   {
     "finding": "RUSTSEC-2026-0387:crypto-bigint:0.5.5",
-    "review_by": "2026-12-04",
-    "reason": "Pinned agql-auth/jsonwebtoken RustCrypto elliptic-curve path; no compatible fixed release. Existing owner acceptance excludes private EC operations; auth pin move requires maintainer approval."
+    "review_by": "2026-12-23",
+    "reason": "Rechecked 2026-11-24: agql-auth 0.27.0 and the router share jsonwebtoken 11.0.0 in the root lock. Their JWT 11 RustCrypto path and the ORM JWT 10 test dependency use p256/p384 0.13 and elliptic-curve 0.13.8, which requires crypto-bigint ^0.5. JWT 12 adopts the newer curves but crosses the current requirements. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. SMB also resolves the old curves via SSPI/picky, but the selected username/password NTLM path uses symmetric signing. S3 SigV4a is on 0.7.10. Existing owner acceptance excludes private EC operations."
   },
   {
     "finding": "RUSTSEC-2026-0441:pin-utils:0.1.0",
-    "review_by": "2026-12-04",
-    "reason": "aws-smithy-runtime (S3), sspi -> async-dnssd (optional SMB), and Hive reqwest-retry -> wasmtimer retain the unmaintained utility. Requires owning upstream migrations; maintenance status is not treated as a vulnerability exclusion."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: this is an unmaintained notice, including 0.1.1. aws-smithy-runtime 1.16.1+ (Rust 1.94.1) and wasmtimer 0.4.4+ migrate off pin-utils, but optional SMB sspi 0.16.1 still needs async-dnssd ^0.5 on macOS/iOS and every 0.5 release retains pin-utils. A complete removal needs a compatible SMB owner migration; no vulnerability is described by this notice."
   },
   {
     "finding": "RUSTSEC-2026-0459:libsqlite3-sys:0.30.1",
-    "review_by": "2026-12-04",
-    "reason": "Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical."
+    "review_by": "2027-02-23",
+    "reason": "Rechecked 2026-11-23: sqlx-sqlite 0.8.6 requires libsqlite3-sys ^0.30.1 and cross-crate-relations also pins =0.30.1. SQLx 0.9.1 (Rust 1.94) admits the fixed >=0.39.0 line (Rust 1.88) but changes the public SQLx dependency contract. GraphqlOrmBackupAdapter restores table/change records into a host-selected connection. This exception assumes the host controls writes to both the SQLite database and its sibling WAL; opening a less-trusted pair is outside scope."
   },
   {
     "finding": "RUSTSEC-2026-0543:chrono:0.4.45",

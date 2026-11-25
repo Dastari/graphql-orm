@@ -4,6 +4,9 @@ use crate::sqlx::{self, Row};
 use std::collections::BTreeSet;
 use std::ops::Range;
 
+#[path = "sqlite_column_drop.rs"]
+pub(crate) mod column_drop;
+
 type Keys = Vec<Vec<String>>;
 pub(crate) struct Directive {
     pub(crate) table: String,

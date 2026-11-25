@@ -369,7 +369,6 @@ pub enum AiSessionTitleActor {
 }
 
 impl AiSessionTitleActor {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -573,6 +572,7 @@ pub trait AiSessionService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -744,6 +744,7 @@ impl AiQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

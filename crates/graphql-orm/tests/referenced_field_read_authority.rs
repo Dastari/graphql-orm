@@ -538,6 +538,22 @@ mod ledgers {
             emit_fk = false
         )]
         pub vaults: Vec<RefVault>,
+        /// To-one relation to a root-guarded target, with its own field policy.
+        #[graphql(skip)]
+        #[graphql_orm(read_policy = "guarded.ledger.read")]
+        #[relation(target = "RefLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub guarded_ledger: Option<RefLedger>,
+        /// To-many relation to a root-guarded target, with its own field policy.
+        #[graphql(skip)]
+        #[graphql_orm(read_policy = "guarded.ledgers.read")]
+        #[relation(
+            target = "RefLedger",
+            from = "id",
+            to = "owner_id",
+            multiple,
+            emit_fk = false
+        )]
+        pub guarded_ledgers: Vec<RefLedger>,
     }
 
     #[derive(
@@ -669,6 +685,49 @@ async fn traversal_into_an_undeclared_category_requires_every_declared_read_scop
         assert!(granted.errors.is_empty(), "{query}: {:?}", granted.errors);
         let rendered = serde_json::to_string(&granted.data).unwrap();
         assert!(rendered.contains(leaked), "{query}: {rendered}");
+    }
+}
+
+/// The resolver catalogue (#544) names a root as a traversal's requirement
+/// only for the traversals the tests above and below show to enforce exactly
+/// that root's requirement.
+#[test]
+fn resolver_catalogue_references_match_the_enforced_traversal_requirements() {
+    use graphql_orm::graphql::orm::{GraphqlOperationKind, GraphqlResolverAuthorization};
+    let resolvers = ledgers::graphql_orm_resolver_catalog().expect("resolver catalogue");
+    let same_as = |root: &str| GraphqlResolverAuthorization::SameAsRoot {
+        kind: GraphqlOperationKind::Query,
+        field_name: root.to_owned(),
+    };
+    for (field, expected) in [
+        // `list` and `single_read` declare fixed scopes.
+        ("ledgers", same_as("refLedgers")),
+        ("ledger", same_as("refLedger")),
+        // No read category is declared: the auth mode alone applies.
+        ("vaults", same_as("refVaults")),
+        // The mapped category is undeclared while others are declared, so the
+        // traversal requires more than any one root.
+        ("archives", GraphqlResolverAuthorization::SubgraphOnly),
+        ("badge", GraphqlResolverAuthorization::SubgraphOnly),
+        // The same targets are `same_as_root` above, but a declared field
+        // policy on the relation is enforced by the subgraph and is stricter
+        // than any root's requirement.
+        ("guardedLedger", GraphqlResolverAuthorization::SubgraphOnly),
+        ("guardedLedgers", GraphqlResolverAuthorization::SubgraphOnly),
+    ] {
+        let relation = resolvers
+            .relation("RefOwner", field)
+            .unwrap_or_else(|| panic!("RefOwner.{field} is not catalogued"));
+        assert_eq!(relation.authorization, expected, "RefOwner.{field}");
+        assert_eq!(
+            relation.has_field_policy,
+            field.starts_with("guarded"),
+            "RefOwner.{field}"
+        );
+    }
+    let exported = resolvers.export_json().unwrap();
+    for scope in ["ledgers.list", "ledgers.read", "archives.", "badges.list"] {
+        assert!(!exported.contains(scope), "{scope} is disclosed");
     }
 }
 

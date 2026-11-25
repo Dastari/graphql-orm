@@ -22,6 +22,23 @@ supersedes: []
 Repository providers, backup manifests, object deduplication, and object storage backends belong in
 `graphql-orm-backup` and `graphql-orm-storage`, not in `graphql-orm`.
 
+## Externally managed backup and restore
+
+Use this setting for databases whose backup and restore are owned by another
+product. Set `DatabaseBuilder::externally_managed_backup_restore(true)` on
+every ORM handle connected to that database. For a handle created with a
+connection helper, call `database.with_externally_managed_backup_restore(true)`.
+
+The setting defaults to `false` on every backend. When enabled, backup
+snapshots, table and journal exports, row imports, full restores including
+dry runs, and explicit restore-state checks fail before database I/O. Read
+the typed error with `BackupRestoreExternallyManaged::from_error`. Its code
+is `BACKUP_RESTORE_EXTERNALLY_MANAGED`. The companion
+[backup adapter](../../../crates/graphql-orm-backup/docs/restore-semantics.md#externally-managed-databases)
+also refuses before repository I/O. Ordinary reads and writes continue under
+the existing schema and authorization policies. On SQL Server they run without
+[restore fencing](mssql.md#externally-managed-backup-and-restore).
+
 ## Metadata
 
 Generated entities expose backup metadata through `Entity::metadata()`. Applications can pass the
@@ -112,8 +129,8 @@ deleted and its readiness set to `building`, so search is refused until
 `backfill_runtime_search` rebuilds it (see
 [runtime search](runtime-search.md#backup-and-restore)). Static search documents are not rebuilt.
 
-SQL Server has no ORM restore. A host that restores it with its own statements records a
-[restore-in-progress marker](mssql.md#restore-in-progress-marker) instead.
+SQL Server has no ORM snapshot restore. Hosts that coordinate their own
+restore through the ORM use the [restore-in-progress marker](mssql.md#restore-in-progress-marker).
 
 A single-key table whose dependency targets its own key restores parent-first. Rows that
 parent-first order cannot place (rows on a self-reference cycle, and the rows below them) are

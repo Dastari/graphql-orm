@@ -20,8 +20,21 @@ compile_error!(
     "the initial graphql-orm-ai schema module requires exactly one backend; explicit multi-backend schema modules are planned"
 );
 
+/// ORM backend selected by this crate's persistence feature.
+#[cfg(feature = "sqlite")]
+pub type AiOrmBackend = graphql_orm::prelude::SqliteBackend;
+/// ORM backend selected by this crate's persistence feature.
+#[cfg(feature = "postgres")]
+pub type AiOrmBackend = graphql_orm::prelude::PostgresBackend;
+/// ORM backend selected by this crate's persistence feature.
+#[cfg(feature = "mssql")]
+pub type AiOrmBackend = graphql_orm::prelude::MssqlBackend;
+
+#[cfg(all(test, any(feature = "postgres", feature = "mssql")))]
+#[path = "../tests/support/durable_database.rs"]
+mod durable_database;
+
 mod access;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod agent_loop;
 mod approvals;
 mod attachments;
@@ -32,8 +45,6 @@ mod capability_delivery;
 mod configuration;
 mod content_protection;
 mod control_plane;
-// Used by the ORM persistence services, which exist for these backends only.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod custody_field_policy;
 mod dependent_effects;
 mod domain;
@@ -45,90 +56,48 @@ mod inbox;
 mod live_delta;
 #[cfg(feature = "local-harness")]
 mod local_harness;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod message_preview;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_attachments;
-#[cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#[cfg(feature = "provider-openai-core")]
 mod orm_background;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget_provisioning;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_checkpoints;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_context_compaction;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_coordinator;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_egress;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_inbox;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_live_delta;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_native_approvals;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_pricing;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_proposals;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
 mod orm_provider_session;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_read_bounds;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_restore;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_rules;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_run_cancellation;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_run_disposition;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runtime_recovery;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_activity;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_execution;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_title_work;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_sessions;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_skills;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_subscription_waits;
 mod orm_subscriptions;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised_coordinator;
 mod orm_support;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tool_result_preview;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_ui_intents;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_usage;
-#[cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#[cfg(feature = "provider-openai-core")]
 mod orm_webhooks;
 mod persisted_state;
 mod persistence;
@@ -137,7 +106,6 @@ mod principal_projection;
 mod proposals;
 mod provider;
 mod provider_activity;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod provider_calls;
 mod provider_projection;
 mod provider_run;
@@ -168,7 +136,6 @@ mod ui_intents;
 mod usage;
 
 pub use access::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use agent_loop::*;
 pub use approvals::*;
 pub use attachments::*;
@@ -199,88 +166,47 @@ pub use inbox::*;
 pub use live_delta::*;
 #[cfg(feature = "local-harness")]
 pub use local_harness::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_approvals::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_attachments::*;
-#[cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#[cfg(feature = "provider-openai-core")]
 pub use orm_background::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget_provisioning::{
     AI_DEPLOYMENT_ACTOR_KIND, AI_DEPLOYMENT_BUDGET_POLICY_ACTION, AiDeploymentActor,
     AiDeploymentBudgetPolicy, AiDeploymentBudgetPolicyOutcome, OrmAiBudgetPolicyProvisioner,
 };
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_checkpoints::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_configuration::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_context_compaction::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_coordinator::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_egress::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_inbox::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_live_delta::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_native_approvals::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_pricing::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_proposals::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_session::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_restore::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_rules::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_run_cancellation::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_run_disposition::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runtime_recovery::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_execution::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_retention::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_title_work::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_sessions::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_skills::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscription_waits::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised_coordinator::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tool_result_preview::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_ui_intents::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_usage::*;
-#[cfg(all(
-    any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai-core"
-))]
+#[cfg(feature = "provider-openai-core")]
 pub use orm_webhooks::*;
 pub use persistence::{
     AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
@@ -293,7 +219,6 @@ pub use principal_projection::{
 pub use proposals::*;
 pub use provider::*;
 pub use provider_activity::*;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use provider_calls::*;
 pub use provider_projection::*;
 pub use provider_run::*;
@@ -349,7 +274,6 @@ pub mod prelude {
         AiToolResultPreviewAuthorizer, AiUiIntentCatalog, AiUiIntentTypeDescriptor,
         AiUsageAccessPolicy, AiUsageService, DataClassification, SecretRef, ToolMaturity,
     };
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
         AiAdoptedAutomaticMutationBatch, AiAdoptedClassifiedMutationBatch,
         AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAdoptedSupervisedToolBatch,
@@ -387,10 +311,7 @@ pub mod prelude {
         OrmAiSupervisedResumeService, OrmAiToolCallResultPreviewService,
         OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub use crate::{
         AiOpenAiBackgroundReconciliationClaim, AiOpenAiBackgroundReconciliationLimits,
         AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundRetrievalAttempt,

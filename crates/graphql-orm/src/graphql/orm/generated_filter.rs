@@ -8,18 +8,26 @@ pub fn __gom_render_string_filter(
     f: &StringFilter,
     backend: DatabaseBackend,
     column: &str,
+    sql_type: &str,
     conditions: &mut Vec<String>,
     values: &mut Vec<SqlValue>,
 ) {
+    let comparison = |value: &String| {
+        if backend == DatabaseBackend::Mssql {
+            SqlValue::mssql_varchar_comparison(value.clone(), sql_type)
+        } else {
+            SqlValue::String(value.clone())
+        }
+    };
     if let Some(ref v) = f.eq {
         let placeholder = backend.placeholder(values.len() + 1);
         conditions.push(format!("{} = {}", column, placeholder));
-        values.push(super::SqlValue::String(v.clone()));
+        values.push(comparison(v));
     }
     if let Some(ref v) = f.ne {
         let placeholder = backend.placeholder(values.len() + 1);
         conditions.push(format!("{} != {}", column, placeholder));
-        values.push(super::SqlValue::String(v.clone()));
+        values.push(comparison(v));
     }
     if let Some(ref v) = f.contains {
         let placeholder = backend.placeholder(values.len() + 1);
@@ -46,7 +54,7 @@ pub fn __gom_render_string_filter(
                 .collect();
             conditions.push(format!("{} IN ({})", column, placeholders.join(", ")));
             for v in list {
-                values.push(super::SqlValue::String(v.clone()));
+                values.push(comparison(v));
             }
         }
     }
@@ -58,7 +66,7 @@ pub fn __gom_render_string_filter(
                 .collect();
             conditions.push(format!("{} NOT IN ({})", column, placeholders.join(", ")));
             for v in list {
-                values.push(super::SqlValue::String(v.clone()));
+                values.push(comparison(v));
             }
         }
     }
@@ -80,6 +88,56 @@ pub fn __gom_render_string_filter(
         conditions.push(backend.ci_like(column, &placeholder));
         values.push(super::SqlValue::String(pattern));
     }
+}
+
+/// Render exact SQL Server identity comparisons without changing the default
+/// collation-sensitive filters used by existing consumers.
+#[doc(hidden)]
+pub fn __gom_render_exact_mssql_string_filter(
+    f: &StringFilter,
+    backend: DatabaseBackend,
+    column: &str,
+    conditions: &mut Vec<String>,
+    values: &mut Vec<SqlValue>,
+) {
+    let mut equal = |value: &String| {
+        let value_bind = backend.placeholder(values.len() + 1);
+        let length_bind = backend.placeholder(values.len() + 2);
+        values.extend([
+            SqlValue::String(value.clone()),
+            SqlValue::String(value.clone()),
+        ]);
+        // SQL Server pads operands before equality, including under BIN2.
+        // The separate length predicate distinguishes trailing spaces.
+        format!(
+            "({column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({column}) = DATALENGTH({length_bind}))"
+        )
+    };
+    if let Some(value) = &f.eq {
+        conditions.push(equal(value));
+    }
+    if let Some(value) = &f.ne {
+        conditions.push(format!("NOT {}", equal(value)));
+    }
+    for (list, negated) in [(&f.in_list, false), (&f.not_in, true)] {
+        if let Some(list) = list {
+            if list.is_empty() {
+                if !negated {
+                    conditions.push("1 = 0".to_owned());
+                }
+            } else {
+                let comparisons = list.iter().map(&mut equal).collect::<Vec<_>>().join(" OR ");
+                let not = if negated { "NOT " } else { "" };
+                conditions.push(format!("{not}({comparisons})"));
+            }
+        }
+    }
+    let mut remaining = f.clone();
+    remaining.eq = None;
+    remaining.ne = None;
+    remaining.in_list = None;
+    remaining.not_in = None;
+    __gom_render_string_filter(&remaining, backend, column, "", conditions, values);
 }
 
 /// Append a generated number filter without changing clause or bind order.

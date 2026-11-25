@@ -7,8 +7,7 @@
 //! object metadata. Host applications supply entity metadata and column names;
 //! this module stays free of application domain assumptions.
 //!
-//! The `orm` feature requires the host application to enable exactly one
-//! `graphql-orm` backend feature (`sqlite` or `postgres`).
+//! Select the adapter backend with `orm-sqlite` or `orm-postgres`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,12 +15,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
-    BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
-    EntityMetadata, GraphqlOrmBackupRuntime, GraphqlOrmSchemaSnapshot,
-    RestoreContext as OrmRestoreContext, RestoreMode as OrmRestoreMode, ensure_sql_write_allowed,
-    stable_schema_hash,
+    BackupRestoreExternallyManaged, BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy,
+    DatabaseBackend, EntityBackupDescriptor, EntityMetadata, GraphqlOrmBackupRuntime,
+    GraphqlOrmSchemaSnapshot, OrmBackend, RestoreContext as OrmRestoreContext,
+    RestoreMode as OrmRestoreMode, ensure_sql_write_allowed, stable_schema_hash,
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, StorageByteStream};
@@ -34,7 +32,24 @@ use crate::{
     RestoreMode, collect_backup_stream,
 };
 
-/// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`].
+#[cfg(feature = "orm-sqlite")]
+type AdapterBackend = graphql_orm::SqliteBackend;
+#[cfg(feature = "orm-postgres")]
+type AdapterBackend = graphql_orm::PostgresBackend;
+#[cfg(not(any(feature = "orm-sqlite", feature = "orm-postgres")))]
+type AdapterBackend = graphql_orm::DefaultBackend;
+
+type Database = graphql_orm::db::Database<AdapterBackend>;
+
+fn require_orm_backup_restore(database: &Database) -> Result<(), BackupError> {
+    if database.backup_restore_is_externally_managed() {
+        Err(BackupRestoreExternallyManaged.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`](graphql_orm::db::Database).
 ///
 /// Full export and restore delegate to the `GraphqlOrmBackupRuntime`
 /// implementation shipped with `graphql-orm`. Incremental export and restore
@@ -126,6 +141,7 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if the migration version cannot be read or a
     /// configured column policy override is invalid.
     pub async fn current_schema_snapshot(&self) -> Result<GraphqlOrmSchemaSnapshot, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let migration_version = self.resolve_migration_version().await?;
         let mut snapshot = GraphqlOrmBackupRuntime::schema_snapshot(
             self.database.as_ref(),
@@ -192,6 +208,7 @@ impl OrmBackupAdapter {
     /// Returns [`BackupError`] if a column policy override is invalid or any
     /// clear statement or transaction fails.
     pub async fn clear_restore_target(&self) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("clear restore target"))?;
         let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
@@ -200,9 +217,9 @@ impl OrmBackupAdapter {
                 .cmp(&left.restore_order)
                 .then_with(|| right.table_name.cmp(&left.table_name))
         });
-        let backend = graphql_orm::graphql::orm::current_backend();
+        let backend = AdapterBackend::DIALECT;
 
-        if backend == graphql_orm::graphql::orm::DatabaseBackend::Sqlite {
+        if backend == DatabaseBackend::Sqlite {
             self.clear_restore_target_without_foreign_keys(&descriptors)
                 .await
         } else {
@@ -314,6 +331,10 @@ impl OrmBackupAdapter {
 
 #[async_trait]
 impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
+    fn ensure_backup_restore_allowed(&self) -> Result<(), BackupError> {
+        require_orm_backup_restore(&self.database)
+    }
+
     async fn schema_snapshot(&self) -> Result<GraphqlOrmBackupSchema, BackupError> {
         let snapshot = self.current_schema_snapshot().await?;
         Ok(GraphqlOrmBackupSchema {
@@ -324,15 +345,14 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let mut tx = self
             .database
             .pool()
             .begin()
             .await
             .map_err(database_error("begin target preflight"))?;
-        if graphql_orm::graphql::orm::current_backend()
-            == graphql_orm::graphql::orm::DatabaseBackend::Postgres
-        {
+        if AdapterBackend::DIALECT == DatabaseBackend::Postgres {
             graphql_orm::sqlx::query("SET LOCAL row_security = off")
                 .execute(&mut *tx)
                 .await
@@ -361,6 +381,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
     }
 
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         let mut descriptors = self.descriptors()?;
         descriptors.sort_by(|left, right| {
             left.export_order
@@ -398,6 +419,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         &self,
         _parent_snapshot_id: Uuid,
     ) -> Result<Vec<BackupChangeExport>, BackupError> {
+        self.ensure_backup_restore_allowed()?;
         Err(BackupError::UnsupportedOperation {
             operation: "incremental export requires a graphql-orm change journal integration"
                 .to_string(),
@@ -410,6 +432,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         export: Vec<BackupTableExport>,
         context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("restore rows"))?;
         let context = orm_restore_context(&context)?;
         let current_snapshot = self.current_schema_snapshot().await?;
@@ -464,6 +487,7 @@ impl GraphqlOrmBackupAdapter for OrmBackupAdapter {
         _changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        self.ensure_backup_restore_allowed()?;
         ensure_sql_write_allowed().map_err(database_error("restore incremental rows"))?;
         Err(BackupError::UnsupportedOperation {
             operation: "incremental restore requires a graphql-orm change journal integration"
@@ -581,6 +605,10 @@ impl OrmBackupObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for OrmBackupObjectIndex {
+    fn ensure_backup_allowed(&self) -> Result<(), BackupError> {
+        require_orm_backup_restore(&self.database)
+    }
+
     fn buffered_byte_limit(&self) -> BackupByteLimit {
         self.buffered_limit
     }
@@ -588,6 +616,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         tables: &[BackupTableExport],
     ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         let table = tables
             .iter()
             .find(|table| table.table_name == self.columns.table_name)
@@ -627,6 +656,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     }
 
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         let descriptor = self.object_table_descriptor()?;
         let mut snapshot = self
             .database
@@ -654,6 +684,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         _since_snapshot_id: Uuid,
     ) -> Result<Vec<BackupObjectRef>, BackupError> {
+        self.ensure_backup_allowed()?;
         Err(BackupError::UnsupportedOperation {
             operation:
                 "incremental object discovery requires a graphql-orm change journal integration"
@@ -662,6 +693,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     }
 
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError> {
+        self.ensure_backup_allowed()?;
         load_blob(
             self.store.as_ref(),
             &object.storage_key,
@@ -674,6 +706,7 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
         &self,
         object: &BackupObjectRef,
     ) -> Result<StorageByteStream, BackupError> {
+        self.ensure_backup_allowed()?;
         load_blob_stream(self.store.as_ref(), &object.storage_key).await
     }
 }
@@ -847,8 +880,8 @@ fn database_error(operation: &str) -> impl Fn(graphql_orm::Error) -> BackupError
 }
 
 fn quote_table_identifier(identifier: &str) -> String {
-    let backend = graphql_orm::graphql::orm::current_backend();
-    if backend == graphql_orm::graphql::orm::DatabaseBackend::Postgres {
+    let backend = AdapterBackend::DIALECT;
+    if backend == DatabaseBackend::Postgres {
         backend.render_table_identifier_path(identifier)
     } else {
         quote_identifier(identifier)

@@ -223,7 +223,6 @@ impl AiReplayableSubscriptionEvent {
         &self.data
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
             "eventId": self.event_id,
@@ -232,7 +231,6 @@ impl AiReplayableSubscriptionEvent {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn from_checkpoint_value(
         value: serde_json::Value,
     ) -> Result<Self, AiSubscriptionSourceError> {
@@ -275,7 +273,6 @@ pub struct AiReplayableSubscriptionOpenRequest {
 }
 
 impl AiReplayableSubscriptionOpenRequest {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(request: ToolGraphqlRequest, position: AiSubscriptionReplayPosition) -> Self {
         Self { request, position }
     }
@@ -354,7 +351,6 @@ pub enum AiSubscriptionSourceError {
 #[derive(Clone)]
 struct RegisteredReplaySource {
     descriptor: AiReplayableSubscriptionSourceDescriptor,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     source: Arc<dyn AiReplayableSubscriptionSource>,
 }
 
@@ -399,13 +395,9 @@ impl AiReplayableSubscriptionSourceRegistry {
             descriptor.target_id.clone(),
             descriptor.semantic_operation_fingerprint.clone(),
         );
-        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        #[cfg(not(any(feature = "sqlite", feature = "postgres", feature = "mssql")))]
         drop(source);
-        let registered = RegisteredReplaySource {
-            descriptor,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
-            source,
-        };
+        let registered = RegisteredReplaySource { descriptor, source };
         if self.sources.insert(key, registered).is_some() {
             return Err(AiError::AlreadyExists(
                 "replayable subscription source".to_owned(),
@@ -436,7 +428,6 @@ impl AiReplayableSubscriptionSourceRegistry {
             })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn resolve_compiled(
         &self,
         descriptor: &AiToolDescriptor,
@@ -465,7 +456,6 @@ impl AiReplayableSubscriptionSourceRegistry {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(Clone)]
 pub(crate) struct AiResolvedReplaySource {
     pub descriptor: AiReplayableSubscriptionSourceDescriptor,
@@ -532,7 +522,6 @@ mod tests {
         assert!(!tampered.has_valid_fingerprint());
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     #[test]
     fn boxed_event_payload_preserves_checkpoint_shape_and_round_trip() {
         let position = AiSubscriptionReplayPosition::new(

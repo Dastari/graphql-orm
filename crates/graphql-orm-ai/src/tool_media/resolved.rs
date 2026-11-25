@@ -143,7 +143,6 @@ impl AiResolvedToolImage {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_policy(
         &self,
         resolver: &str,

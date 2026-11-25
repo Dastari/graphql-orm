@@ -55,8 +55,131 @@ pub enum SqlValue {
     Bool(bool),
     /// Typed null for boolean values.
     BoolNull,
-    /// Untyped null used when a generated path has no more specific type.
+    /// Scalar with an explicitly declared SQL Server parameter type.
+    #[doc(hidden)]
+    MssqlTyped(MssqlTypedValue),
+    /// Compatibility null that binds as text, including on PostgreSQL and SQL Server.
+    ///
+    /// Use the variant that matches the destination type when it is known, such
+    /// as [`Self::UuidNull`] for a UUID or [`Self::BytesNull`] for binary data.
     Null,
+}
+
+/// A scalar together with its declared SQL Server type.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MssqlTypedValue {
+    value: Box<SqlValue>,
+    parameter_type: MssqlParameterType,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MssqlParameterType {
+    VarChar(Option<u16>),
+    Int,
+    SmallInt,
+    TinyInt,
+    UnsignedOverflow,
+}
+
+impl MssqlTypedValue {
+    pub(crate) fn value(&self) -> &SqlValue {
+        &self.value
+    }
+
+    #[cfg(feature = "mssql")]
+    pub(crate) fn parameter_type(&self) -> MssqlParameterType {
+        self.parameter_type
+    }
+}
+
+impl SqlValue {
+    /// Carry a canonical SQL Server integer declaration into the driver binder.
+    #[doc(hidden)]
+    pub fn with_mssql_type(self, sql_type: &str) -> Self {
+        let parameter_type = match &self {
+            Self::Int(_) | Self::IntNull => match sql_type {
+                "INT" => Some(MssqlParameterType::Int),
+                "SMALLINT" => Some(MssqlParameterType::SmallInt),
+                "TINYINT" => Some(MssqlParameterType::TinyInt),
+                _ => None,
+            },
+            _ => None,
+        };
+        match parameter_type {
+            Some(parameter_type) => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(self),
+                parameter_type,
+            }),
+            None => self,
+        }
+    }
+
+    // Limit VARCHAR conversion to printable ASCII, which round-trips
+    // through the SQL Server VARCHAR code pages without best-fit mapping.
+    pub(super) fn mssql_varchar_comparison(value: String, sql_type: &str) -> Self {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            && let Some(length) = sql_type
+                .strip_prefix("VARCHAR(")
+                .and_then(|s| s.strip_suffix(')'))
+        {
+            let length = if length == "MAX" {
+                None
+            } else if let Ok(length) = length.parse::<u16>()
+                && (1..=8000).contains(&length)
+            {
+                Some(length)
+            } else {
+                return Self::String(value);
+            };
+            return Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value)),
+                parameter_type: MssqlParameterType::VarChar(length),
+            });
+        }
+        Self::String(value)
+    }
+
+    /// Convert an unsigned SQL Server operand without wrapping through BIGINT.
+    ///
+    /// Preserve an out-of-range value until the fallible SQL bind boundary, so
+    /// infallible generated key builders can carry the refusal to the caller.
+    #[doc(hidden)]
+    pub fn mssql_unsigned(value: u64, sql_type: &str) -> Self {
+        let maximum = match sql_type {
+            "TINYINT" => u64::from(u8::MAX),
+            "SMALLINT" => i16::MAX as u64,
+            "INT" => i32::MAX as u64,
+            _ => i64::MAX as u64,
+        };
+        match i64::try_from(value) {
+            Ok(signed) if value <= maximum => Self::Int(signed),
+            _ => Self::MssqlTyped(MssqlTypedValue {
+                value: Box::new(Self::String(value.to_string())),
+                parameter_type: MssqlParameterType::UnsignedOverflow,
+            }),
+        }
+    }
+
+    pub(crate) fn into_policy_bind(self) -> Self {
+        match self {
+            Self::MssqlTyped(typed)
+                if typed.parameter_type != MssqlParameterType::UnsignedOverflow =>
+            {
+                *typed.value
+            }
+            value => value,
+        }
+    }
+
+    pub(crate) fn without_mssql_type(&self) -> &Self {
+        match self {
+            Self::MssqlTyped(typed) => typed.value(),
+            _ => self,
+        }
+    }
 }
 
 /// A temporal parameter with the text spelling used by compatibility binds.
@@ -241,6 +364,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
             | SqlValue::DecimalNull(_)
             | SqlValue::BoolNull
             | SqlValue::Null => "n".to_string(),
+            SqlValue::MssqlTyped(typed) => component(typed.value()),
         }
     }
 
@@ -1064,6 +1188,7 @@ impl MutationEvent {
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait DeferredEventEmitter<B: OrmBackend>: Send {
+    fn requires_commit(&self) -> bool;
     fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
@@ -1076,7 +1201,7 @@ trait PostCommitActionRunner<B: OrmBackend>: Send {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-struct DeferredEvent<T>
+struct DeferredEvent<T, const COMMIT_ONLY: bool>
 where
     T: Clone + Send + Sync + 'static,
 {
@@ -1084,11 +1209,15 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-impl<T, B> DeferredEventEmitter<B> for DeferredEvent<T>
+impl<T, B, const COMMIT_ONLY: bool> DeferredEventEmitter<B> for DeferredEvent<T, COMMIT_ONLY>
 where
     B: OrmBackend,
     T: Clone + Send + Sync + 'static,
 {
+    fn requires_commit(&self) -> bool {
+        COMMIT_ONLY
+    }
+
     fn emit(self: Box<Self>, db: &crate::db::Database<B>) {
         db.emit_event(self.event);
     }
@@ -1133,6 +1262,15 @@ struct TransactionExtensions(
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 impl TransactionExtensions {
+    fn get_or_insert_default<T: Default + Send + Sync + 'static>(&mut self) -> &mut T {
+        self.0
+            .get_or_insert_with(Default::default)
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()))
+            .downcast_mut::<T>()
+            .expect("transaction extensions are stored under their own type IDs")
+    }
+
     fn insert<T: Send + Sync + 'static>(&mut self, value: T) -> Option<T> {
         self.0
             .get_or_insert_with(Default::default)
@@ -1156,6 +1294,12 @@ impl TransactionExtensions {
             .map(|value| *value)
     }
 }
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[derive(Default)]
+struct CommitOnlyEventKeys(
+    std::collections::HashSet<(std::any::TypeId, crate::graphql::loaders::RelationKey)>,
+);
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
@@ -1428,14 +1572,27 @@ where
         &mut self,
         bound: super::query::RepositoryBound,
         offset: i64,
+        byte_budget: Option<&mut usize>,
     ) -> crate::Result<(Vec<T>, bool, usize)> {
-        let (rows, read) = if self.query.requires_in_memory_filtering() {
+        let (rows, read) = if let Some(byte_budget) = byte_budget {
+            let rows = self
+                .query
+                .fetch_candidates_in_transaction(
+                    self.hook_ctx,
+                    offset,
+                    bound.sql_limit(),
+                    Some(byte_budget),
+                )
+                .await?;
+            let read = rows.len();
+            (rows.into_iter().map(|(row, _)| row).collect(), read)
+        } else if self.query.requires_in_memory_filtering() {
             // As on the plain path, every candidate is read and the residual
             // in-memory predicates filter them before the page is sliced; the
             // candidate count is kept for a later rescan's budget.
             let candidates = self
                 .query
-                .fetch_candidates_in_transaction(self.hook_ctx, 0, None)
+                .fetch_candidates_in_transaction(self.hook_ctx, 0, None, None)
                 .await?;
             let read = candidates.len();
             (
@@ -1469,6 +1626,7 @@ where
         mut self,
         bound: super::query::RepositoryBound,
         take: Option<i64>,
+        mut byte_budget: Option<&mut usize>,
     ) -> crate::Result<Vec<T>> {
         use super::query::{RowCheckMode, VisibleRowScan};
         // Resolve the read decision once. Its predicate narrows the base query,
@@ -1491,8 +1649,15 @@ where
             .pagination_config()
             .with_read_scan_budget(self.max_scanned_rows)
             .max_scanned_rows;
-        if mode != RowCheckMode::Residual {
-            let (rows, refused, read) = self.fetch_window(bound, self.offset).await?;
+        // A byte-bounded callback may refuse any row, even after a complete
+        // SQL decision. Preflight its entire candidate range before decoding
+        // or calling row policy. Fixed SQL reads keep the exact window.
+        let preflight_scan = byte_budget.is_some()
+            && (mode != RowCheckMode::Fixed || self.query.requires_in_memory_filtering());
+        if mode != RowCheckMode::Residual && !preflight_scan {
+            let (rows, refused, read) = self
+                .fetch_window(bound, self.offset, byte_budget.as_deref_mut())
+                .await?;
             if !(mode == RowCheckMode::Authoritative && refused && take.is_some()) {
                 return Ok(rows);
             }
@@ -1504,6 +1669,11 @@ where
         // One budget covers the whole scan. An unlimited read also keeps its
         // fail-closed maximum, counted before row policy; whichever bound is
         // reached first refuses the read.
+        if let Some(remaining) = byte_budget {
+            self.query
+                .preflight_candidate_scan(self.hook_ctx, budget, remaining)
+                .await?;
+        }
         let overflow = match (take, bound) {
             (None, super::query::RepositoryBound::FailClosed(maximum)) => Some(maximum),
             _ => None,
@@ -1511,10 +1681,19 @@ where
         let mut scan =
             VisibleRowScan::new(self.offset, take, budget).with_overflow_after_skip(overflow);
         let mut visible = Vec::new();
-        while let Some(batch) = scan.next_batch()? {
+        while let Some(batch) = if preflight_scan {
+            scan.next_size_checked_batch()?
+        } else {
+            scan.next_batch()?
+        } {
             let rows = self
                 .query
-                .fetch_candidates_in_transaction(self.hook_ctx, batch.offset, Some(batch.fetch))
+                .fetch_candidates_in_transaction(
+                    self.hook_ctx,
+                    batch.offset,
+                    Some(batch.fetch),
+                    None,
+                )
                 .await?;
             let fetched = rows.len();
             let mut examined = 0;
@@ -1556,7 +1735,47 @@ where
             super::query::RepositoryBound::Exact(limit) => Some(limit),
             _ => None,
         };
-        self.fetch_visible(bound, take).await
+        self.fetch_visible(bound, take, None).await
+    }
+
+    /// Fetch a repository page after checking its candidate payload sizes.
+    ///
+    /// For reads requiring row callbacks or in-memory predicates, preflight all
+    /// candidates through the scan ceiling and its look-ahead row, or until
+    /// exhaustion. No payload is decoded and no per-row or per-field callback runs if
+    /// that range exceeds the byte budget. A row callback can deny any row,
+    /// so the preflight can include candidates beyond the returned page.
+    ///
+    /// The size probes and payload reads share the state-machine snapshot.
+    /// The byte limit charges column representations and inline Rust row size.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the byte budget is exceeded or when the read lacks an
+    /// exact row limit, a state-machine transaction, or a supported backend.
+    #[doc(hidden)]
+    pub async fn fetch_sql_page_with_byte_limit(self, mut maximum: usize) -> crate::Result<Vec<T>> {
+        use super::query::RepositoryBound;
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+
+        let database = self.hook_ctx.policy_database();
+        Self::ensure_read_access(database).await?;
+        let bound = database
+            .pagination_config()
+            .with_read_maximum(self.max_limit)
+            .repository_bound(self.limit)?;
+        let RepositoryBound::Exact(limit) = bound else {
+            return Err(sqlx_error_from_public(OrmPublicError::new(
+                OrmErrorCode::InvalidInput,
+            )));
+        };
+        if self.hook_ctx.transaction_mode() != TransactionMode::StateMachine {
+            return Err(sqlx_error_from_public(OrmPublicError::new(
+                OrmErrorCode::InvalidInput,
+            )));
+        }
+        self.fetch_visible(bound, Some(limit), Some(&mut maximum))
+            .await
     }
 
     /// Fetch the first visible row after [`Self::offset`].
@@ -1573,7 +1792,11 @@ where
             super::query::RepositoryBound::Exact(limit) => Some(limit.min(1)),
             _ => Some(1),
         };
-        Ok(self.fetch_visible(bound, take).await?.into_iter().next())
+        Ok(self
+            .fetch_visible(bound, take, None)
+            .await?
+            .into_iter()
+            .next())
     }
 
     pub async fn count(self) -> crate::Result<i64> {
@@ -2279,10 +2502,30 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
-        if super::ensure_write_allowed().is_err() {
-            return;
+        if super::ensure_write_allowed().is_ok() {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, false> { event }));
         }
-        self.deferred_events.push(Box::new(DeferredEvent { event }));
+    }
+
+    /// Queue one event per type and key that an explicit drain holds until commit.
+    pub(crate) fn queue_commit_only_event<T>(
+        &mut self,
+        event: T,
+        key: crate::graphql::loaders::RelationKey,
+    ) where
+        T: Clone + Send + Sync + 'static,
+    {
+        if super::ensure_write_allowed().is_ok()
+            && self
+                .extensions
+                .get_or_insert_default::<CommitOnlyEventKeys>()
+                .0
+                .insert((std::any::TypeId::of::<T>(), key))
+        {
+            self.deferred_events
+                .push(Box::new(DeferredEvent::<T, true> { event }));
+        }
     }
 
     /// Register an action to run once, after this transaction commits.
@@ -2324,7 +2567,10 @@ where
     }
 
     pub fn emit_queued_events(&mut self) {
-        for event in self.deferred_events.drain(..) {
+        for event in self
+            .deferred_events
+            .extract_if(.., |event| !event.requires_commit())
+        {
             event.emit(self.db);
         }
     }
@@ -3132,7 +3378,7 @@ where
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
+pub(super) async fn ensure_transaction_entity_write_access<T: Entity, B: WriteBackend>(
     db: &crate::db::Database<B>,
 ) -> crate::Result<()> {
     super::ensure_sql_write_allowed()?;
@@ -4532,6 +4778,7 @@ impl PartialEq for IndexDef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexPredicateDef {
     pub column: &'static str,
+    /// Closed-set literals. An empty list represents `IS NOT NULL`.
     pub values: &'static [&'static str],
 }
 
@@ -4569,6 +4816,15 @@ impl IndexDef {
             .get(index)
             .copied()
             .unwrap_or(IndexDirection::Asc)
+    }
+
+    /// Restrict the index to rows whose column is not null.
+    pub const fn where_not_null(mut self, column: &'static str) -> Self {
+        self.predicate = Some(IndexPredicateDef {
+            column,
+            values: &[],
+        });
+        self
     }
 
     pub const fn where_in(mut self, column: &'static str, values: &'static [&'static str]) -> Self {
@@ -4719,6 +4975,11 @@ impl EntityMetadata {
     where
         T: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema,
     {
+        // #851: record a guarded table from every typed constructor, so a
+        // conversion refuses it whichever path built the metadata first.
+        if T::__gom_guarded_update() {
+            super::__register_guarded_update_table(T::TABLE_NAME);
+        }
         Self {
             entity_name,
             table_name: T::TABLE_NAME,

@@ -170,7 +170,7 @@ SQL Server lanes, owned fixtures and the consumer examples).
 retain the commands of the qualified single ORM job, with explicit PostgreSQL,
 MSSQL and SQLite/MSSQL all-target check and warnings-denied Clippy coverage. The one intended
 difference is that the SQLite migration API fixture now runs only through the
-default suite's `migration_api_compatibility_fixture` driver, which ran the
+default suite's `consumer_fixtures::migration_api_compatibility_fixture` module, which ran the
 same command.
 
 CI runs the same three jobs, and also moves the fixture runner tests into a
@@ -181,8 +181,26 @@ requires the skip list to be exactly the non-ignored tests of the binaries
 `orm-fixtures` runs, and no other test to share one of those names. A local
 `cargo test -p graphql-orm` still runs everything.
 
+The grouped integration binaries retain the original module names. Pass the
+module prefix after `--` to select just its tests. For ignored owned-database
+tests, also pass `--ignored --test-threads=1` and use the backend feature for
+the lane.
+
+| Integration binary | Modules |
+| --- | --- |
+| `consumer_fixtures` | `backend_coexistence_fixture`, `migration_api_compatibility_fixture`, `relationship_capability_fixture`, `repository_aggregate_consumer_fixture` |
+| `postgres_owned_contracts` | `authorized_pagination_postgres`, `postgres_constraint_index_idempotency` |
+| `mssql_owned_connections` | `mssql_notifications`, `mssql_tls`, `mssql_transport` |
+| `sqlite_query_contracts` | `query_shape_selection`, `root_field_names` |
+| `sqlite_schema_contracts` | `generated_input_member_inventory`, `graphql_attribute_composition` |
+| `postgres_runtime_repository` | `repository_only_postgres`, `runtime_records_postgres`, `runtime_relations_postgres` |
+| `mssql_owned_queries` | `mssql_correctness`, `mssql_integration` |
+| `mssql_owned_writes` | `mssql_trigger_writes`, `mssql_writes` |
+| `sqlite_runtime_queries` | `runtime_queries`, `runtime_relations` |
+| `sqlite_migration_rebuilds` | `migration_sqlite_prefix`, `migration_sqlite_rebuild_preservation`, `migration_sqlite_unique_preservation` |
+
 The existing `sqlserver-security` job executes `scripts/run-owned-database-lanes.sh mssql`,
-including `mssql_integration` (MONEY reads and two-parent paginated relation loading),
+including the `mssql_integration` module in `mssql_owned_queries` (MONEY reads and two-parent paginated relation loading),
 then the ignored owned TLS and query-notification tests. Both CI and release use
 the same lane script. SQLite/PostgreSQL SQLx fixtures are gated to their supported
 backends. Fixtures that select a backend through mutually exclusive feature

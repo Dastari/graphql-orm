@@ -1528,34 +1528,22 @@ impl AiProviderCallPlan {
             })
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn provider_kind_ref(&self) -> &ProviderKind {
         &self.provider_kind
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn request_ref(&self) -> &ModelRequest {
         &self.request
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn budget_request(&self) -> &AiBudgetReservationRequest {
         &self.budget
     }
 
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn transfers(&self) -> &[AiEgressManifest] {
         &self.transfers
     }
@@ -1833,7 +1821,7 @@ impl AiProviderCallPlan {
         self.request.continuation.is_some()
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_plan(lease: &AiRunLease, scope: crate::AiScope, continuation: bool) -> Self {
         let model = "coordinator-test-model".to_owned();
         Self {
@@ -2008,7 +1996,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_supervised_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2036,7 +2024,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_automatic_mutation_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2215,10 +2203,7 @@ pub struct AiProviderUsageObservation {
 }
 
 impl AiProviderUsageObservation {
-    #[cfg(all(
-        any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai-core"
-    ))]
+    #[cfg(feature = "provider-openai-core")]
     pub(crate) fn for_background_response(
         scope: AiScope,
         model: impl Into<String>,
@@ -3346,7 +3331,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_result(
         lease: &AiRunLease,
         previous_response_id: Option<String>,
@@ -3443,7 +3428,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(test)]
     pub(crate) fn test_with_provider_session_claim(
         mut self,
         claim: crate::AiProviderSessionClaim,
@@ -3544,7 +3529,7 @@ impl AiProviderCallResult {
         }
     }
 
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn test_context_compaction_result(
         lease: &AiRunLease,
         provider_kind: ProviderKind,
@@ -3601,7 +3586,7 @@ impl AiProviderCallResult {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressManifest {
     AiEgressManifest {
         provider_profile_id: "test-profile".to_owned(),
@@ -3681,6 +3666,7 @@ pub struct AiProviderCallExecutor {
     failure_diagnostic_sink: Option<Arc<dyn AiProviderFailureDiagnosticSink>>,
     tool_result_source_service: Option<Arc<crate::OrmAiApplicationToolCallService>>,
     static_offering_deletion: Option<Arc<dyn crate::AiProviderSessionDeletionService>>,
+    compaction_selection: Option<Arc<dyn crate::AiRunExecutionSelectionReader>>,
 }
 
 // Transport fragment boundaries carry no semantic identity. Compact only
@@ -3762,6 +3748,7 @@ impl AiProviderCallExecutor {
             failure_diagnostic_sink: None,
             tool_result_source_service: None,
             static_offering_deletion: None,
+            compaction_selection: None,
         }
     }
 
@@ -3782,6 +3769,18 @@ impl AiProviderCallExecutor {
         }
         self.tool_result_source_service = Some(service);
         Ok(self)
+    }
+
+    /// Installs the fenced selection reader required before context-compaction transport.
+    ///
+    /// The ORM reader checks that the live run and session still carry the same pin.
+    /// Compaction requires a durable fence check from any custom reader.
+    pub fn with_context_compaction_selection_reader(
+        mut self,
+        reader: Arc<dyn crate::AiRunExecutionSelectionReader>,
+    ) -> Self {
+        self.compaction_selection = Some(reader);
+        self
     }
 
     /// Registers the owning exact deletion/absence adapter for static-offering resets.
@@ -4869,11 +4868,7 @@ impl AiProviderCallExecutor {
             .map(|tool| {
                 (
                     tool.tool_id.clone(),
-                    (
-                        tool.provider_name.clone(),
-                        tool.fingerprint.clone(),
-                        tool.parameters.clone(),
-                    ),
+                    crate::provider::ModelToolOffer::new(tool.clone()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -4924,6 +4919,37 @@ impl AiProviderCallExecutor {
             .runtime
             .resolve_dispatch_request(current.principal(), &plan.budget.scope, plan.request)
             .await;
+        if model_inference_manifest.purpose == crate::provider::CONTEXT_COMPACTION_PURPOSE {
+            let admission = async {
+                let reader = self
+                    .compaction_selection
+                    .as_ref()
+                    .ok_or(AiError::SessionExecutionUnavailable)?;
+                let selection = reader.selection_for_run(&lease).await?;
+                let provider = self
+                    .runtime
+                    .admit_context_compaction(
+                        current.principal(),
+                        &selection,
+                        &model_inference_manifest,
+                        dispatch_request.request(),
+                    )
+                    .await?;
+                Ok::<_, AiError>(crate::runtime::CompactionDispatchAdmission {
+                    provider,
+                    reader: reader.clone(),
+                    clock: self.clock.clone(),
+                    lease: lease.clone(),
+                    selection,
+                })
+            }
+            .await;
+            let Ok(admission) = admission else {
+                self.release_unstarted(&lease, &reservation).await?;
+                return Err(AiError::PreTransportProviderFailed);
+            };
+            context.set_compaction_admission(admission);
+        }
         // Read from the same registered provider that sends the request: the
         // OpenAI adapter sends `store` equal to this declaration.
         let provider_retains_responses = self
@@ -5161,13 +5187,11 @@ impl AiProviderCallExecutor {
                     if completed_tool_calls.contains_key(call_id) {
                         return Err(AiError::ProviderFailed);
                     }
-                    let Some((provider_name, fingerprint, argument_schema)) =
-                        offered_tools.get(tool_id)
-                    else {
+                    let Some(offer) = offered_tools.get(tool_id) else {
                         return Err(AiError::ProviderFailed);
                     };
-                    let validator = jsonschema::validator_for(argument_schema)
-                        .map_err(|_| AiError::ProviderFailed)?;
+                    let validator = offer.validator().map_err(|_| AiError::ProviderFailed)?;
+                    let definition = offer.definition();
                     if !validator.is_valid(arguments) {
                         let rejected = if let Some(responder) = &dynamic_responder {
                             responder
@@ -5186,8 +5210,8 @@ impl AiProviderCallExecutor {
                             call_id: call_id.clone(),
                             tool_id: crate::AiToolId::parse(tool_id.clone())
                                 .map_err(|_| AiError::ProviderFailed)?,
-                            provider_name: provider_name.clone(),
-                            tool_fingerprint: fingerprint.clone(),
+                            provider_name: definition.provider_name.clone(),
+                            tool_fingerprint: definition.fingerprint.clone(),
                             arguments: arguments.clone(),
                         },
                     );
@@ -5881,11 +5905,9 @@ mod tests {
     };
 
     use super::*;
-    #[cfg(feature = "provider-openai-core")]
-    use agql_auth::FixedClock;
     use agql_auth::{
-        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
-        SessionContext, SystemClock,
+        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, FixedClock,
+        ResolvedPrincipal, SessionContext, SystemClock,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -6705,15 +6727,22 @@ mod tests {
     #[derive(Default)]
     struct TestRuleResolver {
         fingerprint_version: AtomicUsize,
+        renew_during_adoption: std::sync::Mutex<Option<OrmAiRunService>>,
+        renewed_lease: std::sync::Mutex<Option<AiRunLease>>,
     }
 
     #[async_trait]
     impl AiAgentRuleResolver for TestRuleResolver {
         async fn resolve_rules(
             &self,
-            _lease: &AiRunLease,
+            lease: &AiRunLease,
             scope: &AiScope,
         ) -> Result<AiAgentRuleResolution, AiError> {
+            let service = self.renew_during_adoption.lock().unwrap().take();
+            if let Some(service) = service {
+                let renewed = service.heartbeat(lease).await?;
+                *self.renewed_lease.lock().unwrap() = Some(renewed);
+            }
             let rules = test_rules_with_fingerprint(
                 scope.clone(),
                 if self.fingerprint_version.load(Ordering::SeqCst) == 0 {
@@ -6723,6 +6752,73 @@ mod tests {
                 },
             );
             AiAgentRuleResolution::new(rules, OffsetDateTime::now_utc())
+        }
+    }
+
+    struct CompactionAdmissionResolver {
+        admitted: AtomicBool,
+        provider: std::sync::Mutex<Arc<dyn crate::AiProvider>>,
+        expire_during_admission: std::sync::Mutex<Option<FixedClock>>,
+    }
+
+    #[async_trait]
+    impl crate::AiSessionExecutionSelectionResolver for CompactionAdmissionResolver {
+        async fn resolve(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            requested: Option<&crate::AiSessionExecutionSelectionInput>,
+        ) -> Result<crate::AiSessionExecutionSelection, AiError> {
+            let requested = requested.ok_or(AiError::SessionExecutionUnavailable)?;
+            if !self.admitted.load(Ordering::SeqCst) {
+                return Err(AiError::SessionExecutionUnavailable);
+            }
+            let clock = self.expire_during_admission.lock().unwrap().take();
+            if let Some(clock) = clock {
+                tokio::task::yield_now().await;
+                clock.advance_seconds(3600);
+            }
+            crate::AiSessionExecutionSelection::new(
+                requested.provider.into(),
+                requested.profile_id.clone(),
+                requested.model.clone(),
+                requested.reasoning_effort,
+            )
+        }
+
+        fn compaction_provider(
+            &self,
+            _: &crate::AiSessionExecutionSelection,
+        ) -> Option<Arc<dyn crate::AiProvider>> {
+            Some(self.provider.lock().unwrap().clone())
+        }
+    }
+
+    struct CompactionSelectionReader {
+        selection: crate::AiSessionExecutionSelection,
+        durable: crate::OrmAiRunExecutionSelectionReader,
+    }
+
+    #[async_trait]
+    impl crate::AiRunExecutionSelectionReader for CompactionSelectionReader {
+        async fn selection_for_run(
+            &self,
+            _: &AiRunLease,
+        ) -> Result<crate::AiSessionExecutionSelection, AiError> {
+            Ok(self.selection.clone())
+        }
+
+        async fn verify_compaction_fence(
+            &self,
+            lease: &AiRunLease,
+            selection: &crate::AiSessionExecutionSelection,
+        ) -> Result<(), AiError> {
+            crate::AiRunExecutionSelectionReader::verify_compaction_fence(
+                &self.durable,
+                lease,
+                selection,
+            )
+            .await
         }
     }
 
@@ -6741,6 +6837,7 @@ mod tests {
         refusal: Arc<AtomicUsize>,
         completed_executions: Arc<AtomicUsize>,
         principal_resolutions: Arc<AtomicUsize>,
+        compaction_admission: Arc<CompactionAdmissionResolver>,
         generated_query_id: Option<AiToolId>,
         generated_query_fingerprint: Option<String>,
         generated_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -7522,6 +7619,12 @@ mod tests {
             generated_target_policy.clone(),
             Arc::new(AllowTools(tool_policy_version.clone())),
         );
+        let provider = provider.unwrap_or_else(|| Arc::new(mock.clone()));
+        let compaction_admission = Arc::new(CompactionAdmissionResolver {
+            admitted: AtomicBool::new(true),
+            provider: std::sync::Mutex::new(provider.clone()),
+            expire_during_admission: std::sync::Mutex::new(None),
+        });
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(CountingResolver {
                 principal: principal.clone(),
@@ -7567,7 +7670,11 @@ mod tests {
             .secret_store(Arc::new(EnvironmentSecretStore::new()))
             .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
             .content_protector(Arc::new(DatabaseManagedContentProtector))
-            .provider(provider.unwrap_or_else(|| Arc::new(mock.clone())))
+            .provider_with_compaction_admission(
+                provider,
+                "mock-profile",
+                compaction_admission.clone(),
+            )
             .expect("mock provider should register")
             .build()
             .expect("test runtime should build");
@@ -7591,6 +7698,7 @@ mod tests {
             refusal,
             completed_executions,
             principal_resolutions,
+            compaction_admission,
             generated_query_id,
             generated_query_fingerprint,
             generated_target_policy,
@@ -8211,6 +8319,155 @@ mod tests {
             false,
         )
         .expect("governed hosted search should coexist with retained dynamic tools");
+    }
+
+    #[tokio::test]
+    async fn compaction_readmits_the_model_and_rejects_a_replacement_adapter_before_dispatch() {
+        for (profile, admitted, dispatched) in [
+            ("mock-profile", false, false),
+            ("retired-profile", true, false),
+            ("mock-profile", true, true),
+        ] {
+            check_compaction_dispatch(profile, admitted, false, false, dispatched).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_a_same_profile_replacement_adapter() {
+        check_compaction_dispatch("mock-profile", true, true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_a_lease_that_expires_during_host_admission() {
+        check_compaction_dispatch("mock-profile", true, false, true, false).await;
+    }
+
+    async fn check_compaction_dispatch(
+        profile: &str,
+        admitted: bool,
+        replaces_adapter: bool,
+        expires_during_admission: bool,
+        dispatched: bool,
+    ) {
+        use crate::{AiProvider as _, ModelReasoningEffort, ModelReasoningEffortProfile};
+        let mock = MockProvider::new(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("summary".into()),
+            },
+            ProviderEvent::TextDelta {
+                text: "summary".into(),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("summary".into()),
+            },
+        ]);
+        let capabilities = mock.capabilities();
+        let mock = mock.with_capabilities(crate::ProviderCapabilities {
+            reasoning_effort_profiles: vec![
+                ModelReasoningEffortProfile::new(
+                    "mock-model",
+                    [ModelReasoningEffort::Low],
+                    ModelReasoningEffort::Low,
+                )
+                .unwrap(),
+            ],
+            ..capabilities
+        });
+        let fixture = fixture_with_provider(mock).await;
+        let mut plan = plan(&fixture);
+        plan.request.reasoning_effort = ModelReasoningEffort::Low;
+        plan.budget.reasoning_effort = ModelReasoningEffort::Low;
+        plan.transfers[0].provider_profile_id = profile.to_owned();
+        plan.transfers[0].purpose = crate::provider::CONTEXT_COMPACTION_PURPOSE.to_owned();
+        let selection = crate::AiSessionExecutionSelection::new(
+            plan.provider_kind.clone(),
+            profile,
+            plan.request.model.as_str(),
+            ModelReasoningEffort::Low,
+        )
+        .unwrap();
+        let encoded = selection.encode().unwrap();
+        AiSessionRecord::update_by_id(
+            &fixture.database,
+            &fixture.lease.session_id().0,
+            crate::persistence::UpdateAiSessionRecordInput {
+                execution_selection: Some(Some(encoded.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        AiRunRecord::update_by_id(
+            &fixture.database,
+            &fixture.lease.run_id().0,
+            crate::persistence::UpdateAiRunRecordInput {
+                execution_selection: Some(Some(encoded)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = crate::orm_runs::lease_from_record(&run).unwrap();
+        let plan = AiProviderCallPlan::new(
+            plan.provider_kind,
+            plan.request,
+            plan.budget,
+            plan.transfers,
+            plan.correlation_id,
+        )
+        .expect("pinned compaction plan should validate");
+        // Change host admission after constructing the request and before dispatch.
+        fixture
+            .compaction_admission
+            .admitted
+            .store(admitted, Ordering::SeqCst);
+        if replaces_adapter {
+            // Both routes have the same kind, profile, and model. The
+            // registered adapter is a different instance from the approved one.
+            *fixture.compaction_admission.provider.lock().unwrap() =
+                Arc::new(MockProvider::new(vec![]).with_capabilities(fixture.mock.capabilities()));
+        }
+        let clock = FixedClock::new(OffsetDateTime::now_utc());
+        if expires_during_admission {
+            *fixture
+                .compaction_admission
+                .expire_during_admission
+                .lock()
+                .unwrap() = Some(clock.clone());
+        }
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(clock.clone()),
+            AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+        )
+        .with_context_compaction_selection_reader(Arc::new(CompactionSelectionReader {
+            selection,
+            durable: crate::OrmAiRunExecutionSelectionReader::new(
+                fixture.database.clone(),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(AllowAccess),
+                Arc::new(clock),
+            ),
+        }));
+        let result = executor.execute(&lease, plan).await;
+        if dispatched {
+            result.expect("the admitted profile and model should dispatch");
+        } else {
+            assert!(matches!(result, Err(AiError::PreTransportProviderFailed)));
+        }
+        assert_eq!(fixture.mock.request_count(), u64::from(dispatched));
     }
 
     fn plan(fixture: &Fixture) -> AiProviderCallPlan {
@@ -11591,6 +11848,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),
@@ -14474,13 +14733,11 @@ mod tests {
     /// Hides tool call index 0 from every read.
     struct HideFirstToolCall;
 
-    impl graphql_orm::graphql::orm::RowPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
-        for HideFirstToolCall
-    {
+    impl graphql_orm::graphql::orm::RowPolicy<crate::AiOrmBackend> for HideFirstToolCall {
         fn can_read_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _db: &'a Database<crate::AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -14495,7 +14752,7 @@ mod tests {
         fn can_write_row<'a>(
             &'a self,
             _ctx: Option<&'a async_graphql::Context<'_>>,
-            _db: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _db: &'a Database<crate::AiOrmBackend>,
             _entity_name: &'static str,
             _policy_key: Option<&'static str>,
             _surface: graphql_orm::graphql::orm::EntityAccessSurface,
@@ -14509,13 +14766,11 @@ mod tests {
     #[derive(Clone)]
     struct RefuseCandidateReads;
 
-    impl graphql_orm::graphql::orm::EntityPolicy<graphql_orm::graphql::orm::DefaultWriteBackend>
-        for RefuseCandidateReads
-    {
+    impl graphql_orm::graphql::orm::EntityPolicy<crate::AiOrmBackend> for RefuseCandidateReads {
         fn can_access_entity<'a>(
             &'a self,
             _context: Option<&'a async_graphql::Context<'_>>,
-            _database: &'a Database<graphql_orm::graphql::orm::DefaultWriteBackend>,
+            _database: &'a Database<crate::AiOrmBackend>,
             entity_name: &'static str,
             _policy_key: Option<&'static str>,
             kind: graphql_orm::graphql::orm::EntityAccessKind,
@@ -16837,10 +17092,45 @@ mod tests {
             .expect("linked stateless batch should be adoptable");
         assert_eq!(adopted.provider_turns(), 1);
         assert_eq!(adopted.total_tool_calls(), 1);
+        *rule_resolver.renew_during_adoption.lock().unwrap() = Some(fixture.run_service.clone());
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&lease).await,
+            Err(AiError::Conflict)
+        ));
+        let lease = rule_resolver.renewed_lease.lock().unwrap().take().unwrap();
+        {
+            let clock = FixedClock::new(lease.lease_expires_at() - Duration::SECOND);
+            let service = OrmAiRunService::new(
+                fixture.database.clone(),
+                Arc::new(clock.clone()),
+                AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+                    .unwrap(),
+            );
+            // Hold the in-memory store's only connection until the lease expires.
+            let connection = fixture.database.pool().acquire().await.unwrap();
+            let mut consume = std::pin::pin!(service.consume_adoption_checkpoint(
+                &lease,
+                checkpoint_id,
+                "tool_batch_persisted",
+            ));
+            assert!(futures::poll!(consume.as_mut()).is_pending());
+            clock.advance_seconds(1);
+            drop(connection);
+            assert!(matches!(consume.await, Err(AiError::Conflict)));
+            let row = AiRunRecord::find_by_id(&fixture.database, &lease.run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.latest_checkpoint_id, Some(checkpoint_id));
+            assert_eq!(
+                row.lease_expires_at,
+                Some(lease.lease_expires_at().unix_timestamp())
+            );
+        }
         let consumed = checkpoint_service
             .consume_before_provider(&lease, checkpoint_id)
             .await
-            .expect("same generation should consume the stateless checkpoint");
+            .expect("the renewed fence should consume the stateless checkpoint");
         assert_eq!(consumed.latest_checkpoint_id(), None);
 
         let descriptor = fixture
@@ -17247,6 +17537,11 @@ mod tests {
             .expect("replacement claim should succeed")
             .expect("stateless checkpoint should be immediately eligible");
         assert_eq!(replacement.lease_generation(), 2);
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&replacement).await,
+            Err(AiError::Conflict)
+        ));
+        let replacement = fixture.run_service.start(&replacement).await.unwrap();
         let restored = checkpoint_service
             .adopt_tool_batch(&replacement)
             .await
@@ -17363,6 +17658,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),
@@ -17701,6 +17998,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: Vec::new(),
                 allowed_acr: Vec::new(),
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: agql_auth::AssuranceMatchMode::All,
             },
             Arc::new(ProtectionPolicy),

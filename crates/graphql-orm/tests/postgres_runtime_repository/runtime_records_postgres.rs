@@ -1,0 +1,338 @@
+//! Owned disposable PostgreSQL conformance for runtime-row decoding.
+
+use graphql_orm::graphql::orm::{
+    CollectionId, FieldId, PostgresBackend, RuntimeCollection, RuntimeDateTime, RuntimeField,
+    RuntimeNullPlacement, RuntimeOrderDirection, RuntimeOrderInput, RuntimeOrderTerm,
+    RuntimePageRequest, RuntimeProjection, RuntimeQueryLimits, RuntimeRecord,
+    RuntimeRecordErrorCode, RuntimeRowDecoder, RuntimeScalarOperator, RuntimeSchema, RuntimeValue,
+    RuntimeValueKind, ValidatedRuntimeSchema,
+};
+use graphql_orm::sqlx::Connection;
+
+use super::owned_postgres::{OwnedPostgres, POSTGRES_16_IMAGE};
+
+const _: () = assert!(<PostgresBackend as RuntimeRowDecoder>::RUNTIME_ROW_DECODING_SUPPORTED);
+
+fn cid(value: &str) -> CollectionId {
+    CollectionId::new(value).expect("test collection ID")
+}
+
+fn fid(value: &str) -> FieldId {
+    FieldId::new(value).expect("test field ID")
+}
+
+fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
+    RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
+        id: fid(id),
+        api_name: id.to_string(),
+        physical_column: column.to_string(),
+        value_kind: kind,
+        nullable,
+        unique: false,
+        filterable: true,
+        sortable: true,
+        generated: false,
+        default: None,
+        format: None,
+        auto_timestamp: None,
+        auto_actor: None,
+    }
+}
+
+fn schema() -> ValidatedRuntimeSchema {
+    let id = field("customer_id", "id", RuntimeValueKind::Integer, false);
+    RuntimeSchema {
+        repository_only: false,
+        format_version: 1,
+        collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
+            description: None,
+            classification: None,
+            id: cid("customers"),
+            api_type_name: "Customer".to_string(),
+            api_plural_name: "Customers".to_string(),
+            physical_table: "runtime_customers".to_string(),
+            primary_key: vec![id.id.clone()],
+            append_only: false,
+            retention_purge: false,
+            fields: vec![
+                id.clone(),
+                field("active", "active", RuntimeValueKind::Boolean, false),
+                field("count", "count_value", RuntimeValueKind::Integer, false),
+                field("score", "score", RuntimeValueKind::Float, false),
+                field("name", "name", RuntimeValueKind::String, false),
+                field("uid", "uid", RuntimeValueKind::Uuid, false),
+                field("document", "document", RuntimeValueKind::Json, false),
+                field("payload", "payload", RuntimeValueKind::Bytes, false),
+                field(
+                    "happened_at",
+                    "happened_at",
+                    RuntimeValueKind::DateTime,
+                    false,
+                ),
+                field("note", "note", RuntimeValueKind::String, true),
+            ],
+            relations: Vec::new(),
+            indexes: Vec::new(),
+            composite_unique: Vec::new(),
+            default_order: vec![RuntimeOrderTerm {
+                field: id.id,
+                direction: RuntimeOrderDirection::Asc,
+            }],
+            label_fields: Vec::new(),
+            search: None,
+        }],
+    }
+    .validate()
+    .unwrap_or_else(|diagnostics| panic!("valid test schema: {diagnostics}"))
+}
+
+fn projection(schema: &ValidatedRuntimeSchema) -> RuntimeProjection {
+    schema
+        .resolve_projection_ids(
+            &cid("customers"),
+            &[
+                fid("customer_id"),
+                fid("active"),
+                fid("count"),
+                fid("score"),
+                fid("name"),
+                fid("uid"),
+                fid("document"),
+                fid("payload"),
+                fid("happened_at"),
+                fid("note"),
+            ],
+        )
+        .expect("valid projection")
+}
+
+async fn decode_postgres(
+    connection: &mut graphql_orm::sqlx::PgConnection,
+    projection: &RuntimeProjection,
+) -> Result<RuntimeRecord, Box<dyn std::error::Error>> {
+    graphql_orm::sqlx::query(
+        "CREATE TEMPORARY TABLE runtime_customers (
+            id BIGINT NOT NULL,
+            active BOOLEAN NOT NULL,
+            count_value BIGINT NOT NULL,
+            score DOUBLE PRECISION NOT NULL,
+            name TEXT NOT NULL,
+            uid UUID NOT NULL,
+            document JSONB NOT NULL,
+            payload BYTEA NOT NULL,
+            happened_at TIMESTAMPTZ NOT NULL,
+            note TEXT NULL
+        )",
+    )
+    .execute(&mut *connection)
+    .await?;
+    graphql_orm::sqlx::query(
+        "INSERT INTO runtime_customers VALUES (
+            9223372036854775807, TRUE, -9223372036854775808, 12.5, 'Māori 🦀',
+            '67e55044-10b1-426f-9247-bb680e5fe0c8',
+            '{\"a\":[1,true],\"z\":\"雪\"}'::jsonb,
+            decode('0001feff', 'hex'),
+            '2026-07-15T12:34:56.123456789+10:00'::timestamptz,
+            NULL
+        )",
+    )
+    .execute(&mut *connection)
+    .await?;
+    let row = graphql_orm::sqlx::query(
+        "SELECT id, active, count_value, score, name, uid, document, payload, happened_at, note,
+                'ignored' AS unexpected_extra
+         FROM runtime_customers",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(projection.decode_row::<PostgresBackend>(&row)?)
+}
+
+#[tokio::test]
+#[ignore = "creates and owns a disposable Docker PostgreSQL container"]
+async fn disposable_postgres_runtime_records_match_sqlite_logically_and_fail_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
+    let schema = schema();
+    let projection = projection(&schema);
+    let postgres_record = decode_postgres(&mut connection, &projection).await?;
+    assert_eq!(postgres_record.collection_id(), &cid("customers"));
+
+    let missing = graphql_orm::sqlx::query("SELECT 1 AS another_column")
+        .fetch_one(&mut connection)
+        .await?;
+    assert_eq!(
+        projection
+            .decode_row::<PostgresBackend>(&missing)
+            .unwrap_err()
+            .code(),
+        RuntimeRecordErrorCode::MissingColumn
+    );
+    let wrong_type = graphql_orm::sqlx::query(
+        "SELECT id::text AS id, active, count_value, score, name, uid, document, payload,
+                happened_at, note FROM runtime_customers",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    assert_eq!(
+        projection
+            .decode_row::<PostgresBackend>(&wrong_type)
+            .unwrap_err()
+            .code(),
+        RuntimeRecordErrorCode::BackendTypeMismatch
+    );
+
+    #[cfg(feature = "sqlite")]
+    {
+        use graphql_orm::graphql::orm::SqliteBackend;
+        let mut sqlite = graphql_orm::sqlx::SqliteConnection::connect("sqlite::memory:").await?;
+        let row = graphql_orm::sqlx::query(
+            "SELECT 9223372036854775807 AS id, 1 AS active,
+                    -9223372036854775808 AS count_value, 12.5 AS score, 'Māori 🦀' AS name,
+                    '67e55044-10b1-426f-9247-bb680e5fe0c8' AS uid,
+                    '{\"a\":[1,true],\"z\":\"雪\"}' AS document, x'0001feff' AS payload,
+                    '2026-07-15T12:34:56.123456789+10:00' AS happened_at, NULL AS note",
+        )
+        .fetch_one(&mut sqlite)
+        .await?;
+        let sqlite_record = projection.decode_row::<SqliteBackend>(&row)?;
+        assert_eq!(postgres_record, sqlite_record);
+    }
+
+    drop(connection);
+    drop(owned);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "creates and owns a disposable Docker PostgreSQL container"]
+async fn disposable_postgres_runtime_query_filters_pages_and_counts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
+    let database = graphql_orm::db::Database::connect_postgres(&owned.url).await?;
+    graphql_orm::sqlx::query(
+        "CREATE TABLE runtime_customers (
+            id BIGINT PRIMARY KEY, active BOOLEAN NOT NULL, count_value BIGINT NOT NULL,
+            score DOUBLE PRECISION NOT NULL, name TEXT NOT NULL, uid UUID NOT NULL,
+            document JSONB NOT NULL, payload BYTEA NOT NULL,
+            happened_at TIMESTAMPTZ NOT NULL, note TEXT NULL
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+    for id in 1_i64..=4 {
+        graphql_orm::sqlx::query(
+            "INSERT INTO runtime_customers VALUES (
+                $1, TRUE, $1, $1::double precision, $2,
+                '67e55044-10b1-426f-9247-bb680e5fe0c8', '{}'::jsonb,
+                decode('ff', 'hex'), $3::timestamptz, NULL
+            )",
+        )
+        .bind(id)
+        .bind(format!("customer-{id}"))
+        .bind(format!("2026-07-1{id}T00:00:00Z"))
+        .execute(database.pool())
+        .await?;
+    }
+
+    let schema = schema();
+    let collection = schema.resolve_collection(&cid("customers"))?;
+    let id = schema.resolve_field(&collection, &fid("customer_id"))?;
+    let name = schema.resolve_field(&collection, &fid("name"))?;
+    let happened = schema.resolve_field(&collection, &fid("happened_at"))?;
+    let projection = schema.resolve_projection(&collection, &[id.clone(), name.clone()])?;
+    let limits = RuntimeQueryLimits::default();
+    let filter = schema.runtime_compare(
+        &collection,
+        &happened,
+        RuntimeScalarOperator::Gte,
+        RuntimeValue::DateTime(RuntimeDateTime::parse("2026-07-12T00:00:00Z")?),
+        limits,
+    )?;
+    let order = schema.runtime_order(
+        &collection,
+        Some(vec![RuntimeOrderInput {
+            field: name,
+            direction: RuntimeOrderDirection::Desc,
+            nulls: RuntimeNullPlacement::Last,
+        }]),
+        limits,
+    )?;
+    let request = schema.runtime_read_request(
+        &collection,
+        &projection,
+        Some(filter),
+        order,
+        RuntimePageRequest::first(2, None),
+        true,
+        limits,
+    )?;
+    let result = database.execute_runtime_read(&request, None).await?;
+    assert_eq!(result.edges.len(), 2);
+    assert!(result.page_info.has_next_page);
+    assert_eq!(result.total_count, Some(3));
+    assert_eq!(result.edges[0].node.integer(&id)?, 4);
+
+    drop(database);
+    drop(owned);
+    Ok(())
+}
+
+/// `infinity`, `-infinity` and years past chrono's range are valid PostgreSQL
+/// `timestamptz` values. Decoding one is a typed `InvalidValue` error, never a
+/// panic; the largest and smallest representable instants still decode (#528).
+#[tokio::test]
+#[ignore = "creates and owns a disposable Docker PostgreSQL container"]
+async fn disposable_postgres_out_of_range_timestamps_are_typed_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned = OwnedPostgres::start_ready("runtime-record", POSTGRES_16_IMAGE).await?;
+    let mut connection = graphql_orm::sqlx::PgConnection::connect(&owned.url).await?;
+    let schema = schema();
+    let projection = schema.resolve_projection_ids(&cid("customers"), &[fid("happened_at")])?;
+    for literal in ["infinity", "-infinity", "294276-12-31 23:59:59+00"] {
+        let row =
+            graphql_orm::sqlx::query(&format!("SELECT '{literal}'::timestamptz AS happened_at"))
+                .fetch_one(&mut connection)
+                .await?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            projection.decode_row::<PostgresBackend>(&row)
+        }))
+        .unwrap_or_else(|_| panic!("decoding {literal} panicked"));
+        assert_eq!(
+            result.unwrap_err().code(),
+            RuntimeRecordErrorCode::InvalidValue,
+            "{literal}"
+        );
+    }
+    for (literal, expected) in [
+        (
+            "262142-12-31 23:59:59.999999+00",
+            "+262142-12-31T23:59:59.999999Z",
+        ),
+        ("2026-07-15 12:34:56.5+00", "2026-07-15T12:34:56.500000Z"),
+        ("0001-01-01 00:00:00+00", "0001-01-01T00:00:00.000000Z"),
+    ] {
+        let row =
+            graphql_orm::sqlx::query(&format!("SELECT '{literal}'::timestamptz AS happened_at"))
+                .fetch_one(&mut connection)
+                .await?;
+        let record = projection.decode_row::<PostgresBackend>(&row)?;
+        let field = schema.resolve_field(
+            &schema.resolve_collection(&cid("customers"))?,
+            &fid("happened_at"),
+        )?;
+        let RuntimeValue::DateTime(value) = record.value(&field)? else {
+            panic!("{literal} decoded as another kind");
+        };
+        assert_eq!(value.as_str(), expected, "{literal}");
+    }
+    drop(connection);
+    drop(owned);
+    Ok(())
+}

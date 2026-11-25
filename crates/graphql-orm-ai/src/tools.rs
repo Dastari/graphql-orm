@@ -179,7 +179,6 @@ impl AiGeneratedGraphqlTargetPolicySet {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn allows_query_capability(&self, capability: &AiGraphqlQueryCapability) -> bool {
         self.0.get(capability.target_id()).is_some_and(|binding| {
             binding.queries
@@ -1016,7 +1015,6 @@ impl AiToolCatalog {
         Ok((descriptor, disclosure))
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_read_only_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1040,7 +1038,6 @@ impl AiToolCatalog {
         Ok(())
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_generated_query_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1059,7 +1056,6 @@ impl AiToolCatalog {
         Ok(())
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_classified_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1104,7 +1100,6 @@ impl AiToolCatalog {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_read_capability_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1128,7 +1123,6 @@ impl AiToolCatalog {
         Err(AiError::Forbidden)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_generated_mutation_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1150,7 +1144,6 @@ impl AiToolCatalog {
         Ok(capability.execution_policy())
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_supervised_model_definition(
         &self,
         definition: &ModelToolDefinition,

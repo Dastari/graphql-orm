@@ -15,7 +15,7 @@ use crate::{AiError, AiScope, AiScopeInput};
 pub enum AiSkillAction {
     /// Read redacted skill/version metadata.
     Read,
-    /// Create or rename a logical skill.
+    /// Create or rename a logical skill, or audit its legacy schema history.
     ManageSkill,
     /// Publish an immutable protected instruction version.
     PublishVersion,
@@ -314,6 +314,50 @@ pub struct AiResolvedSkill {
     pub required_provider_capabilities: serde_json::Value,
 }
 
+impl AiResolvedSkill {
+    /// Whether the stored input or output schema exceeds today's publication bounds.
+    ///
+    /// A legacy schema may still be used on the stored-version read path.
+    /// Publishing it as a new version requires bringing it within the bounds.
+    pub fn has_legacy_schema(&self) -> bool {
+        schema_exceeds_publication_bounds(&self.input_schema)
+            || schema_exceeds_publication_bounds(&self.output_schema)
+    }
+}
+
+/// Deepest nesting accepted in a newly published skill schema.
+pub(crate) const MAXIMUM_PUBLISHED_SCHEMA_DEPTH: usize = 32;
+/// Longest regular expression accepted in a newly published skill schema.
+pub(crate) const MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES: usize = 256;
+
+pub(crate) fn schema_exceeds_publication_bounds(value: &serde_json::Value) -> bool {
+    !published_schema_within_bounds(value, 0)
+}
+
+fn published_schema_within_bounds(value: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAXIMUM_PUBLISHED_SCHEMA_DEPTH {
+        return false;
+    }
+    match value {
+        serde_json::Value::Object(object) => object.iter().all(|(key, nested)| {
+            let pattern_within_bounds = match (key.as_str(), nested) {
+                ("pattern", serde_json::Value::String(pattern)) => {
+                    pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES
+                }
+                ("patternProperties", serde_json::Value::Object(patterns)) => patterns
+                    .keys()
+                    .all(|pattern| pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES),
+                _ => true,
+            };
+            pattern_within_bounds && published_schema_within_bounds(nested, depth + 1)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .all(|nested| published_schema_within_bounds(nested, depth + 1)),
+        _ => true,
+    }
+}
+
 /// Authenticated, GraphQL-managed skill catalog.
 #[async_trait]
 pub trait AiSkillCatalogService: Send + Sync {
@@ -359,6 +403,7 @@ pub trait AiSkillCatalogService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiSkillQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -390,6 +435,7 @@ impl AiSkillQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiSkillMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

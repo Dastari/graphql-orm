@@ -1,5 +1,9 @@
-//! Entity references on local-process adapters. Each test drives the real
-//! provider through the executor and inspects the adapter's protocol writes.
+//! Entity references on the adapters that deliver a request to a local
+//! process and may send resolved data.
+//!
+//! Each test registers the real adapter with the runtime, drives it through
+//! `AiProviderCallExecutor`, and asserts on the bytes the adapter's own
+//! protocol code wrote for the process.
 
 use super::*;
 
@@ -10,7 +14,7 @@ mod codex;
 /// Rewrites a plan sealed for the fixture's mock provider as one for a
 /// local-process adapter, which registers as [`ProviderKind::LocalHarness`].
 /// The Grok tests seal their own plan with the registration's tools.
-#[cfg(feature = "local-harness")]
+#[cfg(any(feature = "local-harness", feature = "provider-codex-app-server"))]
 fn for_local_process(mut plan: AiProviderCallPlan) -> AiProviderCallPlan {
     plan.provider_kind = ProviderKind::LocalHarness;
     plan.budget.provider_kind = ProviderKind::LocalHarness;
@@ -59,6 +63,7 @@ async fn persisted_state(fixture: &Fixture) -> String {
         AiBudgetReservationRecord,
         AiInboxEventRecord,
         AiProviderBackgroundSubmissionRecord,
+        crate::orm_provider_session::AiProviderSessionBindingRecord,
         AiStoredProviderResponseRecord,
         AiApprovalRecord,
         AiProposalRecord,
@@ -70,7 +75,7 @@ async fn persisted_state(fixture: &Fixture) -> String {
 }
 
 #[cfg(any(feature = "provider-grok-acp", feature = "provider-codex-app-server"))]
-async fn seed_retained_message(fixture: &Fixture) {
+async fn insert_retained_input_message(fixture: &Fixture) {
     let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
         .await
         .expect("session lookup should succeed")
@@ -725,8 +730,7 @@ mod grok_acp {
             .expect("provider should validate"),
         );
         let references = references_for(MockProvider::new(Vec::new()), Some(provider)).await;
-        let fixture = &references.fixture;
-        seed_retained_message(fixture).await;
+        insert_retained_input_message(&references.fixture).await;
         let lease = Arc::new(Mutex::new(references.fixture.lease.clone()));
         Grok {
             references,

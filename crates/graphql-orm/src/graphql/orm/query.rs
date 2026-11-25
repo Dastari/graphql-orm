@@ -27,7 +27,22 @@ pub trait DatabaseEntity {
     const SCHEMA_POLICY: Option<SchemaPolicy> = None;
     const DEFAULT_SORT: &'static str;
 
+    /// Explicit SQL Server column types keyed by rendered column name.
+    #[doc(hidden)]
+    const MSSQL_PARAMETER_TYPES: &'static [(&'static str, &'static str)] = &[];
+
     fn column_names() -> &'static [&'static str];
+}
+
+pub(crate) fn mssql_parameter_type<T: DatabaseEntity>(column: &str) -> Option<&'static str> {
+    if T::MSSQL_PARAMETER_TYPES.is_empty() {
+        return None;
+    }
+    let rendered = DatabaseBackend::Mssql.quote_identifier_path(column);
+    T::MSSQL_PARAMETER_TYPES
+        .iter()
+        .find(|(name, _)| *name == rendered)
+        .map(|(_, sql_type)| *sql_type)
 }
 
 pub trait DatabaseSchema {
@@ -36,6 +51,13 @@ pub trait DatabaseSchema {
     fn composite_unique_indexes() -> &'static [&'static [&'static str]];
     fn check_constraints() -> &'static [super::core::CheckConstraintDef] {
         &[]
+    }
+    /// Whether the entity's generated update requires `ExpectedVersion` or
+    /// selects assurance per request (#851). Derive output overrides it;
+    /// metadata built through a typed constructor then records the table.
+    #[doc(hidden)]
+    fn __gom_guarded_update() -> bool {
+        false
     }
 }
 
@@ -62,6 +84,54 @@ pub trait EntityRelations {
 pub trait GeneratedRelationReadability {
     /// Every persisted physical column and its static GraphQL readability.
     const COLUMNS: &'static [(&'static str, bool)];
+    /// Persisted physical columns with no generated GraphQL surface at all: not
+    /// readable, filterable, orderable, subscribable, accepted as input or part
+    /// of the primary key. Only these may be a relation's `server_only_key`
+    /// target. The default is empty, so a hand-written target fails closed.
+    const SERVER_ONLY_COLUMNS: &'static [&'static str] = &[];
+}
+
+/// Compare two unquoted physical column names, folding ASCII case unless
+/// `case_sensitive`.
+const fn generated_relation_column_name_eq(left: &str, right: &str, case_sensitive: bool) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut byte = 0;
+    while byte < left.len() {
+        let mut a = left[byte];
+        let mut b = right[byte];
+        if !case_sensitive {
+            a = a.to_ascii_lowercase();
+            b = b.to_ascii_lowercase();
+        }
+        if a != b {
+            return false;
+        }
+        byte += 1;
+    }
+    true
+}
+
+/// Check a relation's `server_only_key` target column at compile time: it must
+/// be declared server-only by the target's generated metadata. Unknown columns
+/// and every column with any GraphQL surface fail closed.
+#[doc(hidden)]
+pub const fn generated_relation_column_is_server_only(
+    columns: &[&str],
+    column: &str,
+    case_sensitive: bool,
+) -> bool {
+    let mut index = 0;
+    while index < columns.len() {
+        if generated_relation_column_name_eq(columns[index], column, case_sensitive) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Check a generated relation's physical target column at compile time.
@@ -984,6 +1054,33 @@ pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
     split_sort_terms(clause)
         .into_iter()
         .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
+}
+
+/// Whether a default sort can be evaluated against a projection of these
+/// physical columns. Keep arbitrary SQL on the original table scope.
+pub(crate) fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str]) -> bool {
+    use super::dialect::{SqlTokenKind, postgres_resolved_identifier, scan_sql};
+
+    clause.trim().is_empty()
+        || split_sort_terms(clause).into_iter().all(|term| {
+            let mut first = None;
+            let mut qualified = false;
+            let scanned = scan_sql(DatabaseBackend::Postgres, term, |token| {
+                if token.kind != SqlTokenKind::Comment {
+                    first.get_or_insert(&term[token.start..token.end]);
+                    qualified |= &term[token.start..token.end] == ".";
+                }
+            });
+            scanned.is_ok()
+                && !qualified
+                && sort_term_column(term).is_some()
+                && first.is_some_and(|first| {
+                    let name = postgres_resolved_identifier(first);
+                    columns
+                        .iter()
+                        .any(|col| postgres_resolved_identifier(col) == name)
+                })
+        })
 }
 
 /// The terms of `clause` that do not order directly by a column one of
@@ -2304,6 +2401,15 @@ impl VisibleRowScan {
     ///
     /// `PAGE_LIMIT_EXCEEDED` when the scan budget is spent and more rows remain.
     pub(crate) fn next_batch(&mut self) -> crate::Result<Option<ScanBatch>> {
+        self.next_batch_with_maximum(u64::MAX)
+    }
+
+    /// Keep candidate reads bounded after preflighting their payload sizes.
+    pub(crate) fn next_size_checked_batch(&mut self) -> crate::Result<Option<ScanBatch>> {
+        self.next_batch_with_maximum(Self::MAX_GROWN_BATCH)
+    }
+
+    fn next_batch_with_maximum(&mut self, maximum: u64) -> crate::Result<Option<ScanBatch>> {
         if !self.wants_more() {
             return Ok(None);
         }
@@ -2314,7 +2420,7 @@ impl VisibleRowScan {
                 .overflow_after_skip
                 .map_or(Self::MAX_GROWN_BATCH, |maximum| maximum.saturating_add(1)),
         });
-        let wanted = needed.max(self.batch).max(1);
+        let wanted = needed.max(self.batch).clamp(1, maximum);
         self.batch = wanted.saturating_mul(2).min(Self::MAX_GROWN_BATCH);
         let (examine, fetch) = match self.budget {
             // A spent budget still reads one row to learn whether any remain,
@@ -2680,71 +2786,15 @@ pub fn render_keyset_after(
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
-    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    use crate::graphql::pagination::KeysetValue;
-    if columns.len() != cursor.len() || columns.is_empty() {
-        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
-    }
-    let mut branches = Vec::new();
-    let mut values = Vec::new();
-    for index in 0..columns.len() {
-        let mut terms = Vec::new();
-        for prior in 0..index {
-            let column = columns[prior];
-            match &cursor[prior] {
-                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
-                value => {
-                    let value = keyset_sql_value(value)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                    terms.push(format!(
-                        "{} = {}",
-                        column.column,
-                        backend.placeholder(start_index + values.len())
-                    ));
-                    values.push(value);
-                }
-            }
-        }
-        let column = columns[index];
-        let comparison = match &cursor[index] {
-            KeysetValue::Null => match column.nulls {
-                KeysetNulls::First => format!("{} IS NOT NULL", column.column),
-                KeysetNulls::Last => "1 = 0".to_string(),
-            },
-            value => {
-                let value = keyset_sql_value(value)
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                let operator = match column.direction {
-                    KeysetDirection::Asc => ">",
-                    KeysetDirection::Desc => "<",
-                };
-                let scalar = format!(
-                    "{} {} {}",
-                    column.column,
-                    operator,
-                    backend.placeholder(start_index + values.len())
-                );
-                values.push(value);
-                match column.nulls {
-                    KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
-                    KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
-                }
-            }
-        };
-        terms.push(comparison);
-        branches.push(format!("({})", terms.join(" AND ")));
-    }
-    // Parenthesized as a whole, like the `before` form: the predicate stays
-    // one condition wherever a caller places it.
-    Ok((format!("({})", branches.join(" OR ")), values))
+    render_keyset_after_with_types(backend, columns, cursor, start_index, |_| None)
 }
 
-/// Render the lexicographic `before` predicate with explicit nullable ordering.
-pub fn render_keyset_before(
+pub(super) fn render_keyset_after_with_types(
     backend: DatabaseBackend,
     columns: &[KeysetOrderColumn],
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
+    parameter_type: impl Fn(&str) -> Option<&'static str>,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
     use crate::graphql::pagination::KeysetValue;
@@ -2767,7 +2817,83 @@ pub fn render_keyset_before(
                         column.column,
                         backend.placeholder(start_index + values.len())
                     ));
-                    values.push(value);
+                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                }
+            }
+        }
+        let column = columns[index];
+        let comparison = match &cursor[index] {
+            KeysetValue::Null => match column.nulls {
+                KeysetNulls::First => format!("{} IS NOT NULL", column.column),
+                KeysetNulls::Last => "1 = 0".to_string(),
+            },
+            value => {
+                let value = keyset_sql_value(value)
+                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                let operator = match column.direction {
+                    KeysetDirection::Asc => ">",
+                    KeysetDirection::Desc => "<",
+                };
+                let scalar = format!(
+                    "{} {} {}",
+                    column.column,
+                    operator,
+                    backend.placeholder(start_index + values.len())
+                );
+                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                match column.nulls {
+                    KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
+                    KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
+                }
+            }
+        };
+        terms.push(comparison);
+        branches.push(format!("({})", terms.join(" AND ")));
+    }
+    // Parenthesized as a whole, like the `before` form: the predicate stays
+    // one condition wherever a caller places it.
+    Ok((format!("({})", branches.join(" OR ")), values))
+}
+
+/// Render the lexicographic `before` predicate with explicit nullable ordering.
+pub fn render_keyset_before(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    render_keyset_before_with_types(backend, columns, cursor, start_index, |_| None)
+}
+
+pub(super) fn render_keyset_before_with_types(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[crate::graphql::pagination::KeysetValue],
+    start_index: usize,
+    parameter_type: impl Fn(&str) -> Option<&'static str>,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use crate::graphql::pagination::KeysetValue;
+    if columns.len() != cursor.len() || columns.is_empty() {
+        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
+    }
+    let mut branches = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..columns.len() {
+        let mut terms = Vec::new();
+        for prior in 0..index {
+            let column = columns[prior];
+            match &cursor[prior] {
+                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
+                value => {
+                    let value = keyset_sql_value(value)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                    terms.push(format!(
+                        "{} = {}",
+                        column.column,
+                        backend.placeholder(start_index + values.len())
+                    ));
+                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
                 }
             }
         }
@@ -2790,7 +2916,7 @@ pub fn render_keyset_before(
                     operator,
                     backend.placeholder(start_index + values.len())
                 );
-                values.push(value);
+                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
                 match column.nulls {
                     KeysetNulls::First => {
                         format!("({} IS NULL OR {scalar})", column.column)
@@ -6022,15 +6148,115 @@ where
         context: &mut MutationContext<'_, B>,
         offset: i64,
         limit: Option<i64>,
+        byte_budget: Option<&mut usize>,
     ) -> crate::Result<Vec<(T, bool)>>
     where
         B: WriteBackend,
     {
-        let rendered = render_select_query(B::DIALECT, &self.candidate_select(offset, limit)?);
+        let selection = self.candidate_select(offset, limit)?;
+        let rendered = render_select_query(B::DIALECT, &selection);
+        let expected = if let Some(remaining) = byte_budget {
+            Some(Self::preflight_candidate_window(context, selection, remaining).await?)
+        } else {
+            None
+        };
+        if expected == Some(0) {
+            return Ok(Vec::new());
+        }
         let rows = context
             .fetch_read_rows(&rendered.sql, &rendered.values)
             .await?;
+        if expected.is_some_and(|expected| rows.len() != expected) {
+            return Err(Self::payload_budget_error());
+        }
         self.decode_candidates(&rows)
+    }
+
+    /// Preflight the whole candidate range a residual page can inspect before
+    /// any payload or row callback. A callback may deny any row, so the range
+    /// extends to the scan ceiling and its look-ahead row, or to exhaustion.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn preflight_candidate_scan(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        scan_budget: Option<i64>,
+        remaining: &mut usize,
+    ) -> crate::Result<()>
+    where
+        B: WriteBackend,
+    {
+        const LENGTH_PAGE_ROWS: i64 = 128;
+        let maximum = scan_budget.map(|rows| rows.max(0).saturating_add(1));
+        let mut offset = 0_i64;
+        while maximum.is_none_or(|maximum| offset < maximum) {
+            let limit = maximum.map_or(LENGTH_PAGE_ROWS, |maximum| {
+                (maximum - offset).min(LENGTH_PAGE_ROWS)
+            });
+            let selection = self.candidate_select(offset, Some(limit))?;
+            let count = Self::preflight_candidate_window(context, selection, remaining).await?;
+            if count < limit as usize {
+                break;
+            }
+            offset = offset
+                .checked_add(limit)
+                .ok_or_else(Self::payload_budget_error)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    fn payload_budget_error() -> sqlx::Error {
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, sqlx_error_from_public};
+
+        sqlx_error_from_public(OrmPublicError::new(OrmErrorCode::InternalError))
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    async fn preflight_candidate_window(
+        context: &mut MutationContext<'_, B>,
+        mut selection: SelectQuery,
+        remaining: &mut usize,
+    ) -> crate::Result<usize>
+    where
+        B: WriteBackend,
+    {
+        let lengths = selection
+            .columns
+            .iter()
+            .map(|projection| {
+                // Wrap the normal expression in a scalar SELECT so a projected
+                // alias (such as the GeoJSON column alias) stays valid SQL.
+                match B::DIALECT {
+                    DatabaseBackend::Sqlite => Ok(format!(
+                        "COALESCE(length(CAST((SELECT {projection}) AS BLOB)), 0)"
+                    )),
+                    DatabaseBackend::Postgres => Ok(format!(
+                        "COALESCE(octet_length(CAST((SELECT {projection}) AS TEXT)), 0)::bigint"
+                    )),
+                    // Count raw bytes (including binary payloads) and bound
+                    // UTF-8 decoding by four bytes per UTF-16 code unit.
+                    DatabaseBackend::Mssql => Ok(format!(
+                        "COALESCE(CAST(DATALENGTH((SELECT {projection})) AS BIGINT), 0) + 2 * COALESCE(DATALENGTH(CONVERT(NVARCHAR(MAX), (SELECT {projection}))), 0)"
+                    )),
+                    _ => Err(Self::payload_budget_error()),
+                }
+            })
+            .collect::<crate::Result<Vec<_>>>()?
+            .join(" + ");
+        selection.columns = vec![format!("CAST(({lengths}) AS BIGINT) AS row_bytes")];
+        let sizes_query = render_select_query(B::DIALECT, &selection);
+        let sizes = context
+            .fetch_read_rows(&sizes_query.sql, &sizes_query.values)
+            .await?;
+        for row in &sizes {
+            let bytes = usize::try_from(B::try_get_i64(row, "row_bytes")?)
+                .map_err(|_| Self::payload_budget_error())?;
+            *remaining = remaining
+                .checked_sub(std::mem::size_of::<T>())
+                .and_then(|remaining| remaining.checked_sub(bytes))
+                .ok_or_else(Self::payload_budget_error)?;
+        }
+        Ok(sizes.len())
     }
 
     pub(crate) async fn fetch_all_with_auth_and_pagination<P>(
@@ -6505,6 +6731,26 @@ where
     {
         self.fetch_bounded_sentinel_in_transaction(context, limit, true)
             .await
+    }
+
+    /// Read a bounded set-delete selection at the transaction's state-machine
+    /// isolation. PostgreSQL serializability detects concurrent changes to
+    /// deleted rows without requiring the caller to pass an UPDATE RLS policy.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn fetch_set_delete_sentinel_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        limit: MutationLimit,
+    ) -> crate::Result<Vec<T>>
+    where
+        B: WriteBackend,
+    {
+        self.fetch_bounded_sentinel_in_transaction(
+            context,
+            limit,
+            B::DIALECT == DatabaseBackend::Mssql,
+        )
+        .await
     }
 
     /// The bounded selection of a retention purge.
@@ -7942,6 +8188,34 @@ mod grouped_aggregate_tests {
 #[cfg(test)]
 mod visible_row_scan_tests {
     use super::*;
+
+    #[test]
+    fn postgres_sort_projection_admits_only_unqualified_physical_columns() {
+        let columns = ["id", r#""Mixed.Case""#, r#""odd""name""#];
+        for clause in [
+            "id DESC NULLS LAST",
+            r#""Mixed.Case" ASC NULLS LAST, "odd""name" DESC"#,
+        ] {
+            assert!(
+                postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "records.id ASC",
+            "public.records.id",
+            "lower(id)",
+            "id /* comment */ DESC",
+            "id DESC -- comment",
+            r#""mixed.case" ASC"#,
+            "missing NULLS LAST",
+        ] {
+            assert!(
+                !postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+    }
 
     #[test]
     fn key_tiebreak_needs_a_direct_key_term() {

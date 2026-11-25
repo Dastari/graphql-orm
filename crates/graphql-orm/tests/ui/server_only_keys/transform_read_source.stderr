@@ -1,0 +1,5 @@
+error: server_only_key source `partition` must be a persisted scalar field read as stored, so the join binds the stored value: no skip_db, read transform, json, date, boolean-field, decimal or spatial mapping
+  --> tests/ui/server_only_keys/transform_read_source.rs:28:9
+   |
+28 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^

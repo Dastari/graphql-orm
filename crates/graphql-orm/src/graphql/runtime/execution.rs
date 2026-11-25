@@ -839,7 +839,16 @@ impl<B: RuntimeReadBackend> Guard<B> {
             }
         };
         // Before any root is planned, read or authorized by the host.
-        let denied = assurance_denials(ctx, &planner, &operation.node.selection_set.node, kind)?;
+        let mut denied =
+            assurance_denials(ctx, &planner, &operation.node.selection_set.node, kind)?;
+        let check_query_root = |name: &str| {
+            use crate::graphql::assurance::{AssuranceCheck, enforce_check};
+            enforce_check(&AssuranceCheck::from_extension(
+                ctx,
+                GraphqlOperationKind::Query,
+                name,
+            ))
+        };
         if operation.node.ty == async_graphql::parser::types::OperationType::Mutation {
             let root = ctx
                 .schema_env
@@ -862,6 +871,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 root,
                 &ctx.schema_env.registry,
                 denied,
+                check_query_root,
             )
             .await;
         }
@@ -893,6 +903,10 @@ impl<B: RuntimeReadBackend> Guard<B> {
                     limits,
                 )? {
                     Some((plan, identity, typename)) => {
+                        if let Err(error) = plan.enforce_target_assurance(&check_query_root, true) {
+                            denied.insert(key, error);
+                            continue;
+                        }
                         planner.cost = planner.cost.checked_add(plan.cost)?;
                         let shape = OutputShape::compile(
                             &mut planner,
@@ -920,7 +934,12 @@ impl<B: RuntimeReadBackend> Guard<B> {
                     .iter()
                     .find(|c| module.root_name(c) == field.name.node.as_str())
                 {
-                    plans.push(planner.collection(module, c, &field, None, 1, 0)?);
+                    let plan = planner.collection(module, c, &field, None, 1, 0)?;
+                    if let Err(error) = plan.enforce_target_assurance(&check_query_root, false) {
+                        denied.insert(plan.response_key, error);
+                        break;
+                    }
+                    plans.push(plan);
                     let shape = OutputShape::compile(
                         &mut planner,
                         &ctx.schema_env.registry,

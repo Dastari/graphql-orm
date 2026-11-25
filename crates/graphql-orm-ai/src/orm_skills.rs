@@ -1,7 +1,6 @@
 //! ORM-backed protected skill publication and resolution.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{content_context, map_orm, map_transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,10 +10,8 @@ use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::StringFilter;
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
-};
+use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, MutationContext, TransactionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -31,6 +28,9 @@ use crate::{
 
 const SKILL_POLICY_FORMAT_VERSION: u32 = 1;
 const MAXIMUM_SKILLS_PER_SCOPE: usize = 100;
+const MAXIMUM_VERSIONS_BEFORE_PUBLICATION: i64 = 1_000;
+const LEGACY_SCHEMA_SCAN_PAGE_ROWS: i64 = 16;
+const LEGACY_SCHEMA_SCAN_PAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAXIMUM_INSTRUCTION_BYTES: usize = 1024 * 1024;
 const MAXIMUM_SCHEMA_BYTES: usize = 1024 * 1024;
 const MAXIMUM_TOOL_FINGERPRINTS: usize = 256;
@@ -130,15 +130,24 @@ struct SkillChecksumContent<'a> {
     provenance: &'a StoredProvenance,
 }
 
+/// Identifies a published skill version whose schema pair exceeds the publication bounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiLegacySkillSchema {
+    /// Immutable version row ID.
+    pub id: Uuid,
+    /// Hex SHA-256 of the canonical stored schema envelope (format version, input and output).
+    pub schema_digest: String,
+}
+
 /// Concrete protected skill catalog using generated ORM APIs only.
 ///
 /// Published instructions are immutable and protected. Enabling a skill only
 /// makes it eligible for resolution; it never enables a tool or widens current
 /// resolver, egress, provider, proposal, approval, or budget policy.
 pub struct OrmAiSkillCatalogService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiSkillAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -149,7 +158,7 @@ pub struct OrmAiSkillCatalogService {
 impl OrmAiSkillCatalogService {
     /// Creates a protected, fail-closed skill catalog.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiSkillAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -173,8 +182,49 @@ impl OrmAiSkillCatalogService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
+    }
+
+    /// Lists legacy schemas across the published history of one skill.
+    ///
+    /// This operator API requires [`AiSkillAction::ManageSkill`] in the exact
+    /// scope. It returns only version IDs and schema digests, including for
+    /// superseded versions and disabled skills, and never opens protected
+    /// instructions.
+    ///
+    /// The scan runs in a state-machine transaction. It holds the write lock
+    /// for the scan on SQLite and uses serializable isolation on PostgreSQL
+    /// and SQL Server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an access error when the principal lacks operator authority or
+    /// a not-found error when the skill is absent from the scope. Fails closed
+    /// on persistence errors, unsupported schema envelopes, or a history
+    /// exceeding the scan bounds.
+    pub async fn legacy_skill_schemas(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+        skill_id: Uuid,
+    ) -> Result<Vec<AiLegacySkillSchema>, AiError> {
+        self.require_access(principal, &scope, AiSkillAction::ManageSkill)
+            .await?;
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let skill = tx
+                        .find_by_id::<AiSkillRecord>(&skill_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .filter(|skill| skill_scope(skill) == scope)
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    scan_legacy_skill_schemas(tx, skill.id).await
+                })
+            })
+            .await
+            .map_err(map_transaction)
     }
 
     async fn require_access(
@@ -472,17 +522,17 @@ impl AiSkillCatalogService for OrmAiSkillCatalogService {
                     let duplicate = tx
                         .query::<AiSkillVersionRecord>()
                         .filter(AiSkillVersionRecordWhereInput {
-                            skill_id: Some(graphql_orm::graphql::filters::UuidFilter {
+                            skill_id: Some(UuidFilter {
                                 eq: Some(skill_id),
                                 ..Default::default()
                             }),
                             ..Default::default()
                         })
-                        .internal_limit(1_001)
+                        .internal_limit(MAXIMUM_VERSIONS_BEFORE_PUBLICATION + 1)
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if duplicate.len() > 1_000 {
+                    if duplicate.len() as i64 > MAXIMUM_VERSIONS_BEFORE_PUBLICATION {
                         return Err(OrmPublicError::new(
                             OrmErrorCode::AuthorizationMisconfigured,
                         ));
@@ -707,8 +757,62 @@ struct ParsedVersion {
     provenance: StoredProvenance,
 }
 
+async fn scan_legacy_skill_schemas(
+    tx: &mut MutationContext<'_, AiOrmBackend>,
+    skill_id: Uuid,
+) -> Result<Vec<AiLegacySkillSchema>, OrmPublicError> {
+    let maximum = MAXIMUM_VERSIONS_BEFORE_PUBLICATION + 1;
+    let mut legacy = Vec::new();
+    let mut offset = 0;
+    loop {
+        let limit = LEGACY_SCHEMA_SCAN_PAGE_ROWS.min(maximum + 1 - offset);
+        // Without a custom sort, the ORM orders by the unique primary key.
+        let page = tx
+            .query::<AiSkillVersionRecord>()
+            .filter(AiSkillVersionRecordWhereInput {
+                skill_id: Some(UuidFilter {
+                    eq: Some(skill_id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .internal_limit(limit)
+            .offset(offset)
+            .fetch_sql_page_with_byte_limit(LEGACY_SCHEMA_SCAN_PAGE_BYTES)
+            .await
+            .map_err(OrmPublicError::from)?;
+        let count = page.len() as i64;
+        offset += count;
+        if offset > maximum {
+            return Err(OrmPublicError::new(
+                OrmErrorCode::AuthorizationMisconfigured,
+            ));
+        }
+        for row in page.into_iter().filter(|row| row.published) {
+            let schemas: StoredSchemas = from_value(row.schemas.clone(), "schemas")
+                .map_err(|_| OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured))?;
+            if schemas.version != SKILL_POLICY_FORMAT_VERSION {
+                return Err(OrmPublicError::new(
+                    OrmErrorCode::AuthorizationMisconfigured,
+                ));
+            }
+            if crate::skills::schema_exceeds_publication_bounds(&schemas.input)
+                || crate::skills::schema_exceeds_publication_bounds(&schemas.output)
+            {
+                legacy.push(AiLegacySkillSchema {
+                    id: row.id,
+                    schema_digest: crate::canonical_json_hash(&row.schemas),
+                });
+            }
+        }
+        if count < limit {
+            return Ok(legacy);
+        }
+    }
+}
+
 async fn load_scope_skills(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     scope: &AiScope,
 ) -> Result<Vec<(AiSkillRecord, Option<AiSkillVersionRecord>)>, AiError> {
     let scope = scope.clone();
@@ -743,7 +847,7 @@ async fn load_scope_skills(
 }
 
 async fn load_current_version(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     skill: &AiSkillRecord,
 ) -> Result<Option<AiSkillVersionRecord>, OrmPublicError> {
     let Some(version_id) = skill.current_version_id else {
@@ -757,7 +861,7 @@ async fn load_current_version(
     let mut versions = tx
         .query::<AiSkillVersionRecord>()
         .filter(AiSkillVersionRecordWhereInput {
-            id: Some(graphql_orm::graphql::filters::UuidFilter {
+            id: Some(UuidFilter {
                 eq: Some(version_id),
                 ..Default::default()
             }),
@@ -1106,11 +1210,6 @@ fn normalized_stored_ui_intent_bindings(
     Ok(bindings.into_values().collect())
 }
 
-/// Deepest nesting accepted in a newly published skill schema.
-const MAXIMUM_PUBLISHED_SCHEMA_DEPTH: usize = 32;
-/// Longest regular expression accepted in a newly published skill schema.
-const MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES: usize = 256;
-
 /// Validates a schema a principal is publishing.
 ///
 /// A published schema is user-authored and is compiled again on every later
@@ -1118,34 +1217,10 @@ const MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES: usize = 256;
 /// regular expression. Stored versions are read with [`validate_schema`]
 /// alone, so a version published before these bounds existed still loads.
 fn validate_published_schema(value: &serde_json::Value, field: &str) -> Result<(), AiError> {
-    if !published_schema_within_bounds(value, 0) {
+    if crate::skills::schema_exceeds_publication_bounds(value) {
         return Err(AiError::InvalidInput(format!("invalid {field} schema")));
     }
     validate_schema(value, field)
-}
-
-fn published_schema_within_bounds(value: &serde_json::Value, depth: usize) -> bool {
-    if depth > MAXIMUM_PUBLISHED_SCHEMA_DEPTH {
-        return false;
-    }
-    match value {
-        serde_json::Value::Object(object) => object.iter().all(|(key, nested)| {
-            let pattern_within_bounds = match (key.as_str(), nested) {
-                ("pattern", serde_json::Value::String(pattern)) => {
-                    pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES
-                }
-                ("patternProperties", serde_json::Value::Object(patterns)) => patterns
-                    .keys()
-                    .all(|pattern| pattern.len() <= MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES),
-                _ => true,
-            };
-            pattern_within_bounds && published_schema_within_bounds(nested, depth + 1)
-        }),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .all(|nested| published_schema_within_bounds(nested, depth + 1)),
-        _ => true,
-    }
 }
 
 fn validate_schema(value: &serde_json::Value, field: &str) -> Result<(), AiError> {
@@ -1210,7 +1285,7 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 async fn insert_skill_audit(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     actor: &str,
     action: &str,
     skill_id: Uuid,
@@ -1272,6 +1347,7 @@ fn hide_inaccessible_id(error: AiError) -> AiError {
 #[cfg(test)]
 mod schema_bound_tests {
     use super::*;
+    use crate::skills::{MAXIMUM_PUBLISHED_SCHEMA_DEPTH, MAXIMUM_PUBLISHED_SCHEMA_PATTERN_BYTES};
 
     fn nested(depth: usize) -> serde_json::Value {
         (0..depth).fold(
@@ -1314,9 +1390,10 @@ mod protection_diagnostic_tests {
     use std::sync::{Arc, Mutex};
 
     type EventFields = Vec<(String, String)>;
+    type CapturedEvent = (&'static str, EventFields);
 
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<EventFields>>>);
+    struct Capture(Arc<Mutex<Vec<CapturedEvent>>>);
 
     impl tracing::Subscriber for Capture {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
@@ -1350,11 +1427,13 @@ mod protection_diagnostic_tests {
             }
 
             assert_eq!(*event.metadata().level(), tracing::Level::DEBUG);
-            assert_eq!(event.metadata().target(), "graphql_orm_ai::orm_skills");
             let mut fields = Fields::default();
             event.record(&mut fields);
             fields.0.sort_unstable();
-            self.0.lock().unwrap().push(fields.0);
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.metadata().target(), fields.0));
         }
     }
 
@@ -1376,14 +1455,68 @@ mod protection_diagnostic_tests {
         });
 
         let expected = ["key_unavailable", "validation_failed", "unsupported"].map(|code| {
-            vec![
-                ("code".to_owned(), code.to_owned()),
-                (
-                    "message".to_owned(),
-                    "AI skill content protection failed".to_owned(),
-                ),
-            ]
+            (
+                "graphql_orm_ai::orm_skills",
+                vec![
+                    ("code".to_owned(), code.to_owned()),
+                    (
+                        "message".to_owned(),
+                        "AI skill content protection failed".to_owned(),
+                    ),
+                ],
+            )
         });
+        assert_eq!(*capture.0.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn remaining_protection_diagnostics_keep_only_fixed_codes() {
+        let capture = Capture::default();
+        let mappings = [
+            (
+                "approval",
+                crate::orm_approvals::map_protection as fn(_) -> _,
+            ),
+            ("attachment", crate::orm_attachments::map_protection),
+            (
+                "context_compaction",
+                crate::orm_context_compaction::map_protection,
+            ),
+        ];
+        tracing::subscriber::with_default(capture.clone(), || {
+            for (_, map) in mappings {
+                assert!(matches!(
+                    map(ContentProtectionError::PolicyNotReady),
+                    AiError::RuntimeNotReady
+                ));
+                for error in [
+                    ContentProtectionError::KeyUnavailable,
+                    ContentProtectionError::ValidationFailed,
+                    ContentProtectionError::Unsupported,
+                ] {
+                    assert!(matches!(map(error), AiError::PersistenceFailed));
+                }
+            }
+        });
+
+        let expected = mappings
+            .into_iter()
+            .flat_map(|(operation, _)| {
+                ["key_unavailable", "validation_failed", "unsupported"].map(|code| {
+                    (
+                        "graphql_orm_ai::content_protection",
+                        vec![
+                            ("code".to_owned(), code.to_owned()),
+                            (
+                                "message".to_owned(),
+                                "AI content protection failed".to_owned(),
+                            ),
+                            ("operation".to_owned(), operation.to_owned()),
+                        ],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         assert_eq!(*capture.0.lock().unwrap(), expected);
     }
 }

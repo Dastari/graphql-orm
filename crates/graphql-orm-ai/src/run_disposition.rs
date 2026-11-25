@@ -118,7 +118,6 @@ impl AiRunRetryRefusal {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
     pub(crate) const fn into_error(self) -> AiError {
         use crate::AiRetryRefusalReason as Reason;
         AiError::RetryRefused(match self {

@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,106 @@ physical column. A literal dot requires one delimited identifier, such as
 `db_column = "\"event.code\""` on SQLite and PostgreSQL or
 `db_column = "[event.code]"` on SQL Server. See the
 [migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
+
+Version 0.219.0 enforces assurance on every enabled entity query root in
+generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
+
+Version 0.218.0 adds the `server_only_key(from, to)` relation option.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+Version 0.217.0 enforces required query assurance when traversing generated
+relations into the protected entity.
+See the [migration guide](../../MIGRATION.md#02160-to-02170-relation-target-assurance).
+
+Version 0.216.0 lets PostgreSQL choose the join for native search on
+generated `#[graphql_rls]` entities with a column-based default sort. Both
+RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
+Version 0.215.0 lets SQL Server entities declare VARCHAR, NVARCHAR and integer
+column types with the `mssql_type` field attribute.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+Version 0.214.0 stays aligned with ORM 0.214.0 for the Auth update.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
+Version 0.213.0 aligns with the ORM's
+[test harness fixes](../../MIGRATION.md#02120-to-02130-test-harness-coordination).
+
+Version 0.212.0 aligns with the ORM's
+[scoped SQLite column drop](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop).
+
+Version 0.211.0 records the Rust type of described root results for
+schema catalogue composition (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version 0.210.0 adds two opt-in options for generated updates. One makes
+`ExpectedVersion` required. The other selects assurance per request from the
+typed patch and the locked row. Other entities are unchanged. See the
+[migration guide](../../MIGRATION.md#02090-to-02100-required-expectedversion-and-conditional-update-assurance-operation-catalogue-0130).
+
+Version 0.209.0 aligns with the ORM runtime's
+[external migration preflight API](../../MIGRATION.md#02080-to-02090-external-migration-preflight).
+
+Version 0.208.0 generates the adapter for opt-in
+[bounded set-based deletes](../../docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes).
+
+Version 0.207.0 aligns with the ORM's
+[closure rendering update](../../MIGRATION.md#02060-to-02070-sqlite-closure-rendering-and-nested-closure-read-predicates).
+
+Version 0.206.0 aligns with the ORM runtime's
+[backend-typed backup API](../../MIGRATION.md#02050-to-02060-backend-typed-backup-runtime).
+
+Version 0.205.0 reduces per-entity compile work for generated Changed
+subscriptions by sharing their stream implementation. See the
+[migration guide](../../MIGRATION.md#02040-to-02050-generated-changed-subscriptions).
+
+Version 0.204.0 aligns with the ORM runtime's
+[external backup and restore setting](../../MIGRATION.md#02030-to-02040-externally-managed-backup-and-restore).
+
+Version 0.203.0 adds SQL Server-only options to
+`backend_selected_graphql_entity` and opt-in exact string filters. See the
+[migration guide](../../MIGRATION.md#02020-to-02030-durable-ai-sql-server-prerequisites).
+
+Version 0.202.0 aligns with the ORM's
+[integration test consolidation](../../docs/development/testing.md).
+See the [migration guide](../../MIGRATION.md#02010-to-02020-test-and-repository-hygiene).
+
+Version 0.201.0 makes `schema_roots!` report duplicate entity identities
+through its fallible schema builders and resolver catalogue helper. Upgrade
+ORM and macros together. See the
+[migration guide](../../MIGRATION.md#02000-to-02010-duplicate-entity-identities-operation-catalogue-0120).
+
+Version 0.200.0 includes the
+[standalone closure rendering update](../../MIGRATION.md#01990-to-02000-closure-read-predicates).
+
+Version 0.199.0 adds derive-level opt-outs for generated mutations and Changed
+subscriptions. See [omitting generated roots](../../docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+Generated mutations, entity getters, and relations return a curated field error
+when the schema lacks the database.
+
+Version 0.198.0 supports size checks for AI restore pages.
+See the [migration guide](../../MIGRATION.md#01970-to-01980-restore-page-size-checks).
+
+Version 0.197.0 keeps SQL Server generated identifiers delimited and extends
+the quoting cases shared with the runtime. The runtime's general SQL Server
+identifier renderer also supports bare temporary table and variable names.
+See the [migration guide](../../MIGRATION.md#01960-to-01970-database-binding-and-decoding).
+
+Version 0.196.0 lets hosts use generated entity keys and subscription
+authorization in opt-in [computed-field invalidations](../../docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations).
+
+Version 0.195.0 groups selected ORM integration tests. The
+[testing guide](../../docs/development/testing.md) lists the grouped selectors.
+
+In version 0.194.0, `schema_roots!` emits `graphql_orm_resolver_catalog()` beside the operation
+and semantic catalogue functions, and `GraphQLRelations` and
+`#[graphql_complex_object]` (with any options) record which generated
+relation resolvers an object mounts. `GraphQLOperations` supplies each entity's
+resolvable `@key` field sets and the roots whose static requirement its
+traversals and entity resolvers enforce. Generated SDL and resolvers are
+unchanged.
+See the [migration guide](../../MIGRATION.md#01930-to-01940-resolver-catalogue-operation-catalogue-0110).
 
 Version 0.193.0 adds `#[graphql_orm(object_fields)]` and
 `#[graphql_object_fields]`: handwritten resolver fields on the object

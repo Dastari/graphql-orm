@@ -103,14 +103,6 @@ pub trait AiProviderEndpointPolicy: Send + Sync {
     }
 }
 
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
 #[derive(Clone, Copy)]
 pub(crate) enum ProviderEndpointError {
     InvalidUrl,
@@ -118,16 +110,8 @@ pub(crate) enum ProviderEndpointError {
 }
 
 /// Parses the endpoint shape shared by every configurable provider: `http`
-/// or `https`, a host, and no user information, query or fragment. Path rules
-/// stay with each caller.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
+/// or `https`, a host, and no user information, query or fragment. The
+/// adapter path contract is checked separately.
 pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderEndpointError> {
     let mut url = url::Url::parse(value).map_err(|_| ProviderEndpointError::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -145,16 +129,6 @@ pub(crate) fn parse_provider_endpoint(value: &str) -> Result<url::Url, ProviderE
 }
 
 /// Returns whether an endpoint names a loopback host.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core",
-    feature = "provider-openai-core",
-    feature = "provider-xai-core"
-))]
 pub(crate) fn provider_endpoint_is_loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
@@ -172,14 +146,6 @@ pub(crate) fn provider_endpoint_is_loopback(url: &url::Url) -> bool {
 /// Applies the transport rule and then the deployment policy to one parsed
 /// endpoint. Used at configuration time, at provider construction and
 /// before every provider request.
-#[cfg(any(
-    feature = "sqlite",
-    feature = "postgres",
-    feature = "provider-anthropic-core",
-    feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core",
-    feature = "provider-chat-completions-core"
-))]
 pub(crate) fn provider_endpoint_permitted(
     policy: &dyn AiProviderEndpointPolicy,
     provider_kind: AiProviderKindInput,
@@ -220,7 +186,39 @@ pub enum AiProviderKindInput {
     ChatCompletions,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderEndpointPathContract {
+    Origin,
+    Exact,
+}
+
+impl ProviderEndpointPathContract {
+    pub(crate) fn validate(self, url: &url::Url) -> Result<(), crate::AiProviderEndpointPathError> {
+        use crate::AiProviderEndpointPathError;
+
+        let path = url.path();
+        let root = matches!(path, "" | "/");
+        match self {
+            Self::Origin if !root => Err(AiProviderEndpointPathError::OriginRequired),
+            Self::Exact if root || path.len() > 2_048 => {
+                Err(AiProviderEndpointPathError::ExactEndpointRequired)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 impl AiProviderKindInput {
+    pub(crate) const fn endpoint_path_contract(self) -> Option<ProviderEndpointPathContract> {
+        match self {
+            Self::Ollama => Some(ProviderEndpointPathContract::Origin),
+            Self::Anthropic | Self::OpenAiCompatible | Self::ChatCompletions => {
+                Some(ProviderEndpointPathContract::Exact)
+            }
+            Self::OpenAi | Self::Xai | Self::LocalHarness => None,
+        }
+    }
+
     /// Stable persistence/configuration value.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -560,7 +558,9 @@ pub struct UpsertAiProviderProfileInput {
     pub provider_kind: AiProviderKindInput,
     /// Administrative display name.
     pub display_name: String,
-    /// Endpoint for explicitly configurable providers.
+    /// Endpoint for explicitly configurable providers. Ollama requires an
+    /// origin with a root path. OpenAI-compatible and Chat Completions
+    /// require a non-root path of at most 2048 bytes.
     pub base_url: Option<String>,
     /// Required reviewed contract only for `OpenAiCompatible` profiles.
     pub openai_compatible: Option<AiOpenAiCompatibleProfileInput>,
@@ -851,6 +851,7 @@ pub trait AiConfigurationService: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiConfigurationQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -967,6 +968,7 @@ impl AiConfigurationQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiConfigurationMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

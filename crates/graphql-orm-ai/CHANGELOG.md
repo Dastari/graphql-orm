@@ -16,18 +16,140 @@ supersedes: []
   `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and
   `AiCodexAppServerWriter` to deliver it. The cloneable turn input contains
   unavailable markers for entity references.
-- **Added (off by default).** Codex registrations can opt in to a single
-  resolved `turn/start` write with a freshness bound of up to 60 seconds.
-  Stale or oversized resolutions fall back to markers. An incomplete resolved
-  write poisons the process writer and triggers a forced tree kill. Both
-  forms check dispatch scope at transport, and pending turn registration
-  follows a successful write and flush. Attempted writes retire their request
-  IDs, and a failed or cancelled transport write poisons even an unscoped
-  writer.
-- Tool-free turns accept entity-reference blocks. The protocol actor
-  allowlists lifecycle metadata in thread and turn snapshots and user-message
-  echoes. This excludes retained thread previews and display names. No data
-  migration is needed.
+- **Breaking (#828).** Replaces 0.159.0's additive Codex dispatch hook
+  (#875). `AiCodexAppServerDispatchTurn<'_>`, the `start_dispatch_turn`
+  override and `write_dispatch_turn` are removed. The resolved `turn/start`
+  write (off by default, freshness bound of up to 60 seconds) now goes
+  through the consuming dispatch: stale or oversized resolutions fall back
+  to markers, an incomplete resolved write poisons the process writer and
+  triggers a forced tree kill, and attempted writes retire their request IDs.
+  The protocol actor still allowlists lifecycle metadata in thread and turn
+  snapshots and user-message echoes. No data migration is needed.
+
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
+## Unreleased - 0.162.0
+
+- Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
+  The release benchmark can measure startup separately and export a byte
+  snapshot of the catalogue and model-facing output.
+  [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
+
+## Unreleased - 0.160.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01590-to-01600)
+
+## Unreleased - 0.159.0
+
+- Codex app-server registrations can opt into resolved entity-reference
+  delivery when the host process overrides `start_dispatch_turn`. The host
+  process implementation and its writer are inside the trust boundary. The
+  freshness bound and kill on an abandoned resolved write apply to the writer
+  passed to the protocol actor. Pass the child's stdin directly. A queueing
+  writer can acknowledge the frame before the actual pipe write.
+- For all Codex hosts, the protocol actor filters known user-message echoes
+  and empties thread previews as a best-effort defence-in-depth measure.
+  Tool-free Codex turns also accept entity references. Direct runtime calls
+  permanently send markers (#721).
+
+## Unreleased - 0.158.0
+
+- **Action needed.** Apply the checked SQL Server schema upgrade so claim and
+  expired-lease recovery candidate reads can seek on run state (#848).
+- **Action needed.** Drain workers on all backends before opening the successor
+  epoch under AI schema module 0.85.0.
+
+## Unreleased - 0.157.0
+
+- **Fixed (#878).** Hosts upgrading from AI schema module 0.82.0 or earlier
+  can admit replacement of the legacy approval lookup index with the unique
+  `tool_call_id` index. The live index must match the legacy definition, and
+  duplicate approval keys stop the upgrade before any DDL.
+  [Migration](MIGRATION.md#01560-to-01570)
+
+## Unreleased - 0.156.0
+
+Model-context measurement for the fixed capability broker (#551). Requires AI
+tool profiles 0.28.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change, and no AI schema module change. See the
+[migration guide](MIGRATION.md#01550-to-01560-capability-model-context-benchmark).
+
+- **Added:** the `capability_context_benchmark` example (requires the
+  `sqlite` feature) stamps a realistic generated entity family across 1, 10
+  and 100 independent targets and drives the version 2 broker as the
+  coordinator does, including the coordinator's describe steps (the exact
+  model definition and its fingerprint, the signature, and the describe byte
+  bounds). It reports first-turn definition bytes, discover,
+  describe and `describe_type` result bytes, discover latency, a restricted
+  caller's candidates, whether an unrelated target's schema change rotates a
+  retained binding, startup time and peak memory, and the bytes eager
+  delivery of the same roots would cost. Results and the measured curve are
+  in [capability discovery and execution](docs/capability-discovery-and-execution.md#model-context-benchmark).
+- **Performance:** with AI tool profiles 0.28.0, a host that supplies one
+  index through `AiCurrentCapabilityIndex` no longer pays a cost that grows
+  with the index on every broker call. Describe and `describe_type` no longer
+  regenerate a capability's compact schema on every call.
+
+## Unreleased - 0.155.0
+
+- Exported AI query, mutation, and subscription roots declare their GraphQL
+  fields for composition through `schema_roots!`. The declarations follow
+  the resolver naming rules for camelCase and PascalCase (#858).
+
+## Unreleased - 0.154.0
+
+- **Action needed.** To adopt SQL Server, enable durable AI ORM services
+  on externally provisioned SQL Server schemas. The owned parity lane
+  exercises session and run persistence, lease fencing and retries, durable
+  replay, checkpoints, context compaction, and bounded restore reconciliation.
+- **Action needed.** Drain active workers on SQLite, PostgreSQL, and SQL Server
+  before switching to AI schema module 0.84.0. The change rotates the runtime
+  epoch and invalidates earlier leases on every backend.
+- **No action.** SQLite and PostgreSQL keep their existing physical schema.
+  AI schema module 0.84.0 declares binary SQL Server string keys and filtered unique indexes for
+  provider responses and client message IDs. The SQL Server session-content
+  retention worker refuses changes because checkpoint purge is unavailable.
+
+## Unreleased - 0.153.0
+
+- Emit fixed, content-free debug codes for the approval, attachment, and
+  context-compaction content-protection mappings (#818).
+- Reuse argument validators bound to the exact provider offer or native
+  tool admission, including cached refusals for malformed schemas (#819).
+- Re-admit context compaction against the session's pinned provider profile,
+  model, and reasoning effort. Bind admission to the approved adapter instance
+  and verify the live run fence at dispatch. Classify validated handle-only
+  sources as `Confidential` and keep unlabelled blocks and inherited
+  summaries `Restricted` (#532).
+- Require a running lease and a positive checkpoint generation no newer
+  than the lease when adopting completed tool batches. Recheck the live fence
+  after reading and reauthorizing the checkpoint. Consumption checks expiry
+  inside each transaction attempt (#532).
+- Check payload lengths before materializing restore pages or batched
+  attachment parent rows in the same transaction. Preflight residual pages
+  before any per-row checks (#532).
 
 ## Unreleased - 0.152.0
 

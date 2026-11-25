@@ -385,3 +385,32 @@ async fn graphql_updates_distinguish_omitted_set_and_clear_for_nullable_fields()
 
     Ok(())
 }
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn nullable_uuid_and_bytes_bind_with_their_storage_types()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = setup_pool().await?;
+    #[cfg(feature = "sqlite")]
+    let ddl = "CREATE TABLE typed_nulls (id TEXT, payload BLOB)";
+    #[cfg(feature = "postgres")]
+    let ddl = "CREATE TABLE typed_nulls (id UUID, payload BYTEA)";
+    sqlx::query(ddl).execute(&pool).await?;
+
+    use graphql_orm::graphql::orm::{DefaultBackend, SqlValue, WriteBackend};
+    <DefaultBackend as WriteBackend>::execute_with_binds(
+        &pool,
+        "INSERT INTO typed_nulls VALUES (?, ?)",
+        &[SqlValue::UuidNull, SqlValue::BytesNull],
+    )
+    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM typed_nulls WHERE id IS NULL AND payload IS NULL")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(count, 1);
+    Ok(())
+}

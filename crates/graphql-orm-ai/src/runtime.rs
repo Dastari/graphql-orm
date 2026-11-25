@@ -63,7 +63,6 @@ pub struct AiRuntimeReadinessProof {
 }
 
 impl AiRuntimeReadinessProof {
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) fn new(module_fingerprint: String, epoch_id: uuid::Uuid) -> Self {
         Self {
             module_fingerprint,
@@ -149,6 +148,46 @@ impl AiRuntimeStartGate {
     }
 }
 
+struct CompactionProviderAdmission {
+    profile_id: String,
+    resolver: Arc<dyn crate::AiSessionExecutionSelectionResolver>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactionDispatchAdmission {
+    pub(crate) provider: Arc<dyn AiProvider>,
+    pub(crate) reader: Arc<dyn crate::AiRunExecutionSelectionReader>,
+    pub(crate) clock: Arc<dyn agql_auth::Clock>,
+    pub(crate) lease: crate::AiRunLease,
+    pub(crate) selection: crate::AiSessionExecutionSelection,
+}
+
+impl std::fmt::Debug for CompactionDispatchAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompactionDispatchAdmission")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CompactionDispatchAdmission {
+    pub(crate) async fn verify(self, provider: &Arc<dyn AiProvider>) -> Result<(), ProviderError> {
+        if !Arc::ptr_eq(provider, &self.provider) {
+            return Err(ProviderError::EgressDenied);
+        }
+        let expires_at = self.lease.lease_expires_at();
+        let clock = self.clock;
+        self.reader
+            .verify_compaction_fence(&self.lease, &self.selection)
+            .await
+            .map_err(|_| ProviderError::EgressDenied)?;
+        if clock.now() >= expires_at {
+            return Err(ProviderError::EgressDenied);
+        }
+        Ok(())
+    }
+}
+
 /// Built project-agnostic runtime.
 pub struct AiRuntime {
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
@@ -156,9 +195,7 @@ pub struct AiRuntime {
     tool_bridge: AuthenticatedToolBridge,
     egress_policy: Arc<dyn AiEgressPolicy>,
     deployment_egress: AiDeploymentEgressBoundary,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: ToolMaturity,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -169,6 +206,7 @@ pub struct AiRuntime {
     content_protection_policy_resolver: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
+    compaction_admission: BTreeMap<ProviderKind, CompactionProviderAdmission>,
     entity_references: Option<crate::AiEntityReferenceRegistry>,
     start_gate: AiRuntimeStartGate,
 }
@@ -324,7 +362,6 @@ impl AiRuntime {
     }
 
     /// Whether the exact registered provider freezes its retained-session tool surface.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn provider_freezes_session_tool_surface(
         &self,
         provider_kind: &ProviderKind,
@@ -406,7 +443,6 @@ impl AiRuntime {
         &self.content_protection_policy_resolver
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn resolve_current_principal(
         &self,
         reference: &PrincipalReference,
@@ -419,7 +455,6 @@ impl AiRuntime {
         .map_err(|_| AiError::ReauthorizationFailed)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn tool_media_resolver(
         &self,
         id: &str,
@@ -429,7 +464,6 @@ impl AiRuntime {
             .ok_or(AiError::Forbidden)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn preflight_tool_result_media(
         &self,
         descriptor: &AiToolDescriptor,
@@ -480,7 +514,6 @@ impl AiRuntime {
         Ok(self.egress_policy.authorize(&principal, manifest).await)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn authorize_tool_source_egress(
         &self,
         principal_reference: &PrincipalReference,
@@ -649,7 +682,6 @@ impl AiRuntime {
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn preauthorize_query_capability(
         &self,
         principal_reference: &PrincipalReference,
@@ -792,7 +824,6 @@ impl AiRuntime {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn preauthorize_compiled_subscription(
         &self,
         principal_reference: &PrincipalReference,
@@ -822,7 +853,6 @@ impl AiRuntime {
         })
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_compiled_subscription_event(
         &self,
         descriptor: &AiToolDescriptor,
@@ -1233,7 +1263,8 @@ impl AiRuntime {
     }
 
     /// Calls a registered provider only after start readiness and exact egress
-    /// authorization.
+    /// authorization. Entity references permanently use unavailable markers,
+    /// as in [`Self::dispatch_provider`].
     pub async fn stream_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1253,10 +1284,9 @@ impl AiRuntime {
     /// Dispatches a provider request while preserving whether failure occurred
     /// before or after the transport uncertainty boundary.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker. Only
-    /// `AiProviderCallExecutor` and the background-submission
-    /// service resolve references, for the principal they rehydrate.
+    /// Entity references permanently use unavailable markers on this direct
+    /// path because it has no rehydrated run principal. Use
+    /// [`crate::AiProviderCallExecutor`] for current-principal resolution.
     pub async fn dispatch_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1284,7 +1314,6 @@ impl AiRuntime {
     /// Builds the one value that may carry resolved reference data to a
     /// provider, for `principal`, now. Without a registry every reference
     /// becomes the unavailable marker.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) async fn resolve_dispatch_request(
         &self,
         principal: &agql_auth::AuthPrincipal,
@@ -1300,11 +1329,56 @@ impl AiRuntime {
         .await
     }
 
+    pub(crate) async fn admit_context_compaction(
+        &self,
+        principal: &agql_auth::AuthPrincipal,
+        selection: &crate::AiSessionExecutionSelection,
+        manifest: &crate::AiEgressManifest,
+        request: &ModelRequest,
+    ) -> Result<Arc<dyn AiProvider>, AiError> {
+        let kind = selection.provider_kind();
+        let admission = self
+            .compaction_admission
+            .get(&kind)
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        if admission.profile_id != selection.profile_id()
+            || manifest.provider_profile_id != selection.profile_id()
+            || manifest.provider_kind != kind.as_str()
+            || request.model != selection.model()
+            || request.reasoning_effort != selection.reasoning_effort()
+        {
+            return Err(AiError::SessionExecutionUnavailable);
+        }
+        crate::session_execution::resolve_exact(
+            admission.resolver.as_ref(),
+            principal,
+            &manifest.scope,
+            Some(&selection.as_input()),
+        )
+        .await?;
+        let provider = self
+            .providers
+            .get(&kind)
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        let approved = admission
+            .resolver
+            .compaction_provider(selection)
+            .ok_or(AiError::SessionExecutionUnavailable)?;
+        if !Arc::ptr_eq(provider, &approved) {
+            return Err(AiError::SessionExecutionUnavailable);
+        }
+        provider
+            .capabilities()
+            .validate_reasoning_effort(selection.model(), selection.reasoning_effort())
+            .map_err(|_| AiError::SessionExecutionUnavailable)?;
+        Ok(approved)
+    }
+
     pub(crate) async fn dispatch_provider_request(
         &self,
         provider_kind: &ProviderKind,
         dispatch: crate::ModelDispatchRequest,
-        context: ProviderRequestContext,
+        mut context: ProviderRequestContext,
     ) -> crate::AiProviderDispatchOutcome {
         let request = dispatch.request();
         let local = || {
@@ -1328,7 +1402,6 @@ impl AiRuntime {
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             if context.tool_source_delivery_check().is_some()
                 && !provider.supports_tool_result_source_delivery()
             {
@@ -1341,7 +1414,7 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
-                if let Err(error) = context.authorize_tool_source_delivery().await {
+                if let Err(error) = context.authorize_runtime_dispatch(provider).await {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
                 provider.dispatch(dispatch, context).await
@@ -1355,7 +1428,8 @@ impl AiRuntime {
     ///
     /// The responder is authority only for the exact current tool request and
     /// remains outside the provider process. Ordinary providers fail closed
-    /// through their default implementation.
+    /// through their default implementation. Entity references permanently
+    /// use unavailable markers, as in [`Self::dispatch_provider`].
     ///
     /// # Errors
     ///
@@ -1378,8 +1452,9 @@ impl AiRuntime {
         }
     }
 
-    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. It resolves
-    /// no entity reference either.
+    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. Entity
+    /// references permanently use unavailable markers because the responder
+    /// grants no run principal for inference.
     pub async fn dispatch_provider_with_dynamic_tools(
         &self,
         provider_kind: &ProviderKind,
@@ -1400,7 +1475,7 @@ impl AiRuntime {
         &self,
         provider_kind: &ProviderKind,
         dispatch: crate::ModelDispatchRequest,
-        context: ProviderRequestContext,
+        mut context: ProviderRequestContext,
         responder: Arc<dyn crate::ProviderDynamicToolResponder>,
     ) -> crate::AiProviderDispatchOutcome {
         let request = dispatch.request();
@@ -1420,7 +1495,6 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             for definition in &request.tools {
                 let id = AiToolId::parse(definition.tool_id.clone())
                     .map_err(|_| ProviderError::Rejected)?;
@@ -1440,7 +1514,6 @@ impl AiRuntime {
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             if context.tool_source_delivery_check().is_some()
                 && !provider.supports_tool_result_source_delivery()
             {
@@ -1453,7 +1526,7 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
-                if let Err(error) = context.authorize_tool_source_delivery().await {
+                if let Err(error) = context.authorize_runtime_dispatch(provider).await {
                     return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
                 }
                 provider
@@ -1464,7 +1537,6 @@ impl AiRuntime {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn create_empty_provider_session(
         &self,
         provider_kind: &ProviderKind,
@@ -1492,7 +1564,6 @@ impl AiRuntime {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) async fn discard_empty_provider_session(
         &self,
         provider_kind: &ProviderKind,
@@ -1689,8 +1760,9 @@ impl AiRuntime {
     /// Starts a registered provider background response after runtime,
     /// capability, budget, and exact egress validation.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker.
+    /// Entity references permanently use unavailable markers because this
+    /// API has no rehydrated run principal. The ORM background-submission
+    /// service resolves references after rehydrating and authorizing the run.
     ///
     /// # Errors
     ///
@@ -1843,7 +1915,6 @@ mod dependent_effect_guard_tests;
 #[cfg(test)]
 mod mutation_binding_tests {
     use serde_json::json;
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1854,7 +1925,6 @@ mod mutation_binding_tests {
         GraphqlOperationContract,
     };
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     use crate::{AiApprovalGrant, AiApprovalId, AiApprovalState};
 
     const CAPABILITY_FINGERPRINT: &str =
@@ -1942,7 +2012,6 @@ mod mutation_binding_tests {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn consumed(binding: &AiApprovalBinding) -> ConsumedAiApproval {
         let now = OffsetDateTime::now_utc();
         let grant = AiApprovalGrant {
@@ -1998,7 +2067,6 @@ mod mutation_binding_tests {
     }
 
     #[test]
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
@@ -2069,9 +2137,7 @@ pub struct AiRuntimeBuilder {
     graphql_targets: Option<GraphqlExecutionTargetRegistry>,
     egress_policy: Option<Arc<dyn AiEgressPolicy>>,
     deployment_egress: Option<AiDeploymentEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: Option<ToolMaturity>,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
@@ -2082,6 +2148,7 @@ pub struct AiRuntimeBuilder {
     content_protection_policy_resolver: Option<Arc<dyn AiContentProtectionPolicyResolver>>,
     content_protector: Option<Arc<dyn AiContentProtector>>,
     providers: BTreeMap<ProviderKind, Arc<dyn AiProvider>>,
+    compaction_admission: BTreeMap<ProviderKind, CompactionProviderAdmission>,
     entity_references: Option<crate::AiEntityReferenceRegistry>,
 }
 
@@ -2156,7 +2223,6 @@ impl AiRuntimeBuilder {
     /// current principal/resource/grant permission and leaves general/user egress unchanged.
     /// Aggregate request byte/image budgets remain intersected; per-source policies cannot add
     /// together their ceilings. Build rejects unknown fingerprints and duplicate bindings.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn tool_result_egress_boundary(
         mut self,
         boundary: crate::AiToolResultEgressBoundary,
@@ -2170,7 +2236,6 @@ impl AiRuntimeBuilder {
     ///
     /// # Errors
     /// Returns a safe configuration error for duplicate or unsafe logical identities.
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub fn tool_result_media_resolver(
         mut self,
         id: impl Into<String>,
@@ -2267,6 +2332,42 @@ impl AiRuntimeBuilder {
         Ok(self)
     }
 
+    /// Registers the exact provider adapter and host profile used for context compaction.
+    ///
+    /// The resolver must approve the pinned selection and return the same adapter
+    /// instance through its compaction provider method on every compaction dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid profile ID or provider registration.
+    pub fn provider_with_compaction_admission(
+        self,
+        provider: Arc<dyn AiProvider>,
+        profile_id: impl Into<String>,
+        resolver: Arc<dyn crate::AiSessionExecutionSelectionResolver>,
+    ) -> Result<Self, AiError> {
+        let profile_id = profile_id.into();
+        if profile_id.is_empty()
+            || profile_id.len() > 200
+            || profile_id.trim() != profile_id
+            || profile_id.chars().any(char::is_control)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid compaction provider profile".into(),
+            ));
+        }
+        let kind = provider.provider_kind();
+        let mut builder = self.provider(provider)?;
+        builder.compaction_admission.insert(
+            kind,
+            CompactionProviderAdmission {
+                profile_id,
+                resolver,
+            },
+        );
+        Ok(builder)
+    }
+
     /// Validates required security seams and builds a closed runtime.
     ///
     /// # Errors
@@ -2323,7 +2424,6 @@ impl AiRuntimeBuilder {
             graphql_targets,
         );
 
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             let mut bindings = std::collections::BTreeSet::new();
             for boundary in &self.tool_result_egress_boundaries {
@@ -2364,9 +2464,7 @@ impl AiRuntimeBuilder {
             tool_bridge,
             egress_policy,
             deployment_egress,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_result_egress_boundaries: self.tool_result_egress_boundaries,
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_result_media_resolvers: self.tool_result_media_resolvers,
             maximum_tool_maturity,
             generated_graphql_target_policy: self.generated_graphql_target_policy,
@@ -2377,6 +2475,7 @@ impl AiRuntimeBuilder {
             content_protection_policy_resolver,
             content_protector,
             providers: self.providers,
+            compaction_admission: self.compaction_admission,
             entity_references: self.entity_references,
             start_gate: AiRuntimeStartGate::new(fingerprint),
         })

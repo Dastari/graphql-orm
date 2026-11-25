@@ -308,6 +308,45 @@ fn schema_builder_without_database() -> AppSchema {
     schema_builder(Database::new(pool)).finish()
 }
 
+/// `MetaChild` declares relations but derives no `GraphQLRelations`, so the
+/// schema serves none of them. The resolver catalogue (#544) lists only
+/// coordinates the schema serves: none of these fields is in it, and nothing
+/// attaches a root's requirement to them. The semantic catalogue and the
+/// client metadata still describe the declared relationships.
+#[tokio::test]
+async fn resolver_catalogue_omits_relations_the_schema_does_not_serve() {
+    let sdl = schema_builder_without_database().sdl();
+    let child = block(&sdl, "type MetaChild ");
+    let resolvers = graphql_orm_resolver_catalog().expect("resolver catalogue");
+    let semantic = graphql_orm_semantic_catalog();
+    let declared = semantic
+        .entities
+        .iter()
+        .find(|entity| entity.entity_name == "MetaChild")
+        .expect("MetaChild is catalogued")
+        .fields
+        .iter()
+        .filter(|field| field.relationship.is_some())
+        .map(|field| field.field_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        declared.contains(&field_name("hiddenParent")),
+        "{declared:?}"
+    );
+    for field in declared {
+        let served = child.lines().map(str::trim).any(|line| {
+            line.strip_prefix(field)
+                .is_some_and(|rest| rest.starts_with(':') || rest.starts_with('('))
+        });
+        assert!(!served, "{field} is served");
+        assert!(resolvers.relation("MetaChild", field).is_none(), "{field}");
+    }
+    assert!(resolvers.relations.is_empty());
+    assert!(resolvers.entities.is_empty());
+    assert!(!resolvers.export_json().unwrap().contains("same_as_root"));
+    resolvers.validate_against(semantic).unwrap();
+}
+
 #[test]
 fn operation_catalogue_describes_the_opted_in_shapes() {
     let catalog = graphql_orm_semantic_catalog();

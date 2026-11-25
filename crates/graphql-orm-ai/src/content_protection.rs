@@ -106,6 +106,25 @@ pub enum ContentProtectionError {
     Unsupported,
 }
 
+pub(crate) fn map_orm_protection_error(
+    operation: &'static str,
+    error: ContentProtectionError,
+) -> AiError {
+    let code: &'static str = match error {
+        ContentProtectionError::PolicyNotReady => return AiError::RuntimeNotReady,
+        ContentProtectionError::KeyUnavailable => "key_unavailable",
+        ContentProtectionError::ValidationFailed => "validation_failed",
+        ContentProtectionError::Unsupported => "unsupported",
+    };
+    tracing::debug!(
+        target: "graphql_orm_ai::content_protection",
+        operation,
+        code,
+        "AI content protection failed"
+    );
+    AiError::PersistenceFailed
+}
+
 /// Application-level content protection seam. Implementations should bind
 /// authenticated encryption to every field in [`ContentProtectionContext`].
 ///

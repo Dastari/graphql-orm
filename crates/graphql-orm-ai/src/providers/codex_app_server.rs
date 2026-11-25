@@ -8,12 +8,11 @@
 //! ordinary coordinator. Every other server-initiated request remains
 //! forbidden.
 
-#![cfg_attr(feature = "mssql", allow(dead_code))]
-
 use super::{
     AiCodexAppServerSupportedVersions, AiCodexAppServerVersionObservation,
     AiCodexAppServerVersionReadiness,
 };
+use crate::provider::ModelToolOffer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -30,7 +29,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::entity_references::{
-    ResolvedWrite, is_envelope, unavailable_reference_json, write_resolved_before,
+    ResolvedWrite, entity_reference_unavailable_marker, is_entity_reference_envelope,
+    write_resolved_before,
 };
 use crate::{
     AiProvider, AiProviderCapabilitySessionBinding, AiProviderDispatchOutcome,
@@ -847,7 +847,6 @@ pub struct AiCodexAppServerTurnInput {
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
     tool_images: Vec<crate::AiResolvedToolImage>,
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
     tools: Vec<ModelToolDefinition>,
     web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
@@ -899,7 +898,6 @@ impl AiCodexAppServerTurnInput {
             retained_bootstrap_fingerprint: None,
             input,
             tool_images: Vec::new(),
-            #[cfg(any(feature = "sqlite", feature = "postgres"))]
             source_delivery: None,
             tools: Vec::new(),
             web_search: None,
@@ -916,7 +914,6 @@ impl AiCodexAppServerTurnInput {
         context: &ProviderRequestContext,
     ) -> Result<Self, ProviderError> {
         self.tool_images = context.retained_tool_result_images().to_vec();
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         {
             self.source_delivery = context.tool_source_delivery_check();
         }
@@ -938,7 +935,6 @@ impl AiCodexAppServerTurnInput {
     /// # Errors
     /// Returns a safe error for unavailable/expired/revoked/cancelled historical sources.
     pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
-        #[cfg(any(feature = "sqlite", feature = "postgres"))]
         if let Some(delivery) = &self.source_delivery {
             delivery.authorize().await?;
         }
@@ -1128,12 +1124,12 @@ impl AiCodexAppServerTurnInput {
             .into_iter()
             .map(|block| match block {
                 ModelInputBlock::Text { text } => Ok(text),
-                ModelInputBlock::Json { value } if is_envelope(&value) => {
-                    Ok(unavailable_reference_json(&value).to_string())
+                ModelInputBlock::Json { value } => entity_reference_unavailable_marker(&value)
+                    .map(|marker| marker.to_string())
+                    .ok_or(ProviderError::Unsupported),
+                ModelInputBlock::ToolResult { .. } | ModelInputBlock::Attachment { .. } => {
+                    Err(ProviderError::Unsupported)
                 }
-                ModelInputBlock::Json { .. }
-                | ModelInputBlock::ToolResult { .. }
-                | ModelInputBlock::Attachment { .. } => Err(ProviderError::Unsupported),
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut turn = Self::new(
@@ -1166,11 +1162,10 @@ impl AiCodexAppServerTurnInput {
             .iter()
             .map(|block| match block {
                 ModelInputBlock::Text { text } => Ok(text.clone()),
-                ModelInputBlock::Json { value } if is_envelope(value) => {
-                    Ok(unavailable_reference_json(value).to_string())
-                }
                 ModelInputBlock::Json { value } => {
-                    serde_json::to_string(value).map_err(|_| ProviderError::InvalidRequest)
+                    let marker = entity_reference_unavailable_marker(value);
+                    serde_json::to_string(marker.as_ref().unwrap_or(value))
+                        .map_err(|_| ProviderError::InvalidRequest)
                 }
                 ModelInputBlock::ToolResult { .. } | ModelInputBlock::Attachment { .. } => {
                     Err(ProviderError::Unsupported)
@@ -1275,7 +1270,7 @@ impl AiCodexAppServerTurnDispatch {
                 let ModelInputBlock::Json { value } = block else {
                     return None;
                 };
-                if !is_envelope(value) {
+                if !is_entity_reference_envelope(value) {
                     return None;
                 }
                 let wire = references.wire_json(value);
@@ -1820,7 +1815,6 @@ impl AiProvider for AiCodexAppServerProvider {
         self.pool.close_run(binding, reason).await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn create_empty_session(
         &self,
         binding: &AiProviderRunBinding,
@@ -1870,7 +1864,6 @@ impl AiProvider for AiCodexAppServerProvider {
             .await
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     async fn discard_empty_session(
         &self,
         binding: &AiProviderRunBinding,
@@ -2149,6 +2142,13 @@ impl AiCodexAppServerLaunchedProcess {
         }
     }
 
+    fn ensure_running(&self) -> Result<(), ProviderError> {
+        if self.kill_requested.load(Ordering::Acquire) {
+            return Err(ProviderError::Unavailable);
+        }
+        Ok(())
+    }
+
     async fn create_empty_thread(
         &self,
         model: &str,
@@ -2157,6 +2157,7 @@ impl AiCodexAppServerLaunchedProcess {
         dynamic_tools: Vec<ModelToolDefinition>,
         web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     ) -> Result<crate::AiProviderSessionCursor, ProviderError> {
+        self.ensure_running()?;
         self.process
             .create_empty_thread_with_web_search(
                 model,
@@ -2176,6 +2177,7 @@ impl AiCodexAppServerLaunchedProcess {
     where
         F: Future<Output = Result<ProviderEventStream, ProviderError>>,
     {
+        self.ensure_running()?;
         let (active, ended) = oneshot::channel();
         dispatch.scope = Some(TurnWriteScope {
             ended,
@@ -2257,6 +2259,7 @@ impl AiCodexAppServerLaunchedProcess {
         &self,
         cursor: &crate::AiProviderSessionCursor,
     ) -> Result<(), ProviderError> {
+        self.ensure_running()?;
         self.process.delete_thread(cursor).await
     }
 
@@ -2264,10 +2267,12 @@ impl AiCodexAppServerLaunchedProcess {
         &self,
         cursor: &crate::AiProviderSessionCursor,
     ) -> Result<(), ProviderError> {
+        self.ensure_running()?;
         self.process.confirm_thread_absent(cursor).await
     }
 
     async fn interrupt(&self) -> Result<(), ProviderError> {
+        self.ensure_running()?;
         self.process.interrupt().await
     }
 
@@ -4207,7 +4212,7 @@ pub struct AiCodexAppServerProtocolActor {
     thread_web_search_maximum_calls: Option<u64>,
     active_web_search_maximum_calls: Option<u64>,
     started_web_search_calls: u64,
-    dynamic_tools: BTreeMap<String, ModelToolDefinition>,
+    dynamic_tools: BTreeMap<String, ModelToolOffer>,
     dynamic_tool_projection_fingerprints: BTreeMap<String, String>,
     pending_dynamic_requests: BTreeMap<u64, (String, String)>,
     started_dynamic_calls: BTreeMap<String, String>,
@@ -4666,8 +4671,10 @@ impl AiCodexAppServerProtocolActor {
             .map(|search| search.domain_policy().clone());
         self.thread_web_search_maximum_calls =
             input.web_search().map(|search| search.maximum_calls());
-        self.dynamic_tools = projected_tools.definitions;
-        self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
+        if !has_bound_retained_state {
+            self.dynamic_tools = projected_tools.definitions;
+            self.dynamic_tool_projection_fingerprints = projected_tools.fingerprints;
+        }
         Ok(frame)
     }
 
@@ -4897,6 +4904,7 @@ impl AiCodexAppServerProtocolActor {
         let definition = self
             .dynamic_tools
             .values()
+            .map(ModelToolOffer::definition)
             .find(|definition| definition.tool_id == tool_id)
             .ok_or(ProviderError::Rejected)?;
         if self
@@ -5281,7 +5289,7 @@ impl AiCodexAppServerProtocolActor {
                 .get("tool")
                 .and_then(Value::as_str)
                 .ok_or(ProviderError::Rejected)?;
-            let definition = self
+            let offer = self
                 .dynamic_tools
                 .get(tool_name)
                 .ok_or(ProviderError::Rejected)?;
@@ -5293,16 +5301,15 @@ impl AiCodexAppServerProtocolActor {
                 .get("arguments")
                 .cloned()
                 .ok_or(ProviderError::Rejected)?;
-            let validator = jsonschema::validator_for(&definition.parameters)
-                .map_err(|_| ProviderError::InvalidRequest)?;
+            let validator = offer.validator()?;
             let invalid_arguments = !arguments.is_object() || !validator.is_valid(&arguments);
             let inbound = if invalid_arguments {
                 AiCodexAppServerInbound::InvalidDynamicToolCall {
                     request_id,
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.to_owned(),
-                    call: crate::ProviderInvalidDynamicToolCall::from_definition(
-                        turn_id, call_id, definition, arguments,
+                    call: crate::ProviderInvalidDynamicToolCall::from_offer(
+                        turn_id, call_id, offer, arguments,
                     )?,
                 }
             } else {
@@ -5310,13 +5317,13 @@ impl AiCodexAppServerProtocolActor {
                     request_id,
                     thread_id: thread_id.to_owned(),
                     turn_id: turn_id.to_owned(),
-                    call: ProviderDynamicToolCall::from_definition(
-                        turn_id, call_id, definition, arguments,
-                    )?,
+                    call: ProviderDynamicToolCall::from_offer(turn_id, call_id, offer, arguments)?,
                 }
             };
-            self.pending_dynamic_requests
-                .insert(request_id, (call_id.to_owned(), definition.tool_id.clone()));
+            self.pending_dynamic_requests.insert(
+                request_id,
+                (call_id.to_owned(), offer.definition().tool_id.clone()),
+            );
             return Ok(inbound);
         }
         if let Some(id) = object.get("id").and_then(Value::as_u64) {
@@ -7114,7 +7121,7 @@ fn validate_allowed_notification(method: &str, params: &Value) -> Result<(), Pro
 
 struct ProjectedCodexDynamicTools {
     protocol_values: Vec<Value>,
-    definitions: BTreeMap<String, ModelToolDefinition>,
+    definitions: BTreeMap<String, ModelToolOffer>,
     fingerprints: BTreeMap<String, String>,
 }
 
@@ -7128,11 +7135,16 @@ fn project_codex_dynamic_tools(
         tool.validate()?;
         if !tool.strict
             || definitions
-                .insert(tool.provider_name.clone(), tool.clone())
+                .insert(
+                    tool.provider_name.clone(),
+                    ModelToolOffer::new(tool.clone()),
+                )
                 .is_some()
         {
             return Err(ProviderError::Rejected);
         }
+        // The wire projection can omit constraints. Keep local admission
+        // bound to the complete definition accepted for this tool.
         let projected_schema = project_codex_argument_schema(&tool.parameters)?;
         let fingerprint = codex_schema_projection_fingerprint(tool, &projected_schema)?;
         fingerprints.insert(tool.provider_name.clone(), fingerprint);
@@ -13089,6 +13101,21 @@ pub(crate) mod tests {
                 .as_slice(),
             &[ModelReasoningEffort::High]
         );
+    }
+
+    #[test]
+    fn tool_free_turn_accepts_an_entity_reference_marker() {
+        let mut request = model_request();
+        request.input.push(ModelInputBlock::Json {
+            value: json!({
+                "type": "entity_reference",
+                "status": "unavailable",
+                "reference": {"kind": "record", "id": "r-1"}
+            }),
+        });
+        let input = AiCodexAppServerTurnInput::try_from_model_request(request)
+            .expect("entity reference markers should be accepted as text");
+        assert!(input.input()[1].contains("unavailable"));
     }
 
     #[test]

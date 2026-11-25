@@ -1,7 +1,6 @@
 //! ORM-backed canonical-preview approval and one-shot consumption lifecycle.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_runs::retry_transaction;
 use crate::orm_support::{
@@ -18,7 +17,7 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    AiMutationExecutionPolicy, ConditionalUpdateOutcome, DefaultWriteBackend, TransactionMode,
+    AiMutationExecutionPolicy, ConditionalUpdateOutcome, TransactionMode,
 };
 use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use time::{Duration, OffsetDateTime};
@@ -375,9 +374,9 @@ impl AiConsumedApproval {
 /// such a credential would yield the full user behind it.
 #[derive(Clone)]
 pub struct OrmAiApprovalService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     run_service: OrmAiRunService,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiApprovalAccessPolicy>,
@@ -394,7 +393,7 @@ impl OrmAiApprovalService {
     /// Creates a fail-closed approval lifecycle.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         run_service: OrmAiRunService,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         access_policy: Arc<dyn AiApprovalAccessPolicy>,
@@ -448,7 +447,7 @@ impl OrmAiApprovalService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -1684,9 +1683,9 @@ impl AiApprovalService for OrmAiApprovalService {
 /// It never claims, consumes, resumes, or executes an approval.
 #[derive(Clone)]
 pub struct OrmAiApprovalWaitReconciliationService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     run_service: OrmAiRunService,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
@@ -1701,7 +1700,7 @@ impl OrmAiApprovalWaitReconciliationService {
     /// Creates a fail-closed live approval-wait reconciler.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         run_service: OrmAiRunService,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
@@ -1739,7 +1738,7 @@ impl OrmAiApprovalWaitReconciliationService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -2725,11 +2724,8 @@ fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
         .expect("an existing OffsetDateTime timestamp remains representable")
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+pub(super) fn map_protection(error: crate::ContentProtectionError) -> AiError {
+    crate::content_protection::map_orm_protection_error("approval", error)
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -3202,6 +3198,8 @@ mod tests {
                 clock_skew: Duration::seconds(30),
                 allowed_amr: vec!["otp".to_owned()],
                 allowed_acr: vec!["urn:test:loa:2".to_owned()],
+                required_amr: Vec::new(),
+                required_context: None,
                 match_mode: AssuranceMatchMode::All,
             },
             Arc::new(Protection(scope.clone())),
