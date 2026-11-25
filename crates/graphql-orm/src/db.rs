@@ -563,7 +563,9 @@ impl<B: OrmBackend> Database<B> {
 
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub(crate) fn snapshot_policy_view(&self) -> Self {
-        self.clone_with_pool(None)
+        let mut view = self.clone_with_pool(None);
+        view.externally_managed_backup_restore = self.backup_restore_is_externally_managed();
+        view
     }
 
     /// Whether another system owns backup and restore for this database handle.
@@ -571,7 +573,9 @@ impl<B: OrmBackend> Database<B> {
     /// See [`DatabaseBuilder::externally_managed_backup_restore`].
     pub fn backup_restore_is_externally_managed(&self) -> bool {
         #[cfg(feature = "mssql")]
-        if let Some(pool) = (&self.pool as &dyn Any).downcast_ref::<mssql::MssqlPool>() {
+        if let Some(pool) = &self.pool
+            && let Some(pool) = (pool as &dyn Any).downcast_ref::<mssql::MssqlPool>()
+        {
             return pool.externally_managed_backup_restore;
         }
         self.externally_managed_backup_restore
@@ -583,7 +587,9 @@ impl<B: OrmBackend> Database<B> {
     pub fn with_externally_managed_backup_restore(mut self, enabled: bool) -> Self {
         self.externally_managed_backup_restore = enabled;
         #[cfg(feature = "mssql")]
-        if let Some(pool) = (&mut self.pool as &mut dyn Any).downcast_mut::<mssql::MssqlPool>() {
+        if let Some(pool) = &mut self.pool
+            && let Some(pool) = (pool as &mut dyn Any).downcast_mut::<mssql::MssqlPool>()
+        {
             pool.externally_managed_backup_restore = enabled;
         }
         self
@@ -2745,6 +2751,25 @@ pub mod mssql_helpers {
 #[cfg(test)]
 mod database_contract_tests {
     use super::*;
+
+    #[cfg(feature = "mssql")]
+    #[test]
+    fn snapshot_policy_view_preserves_external_backup_ownership_from_pool() {
+        use crate::graphql::orm::MssqlBackend;
+
+        let pool = mssql::MssqlPool::new(tiberius::Config::new());
+        let external = Database::<MssqlBackend>::builder(pool.clone())
+            .externally_managed_backup_restore(true)
+            .build();
+
+        assert!(!pool.externally_managed_backup_restore);
+        let rewrapped = Database::<MssqlBackend>::builder(external.pool().clone()).build();
+        assert!(rewrapped.backup_restore_is_externally_managed());
+
+        let policy_view = rewrapped.snapshot_policy_view().clone();
+        assert!(policy_view.backup_restore_is_externally_managed());
+        assert!(policy_view.try_pool().is_err());
+    }
 
     #[test]
     fn missing_policy_uses_the_mode_and_policy_scope() {
