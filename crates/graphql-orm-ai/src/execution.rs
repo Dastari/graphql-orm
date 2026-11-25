@@ -934,6 +934,7 @@ impl AuthenticatedToolBridge {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_generated_mutation(
         &self,
         principal_reference: &PrincipalReference,
