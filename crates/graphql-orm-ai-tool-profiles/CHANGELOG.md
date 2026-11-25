@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.32.0
+
+- **No action (graphql-orm #908).** The GraphQL tool-profile compiler refuses
+  an argument plan that maps an argument declared `@transientInput` in the
+  finished schema. Such an argument is request-only data, and tool arguments
+  are retained with the run. A mutation whose transient argument is required
+  therefore has no profile; an optional one is never sent.
+  [Migration](MIGRATION.md#0320-transient-mutation-arguments)
+
 ## Unreleased - 0.31.0
 
 - **No action (#817).** Add content-free endpoint validation reasons to the

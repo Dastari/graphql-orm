@@ -1144,7 +1144,13 @@ struct SchemaField {
 struct SchemaInput {
     ty: String,
     has_default: bool,
+    /// Declared `@transientInput`: request-only data that a tool must never
+    /// carry, because tool arguments are retained with the run.
+    transient: bool,
 }
+
+/// The schema directive marking a transient mutation argument.
+const TRANSIENT_INPUT_DIRECTIVE: &str = "transientInput";
 
 impl FinishedSchema {
     fn parse(sdl: &str) -> Result<Self, AiError> {
@@ -1201,6 +1207,12 @@ impl FinishedSchema {
                                         SchemaInput {
                                             ty: argument.node.ty.node.to_string(),
                                             has_default: argument.node.default_value.is_some(),
+                                            transient: argument.node.directives.iter().any(
+                                                |directive| {
+                                                    directive.node.name.node
+                                                        == TRANSIENT_INPUT_DIRECTIVE
+                                                },
+                                            ),
                                         },
                                     )
                                 })
@@ -1225,6 +1237,7 @@ impl FinishedSchema {
                                 SchemaInput {
                                     ty: field.node.ty.node.to_string(),
                                     has_default: field.node.default_value.is_some(),
+                                    transient: false,
                                 },
                             )
                         })
@@ -1285,6 +1298,11 @@ impl FinishedSchema {
             let schema_input = schema_arguments
                 .get(&plan.name)
                 .ok_or_else(|| configuration_error("argument plan contains an unknown field"))?;
+            if schema_input.transient {
+                return Err(configuration_error(
+                    "argument plan maps a transient mutation argument",
+                ));
+            }
             let value =
                 self.render_value(&schema_input.ty, &plan.value, inputs, inferred_inputs, 0)?;
             rendered.push(format!("{}: {}", plan.name, value));

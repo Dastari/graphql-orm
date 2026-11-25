@@ -62,19 +62,39 @@ impl PrincipalKeyBinding for MachineIdentity {
         if let Some(probe) = ctx.data_opt::<Probe>() {
             probe.bindings.fetch_add(1, Ordering::SeqCst);
         }
-        if ctx.data_opt::<NoMachineIdentity>().is_some() {
-            return Err(OrmPublicError::with_message(
-                OrmErrorCode::Forbidden,
-                "this request has no machine identity",
-            )
-            .into_graphql_error());
+        match ctx.data_opt::<NoMachineIdentity>() {
+            // A coded public refusal carrying a diagnostic and an extension.
+            Some(NoMachineIdentity::Coded) => {
+                return Err(
+                    OrmPublicError::with_message(OrmErrorCode::NotFound, BINDING_SECRET)
+                        .into_graphql_error()
+                        .extend_with(|_, extensions| extensions.set("detail", BINDING_SECRET)),
+                );
+            }
+            // An uncoded error, which a compatibility setting can expose.
+            Some(NoMachineIdentity::Uncoded) => {
+                return Err(async_graphql::Error::new(BINDING_SECRET));
+            }
+            None => {}
         }
         Ok(ctx.auth_subject()?.id)
     }
 }
 
-/// Request data: the verified context carries no machine identity.
-struct NoMachineIdentity;
+/// Request data: the verified context carries no machine identity, and the
+/// binding fails with an error that names a secret.
+#[derive(Clone, Copy)]
+enum NoMachineIdentity {
+    Coded,
+    Uncoded,
+}
+const BINDING_SECRET: &str = "issuer-key-4f1a-not-for-clients";
+/// Request data: a first write of an absent key waits here for its peers.
+#[derive(Clone)]
+struct Race(Arc<tokio::sync::Barrier>);
+/// Request data: the rendered execution document, as a logger would see it.
+#[derive(Clone, Default)]
+struct RenderedDocuments(Arc<Mutex<Vec<String>>>);
 /// Request data: the input transform tries to replace the bound key.
 struct HostileTransform;
 
@@ -84,6 +104,7 @@ pub struct SnapshotProof {
     pub sequence: i64,
     pub digest: String,
     pub nonce: String,
+    pub tags: Option<Vec<i32>>,
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -97,7 +118,13 @@ pub struct SnapshotProof {
         write_policy = "snapshot.write",
         upsert = "machine_key",
         upsert_bound_key(field = "machine_key", binding = "MachineIdentity"),
-        transient_input(type = "SnapshotProof", on = "upsert", name = "proof"),
+        transient_input(
+            type = "SnapshotProof",
+            on = "upsert",
+            name = "proof",
+            max_bytes = 512,
+            max_nodes = 16
+        ),
         upsert_acknowledge = true,
         mutation_shapes = "upsert",
         default_sort = "id ASC"
@@ -113,7 +140,13 @@ pub struct SnapshotProof {
         write_policy = "snapshot.write",
         upsert = "machine_key",
         upsert_bound_key(field = "machine_key", binding = "MachineIdentity"),
-        transient_input(type = "SnapshotProof", on = "upsert", name = "proof"),
+        transient_input(
+            type = "SnapshotProof",
+            on = "upsert",
+            name = "proof",
+            max_bytes = 512,
+            max_nodes = 16
+        ),
         upsert_acknowledge = true,
         mutation_shapes = "upsert",
         default_sort = "id ASC"
@@ -130,7 +163,13 @@ pub struct SnapshotProof {
         write_policy = "snapshot.write",
         upsert = "machine_key",
         upsert_bound_key(field = "machine_key", binding = "MachineIdentity"),
-        transient_input(type = "SnapshotProof", on = "upsert", name = "proof"),
+        transient_input(
+            type = "SnapshotProof",
+            on = "upsert",
+            name = "proof",
+            max_bytes = 512,
+            max_nodes = 16
+        ),
         upsert_acknowledge = true,
         mutation_shapes = "upsert",
         default_sort = "id ASC"
@@ -171,7 +210,7 @@ pub struct StatusSnapshot {
             name = "proof",
             required = false
         ),
-        mutation_shapes = "upsert,update",
+        mutation_shapes = "upsert,update,update_many",
         default_sort = "id ASC"
     )
 )]
@@ -189,7 +228,7 @@ pub struct StatusSnapshot {
             name = "proof",
             required = false
         ),
-        mutation_shapes = "upsert,update",
+        mutation_shapes = "upsert,update,update_many",
         default_sort = "id ASC"
     )
 )]
@@ -208,7 +247,7 @@ pub struct StatusSnapshot {
             name = "proof",
             required = false
         ),
-        mutation_shapes = "upsert,update",
+        mutation_shapes = "upsert,update,update_many",
         default_sort = "id ASC"
     )
 )]
@@ -314,25 +353,34 @@ impl RowPolicy<Backend> for Rows {
 
     fn read_visibility<'a>(
         &'a self,
-        _: Option<&'a async_graphql::Context<'_>>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
         _: &'a Database<Backend>,
         _: &'static str,
         _: Option<&'static str>,
         _: EntityAccessSurface,
     ) -> BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
-        Box::pin(async { Ok(ReadVisibility::Unrestricted) })
+        let blind = subject(ctx).starts_with("blind-row");
+        Box::pin(async move {
+            Ok(if blind {
+                ReadVisibility::CallbackOnly
+            } else {
+                ReadVisibility::Unrestricted
+            })
+        })
     }
 
     fn can_read_row<'a>(
         &'a self,
-        _: Option<&'a async_graphql::Context<'_>>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
         _: &'a Database<Backend>,
         _: &'static str,
         _: Option<&'static str>,
         _: EntityAccessSurface,
         _: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async { Ok(true) })
+        // `blind-row-*` may write its snapshot but never read it back.
+        let readable = !subject(ctx).starts_with("blind-row");
+        Box::pin(async move { Ok(readable) })
     }
 
     fn can_write_row<'a>(
@@ -361,14 +409,17 @@ struct Fields;
 impl FieldPolicy<Backend> for Fields {
     fn can_read_field<'a>(
         &'a self,
-        _: &'a async_graphql::Context<'_>,
+        ctx: &'a async_graphql::Context<'_>,
         _: &'a Database<Backend>,
         _: &'static str,
-        _: &'static str,
+        field: &'static str,
         _: Option<&'static str>,
         _: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async { Ok(true) })
+        // `blind-field-*` may write a payload but never read one.
+        let readable = !(field.eq_ignore_ascii_case("payload")
+            && subject(Some(ctx)).starts_with("blind-field"));
+        Box::pin(async move { Ok(readable) })
     }
 
     fn can_write_field<'a>(
@@ -392,6 +443,23 @@ impl FieldPolicy<Backend> for Fields {
 struct ProofTransform(Probe);
 
 impl WriteInputTransform<Backend> for ProofTransform {
+    fn before_update_with_context<'a>(
+        &'a self,
+        write_ctx: &'a mut WriteInputContext<'_, '_, Backend>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        input: &'a mut (dyn std::any::Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async move {
+            let hostile = write_ctx
+                .graphql_ctx()
+                .is_some_and(|ctx| ctx.data_opt::<HostileTransform>().is_some());
+            if let (true, Some(note)) = (hostile, input.downcast_mut::<UpdateMachineNoteInput>()) {
+                note.machine_key = Some("hijacked".to_owned());
+            }
+            Ok(())
+        })
+    }
+
     fn before_upsert_with_context<'a>(
         &'a self,
         write_ctx: &'a mut WriteInputContext<'_, '_, Backend>,
@@ -445,11 +513,16 @@ impl MutationHook<Backend> for ProofHook {
                 // No acknowledgement is armed for this entity.
                 if event.phase == MutationPhase::Before && event.before_state.is_some() {
                     assert!(!hook_ctx.can_acknowledge_without_write());
-                    if hook_ctx
+                    let nonce = hook_ctx
                         .transient_input::<SnapshotProof>()
-                        .is_some_and(|proof| proof.nonce == "acknowledge")
-                    {
-                        hook_ctx.acknowledge_without_write()?;
+                        .map(|proof| proof.nonce.clone());
+                    match nonce.as_deref() {
+                        Some("acknowledge") => hook_ctx.acknowledge_without_write()?,
+                        // A hook that ignores the refusal.
+                        Some("acknowledge-and-ignore") => {
+                            let _ = hook_ctx.acknowledge_without_write();
+                        }
+                        _ => {}
                     }
                 }
                 return Ok(());
@@ -475,6 +548,13 @@ impl MutationHook<Backend> for ProofHook {
             let Some(current) = event.before::<StatusSnapshot>()? else {
                 // Nothing to acknowledge on the insert branch.
                 assert!(!hook_ctx.can_acknowledge_without_write());
+                // Hold a first write of an absent key until its peers have
+                // also found the key absent, where the backend lets them.
+                if let Some(race) = ctx.and_then(|ctx| ctx.data_opt::<Race>()) {
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_millis(1500), race.0.wait())
+                            .await;
+                }
                 return Ok(());
             };
             if proof.sequence < current.sequence {
@@ -532,13 +612,26 @@ async fn fixture() -> TestResult<Fixture> {
             .plan_migration_to_entities(
                 "principal-bound-upserts-init",
                 "principal-bound upserts test",
-                &[StatusSnapshot::metadata(), MachineNote::metadata()],
+                &[
+                    StatusSnapshot::metadata(),
+                    #[cfg(feature = "postgres")]
+                    MachineNote::metadata(),
+                ],
             )
             .await?;
         db.schema()
             .apply_migration(&plan, ApplyOptions::default())
             .await?;
     }
+    // A key column whose equality folds case, as SQL Server's default
+    // collation does: distinct principals can compare equal in SQL.
+    #[cfg(feature = "sqlite")]
+    sqlx::query(
+        "CREATE TABLE machine_notes (id TEXT NOT NULL PRIMARY KEY, \
+         machine_key TEXT NOT NULL UNIQUE COLLATE NOCASE, note TEXT NOT NULL)",
+    )
+    .execute(db.pool())
+    .await?;
     #[cfg(feature = "mssql")]
     let (db, owner) = {
         let owner = owned_mssql::OwnedSqlServer::start().await?;
@@ -546,7 +639,7 @@ async fn fixture() -> TestResult<Fixture> {
             &owner.connection_string,
             "CREATE TABLE status_snapshots (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
              machine_key NVARCHAR(64) NOT NULL UNIQUE, sequence BIGINT NOT NULL, \
-             digest NVARCHAR(64) NOT NULL, payload NVARCHAR(64) NOT NULL); \
+             digest NVARCHAR(400) NOT NULL, payload NVARCHAR(64) NOT NULL); \
              CREATE TABLE machine_notes (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
              machine_key NVARCHAR(64) NOT NULL UNIQUE, note NVARCHAR(64) NOT NULL);",
         )
@@ -922,25 +1015,37 @@ async fn failed_binding_refuses_first(
     base: &Database<Backend>,
     mode: AuthorizationMode,
 ) -> TestResult {
-    let probe = Probe::default();
-    let db = configured(base, mode, &probe);
     let label = format!("{mode:?}");
-    let rows = stored(&db).await?.len();
-    let (schema, request) = request(&db, &probe, &snapshot_mutation("x", 1, "d"));
-    let response = schema
-        .execute(request.data(machine("unbound")).data(NoMachineIdentity))
-        .await;
-    assert_eq!(code(&response).as_deref(), Some("FORBIDDEN"), "{label}");
-    assert_eq!(
-        response.errors[0].message,
-        "this request has no machine identity"
-    );
-    assert_eq!(
-        probe.counts(),
-        [1, 0, 0, 0, 0, 0],
-        "{label}: only the binding ran"
-    );
-    assert_eq!(stored(&db).await?.len(), rows, "{label}");
+    // The refusal is the same fixed code and message whatever the binding
+    // returned, also when the host exposes uncoded callback messages.
+    for (failure, exposed) in [
+        (NoMachineIdentity::Coded, false),
+        (NoMachineIdentity::Uncoded, false),
+        (NoMachineIdentity::Coded, true),
+        (NoMachineIdentity::Uncoded, true),
+    ] {
+        let probe = Probe::default();
+        let mut db = configured(base, mode, &probe);
+        if exposed {
+            db = db.with_uncoded_callback_messages_exposed(true);
+        }
+        let rows = stored(&db).await?.len();
+        let (schema, request) = request(&db, &probe, &snapshot_mutation("x", 1, "d"));
+        let response = schema
+            .execute(request.data(machine("unbound")).data(failure))
+            .await;
+        assert_eq!(code(&response).as_deref(), Some("FORBIDDEN"), "{label}");
+        assert_eq!(response.errors[0].message, PRINCIPAL_KEY_BINDING_REFUSAL);
+        let rendered = serde_json::to_string(&response)?;
+        assert!(!rendered.contains(BINDING_SECRET), "{label}: {rendered}");
+        assert!(!rendered.contains("detail"), "{label}: {rendered}");
+        assert_eq!(
+            probe.counts(),
+            [1, 0, 0, 0, 0, 0],
+            "{label}: only the binding ran"
+        );
+        assert_eq!(stored(&db).await?.len(), rows, "{label}");
+    }
     Ok(())
 }
 
@@ -960,6 +1065,14 @@ async fn key_has_no_public_surface(base: &Database<Backend>) -> TestResult {
     // The transient type appears as the upsert's argument type only.
     assert!(sdl.contains("input snapshotproof"), "{sdl}");
     assert_eq!(sdl.matches("snapshotproof").count(), 3, "{sdl}");
+    // Both transient arguments carry the schema marker that tool-profile
+    // compilers refuse to map.
+    assert!(sdl.contains("snapshotproof! @transientinput"), "{sdl}");
+    assert!(sdl.contains("snapshotproof @transientinput"), "{sdl}");
+    assert!(
+        sdl.contains("directive @transientinput on argument_definition"),
+        "{sdl}"
+    );
 
     let proof = format!(
         "{}: {{ sequence: 9, digest: \"d\", nonce: \"n\" }}",
@@ -1143,6 +1256,21 @@ async fn undeclared_acknowledgement_is_refused(base: &Database<Backend>) -> Test
         "the refused acknowledgement wrote nothing"
     );
 
+    // A hook that ignores the refusal still cannot let the write through.
+    let proof = format!(
+        ", {}: {{ sequence: 1, digest: \"d\", nonce: \"acknowledge-and-ignore\" }}",
+        a("proof")
+    );
+    let ignored = execute(&db, &probe, "note-machine", &note("two", &proof)).await;
+    assert_eq!(
+        code(&ignored).as_deref(),
+        Some("FORBIDDEN"),
+        "{:?}",
+        ignored.errors
+    );
+    let rows = MachineNote::find_many(&db, MachineNoteWhereInput::default()).await?;
+    assert!(rows.iter().all(|row| row.note == "one"), "{rows:?}");
+
     // The transform cannot move a note to another key either.
     let (schema, request) = request(&db, &probe, &note("three", ""));
     let hostile = schema
@@ -1154,6 +1282,280 @@ async fn undeclared_acknowledgement_is_refused(base: &Database<Backend>) -> Test
         rows.iter().all(|row| row.machine_key != "hijacked"),
         "{rows:?}"
     );
+    Ok(())
+}
+
+/// The generated update and bulk update never assign the bound column, even
+/// when their input transform puts a value there.
+async fn updates_cannot_rewrite_the_key(base: &Database<Backend>) -> TestResult {
+    let probe = Probe::default();
+    let db = configured(base, AuthorizationMode::default(), &probe);
+    let created = execute(
+        &db,
+        &probe,
+        "update-machine",
+        &format!(
+            "mutation {{ {}({}: {{ {}: \"zero\" }}) {{ {} {{ {} }} }} }}",
+            r("upsertMachineNote"),
+            a("input"),
+            f("note"),
+            f("machineNote"),
+            f("id"),
+        ),
+    )
+    .await;
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
+    let id = created.data.into_json()?[r("upsertMachineNote")][f("machineNote")][f("id")]
+        .as_str()
+        .ok_or("note id")?
+        .to_owned();
+    for (text, mutation) in [
+        (
+            "single",
+            format!(
+                "mutation {{ {}({}: \"{id}\", {}: {{ {}: \"single\" }}) {{ success }} }}",
+                r("updateMachineNote"),
+                a("id"),
+                a("input"),
+                f("note"),
+            ),
+        ),
+        (
+            "bulk",
+            format!(
+                "mutation {{ {}({}: {{ {}: {{ eq: \"{id}\" }} }}, {}: {{ {}: \"bulk\" }}) {{ success }} }}",
+                r("updateMachineNotes"),
+                a("where"),
+                f("id"),
+                a("input"),
+                f("note"),
+            ),
+        ),
+    ] {
+        let (schema, request) = request(&db, &probe, &mutation);
+        let response = schema
+            .execute(
+                request
+                    .data(machine("update-machine"))
+                    .data(HostileTransform),
+            )
+            .await;
+        assert!(response.errors.is_empty(), "{text}: {:?}", response.errors);
+        let rows = MachineNote::find_many(&db, MachineNoteWhereInput::default()).await?;
+        let row = rows.iter().find(|row| row.id == id).ok_or("updated note")?;
+        assert_eq!(row.note, text, "the update itself was applied");
+        assert_eq!(row.machine_key, "update-machine", "{text} rewrote the key");
+        assert!(rows.iter().all(|row| row.machine_key != "hijacked"));
+    }
+    Ok(())
+}
+
+/// Two principals whose keys the database compares equal but which differ
+/// exactly never share a row.
+async fn database_equality_cannot_merge_principals(base: &Database<Backend>) -> TestResult {
+    let probe = Probe::default();
+    let db = configured(base, AuthorizationMode::default(), &probe);
+    let note = |text: &str| {
+        format!(
+            "mutation {{ {}({}: {{ {}: \"{text}\" }}) {{ success action }} }}",
+            r("upsertMachineNote"),
+            a("input"),
+            f("note"),
+        )
+    };
+    let first = execute(&db, &probe, "Collated-Machine", &note("mine")).await;
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    let before = probe.counts();
+    let second = execute(&db, &probe, "collated-machine", &note("theirs")).await;
+    let rows = MachineNote::find_many(&db, MachineNoteWhereInput::default()).await?;
+    let colliding = rows
+        .iter()
+        .filter(|row| row.machine_key.eq_ignore_ascii_case("collated-machine"))
+        .collect::<Vec<_>>();
+    if cfg!(feature = "postgres") {
+        // A case-sensitive key column: the second principal has its own row.
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(colliding.len(), 2, "{rows:?}");
+    } else {
+        // SQLite NOCASE and SQL Server's default collation match the first
+        // principal's row. The upsert refuses with the generic row-write
+        // denial, before any row policy, field policy or hook, and writes
+        // nothing.
+        assert_eq!(
+            code(&second).as_deref(),
+            Some("FORBIDDEN"),
+            "{:?}",
+            second.errors
+        );
+        assert_eq!(
+            second.errors[0].message,
+            OrmPublicError::forbidden().to_string()
+        );
+        let after = probe.counts();
+        assert_eq!(after[2], before[2], "no row policy was asked");
+        assert_eq!(after[4], before[4], "no hook ran");
+        assert_eq!(colliding.len(), 1, "{rows:?}");
+        assert_eq!(colliding[0].machine_key, "Collated-Machine");
+        assert_eq!(colliding[0].note, "mine");
+    }
+    Ok(())
+}
+
+/// Captures the execution document the way a logging extension renders it.
+struct RenderDocuments;
+
+impl async_graphql::extensions::ExtensionFactory for RenderDocuments {
+    fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
+        Arc::new(RenderDocuments)
+    }
+}
+
+#[async_graphql::async_trait::async_trait]
+impl async_graphql::extensions::Extension for RenderDocuments {
+    async fn parse_query(
+        &self,
+        ctx: &async_graphql::extensions::ExtensionContext<'_>,
+        query: &str,
+        variables: &async_graphql::Variables,
+        next: async_graphql::extensions::NextParseQuery<'_>,
+    ) -> async_graphql::ServerResult<async_graphql::parser::types::ExecutableDocument> {
+        let document = next.run(ctx, query, variables).await?;
+        if let Some(rendered) = ctx.data_opt::<RenderedDocuments>() {
+            rendered
+                .0
+                .lock()
+                .unwrap()
+                .push(ctx.stringify_execute_doc(&document, variables));
+        }
+        Ok(document)
+    }
+}
+
+/// The transient argument is redacted where async-graphql renders a request,
+/// and an oversized one is refused before it is coerced.
+async fn transient_argument_is_secret_and_bounded(base: &Database<Backend>) -> TestResult {
+    let probe = Probe::default();
+    let db = configured(base, AuthorizationMode::default(), &probe);
+    let rendered = RenderedDocuments::default();
+    let run = |query: String, variables: Value| {
+        let (db, probe, rendered) = (db.clone(), probe.clone(), rendered.clone());
+        async move {
+            schema_builder(db)
+                .extension(RenderDocuments)
+                .finish()
+                .execute(
+                    async_graphql::Request::new(query)
+                        .variables(async_graphql::Variables::from_json(variables))
+                        .data(probe)
+                        .data(rendered)
+                        .data(machine("bounded-machine")),
+                )
+                .await
+        }
+    };
+    let with_variable = format!(
+        "mutation($proof: SnapshotProof!) {{ {}({}: {{ {}: \"x\" }}, {}: $proof) {{ success }} }}",
+        r("upsertStatusSnapshot"),
+        a("input"),
+        f("payload"),
+        a("proof"),
+    );
+    let proof = |digest: &str, tags: usize| json!({ "sequence": 1, "digest": digest, "nonce": NONCE, "tags": vec![7; tags] });
+
+    // Redaction, for a literal and for a variable.
+    let literal = run(snapshot_mutation("x", 1, "d1"), json!({})).await;
+    assert!(literal.errors.is_empty(), "{:?}", literal.errors);
+    let variable = run(with_variable.clone(), json!({ "proof": proof("d1", 2) })).await;
+    assert!(variable.errors.is_empty(), "{:?}", variable.errors);
+    let documents = rendered.0.lock().unwrap().clone();
+    assert_eq!(documents.len(), 2);
+    for document in &documents {
+        assert!(document.contains("<secret>"), "{document}");
+        assert!(!document.contains(NONCE), "{document}");
+        assert!(!document.contains("d1"), "{document}");
+    }
+
+    // Size: 512 bytes and 16 values for this entity.
+    let before = probe.counts();
+    let large = "x".repeat(600);
+    let literal_large = snapshot_mutation("x", 2, &large);
+    for (label, response) in [
+        ("literal bytes", run(literal_large, json!({})).await),
+        (
+            "variable bytes",
+            run(with_variable.clone(), json!({ "proof": proof(&large, 0) })).await,
+        ),
+        (
+            "variable values",
+            run(with_variable.clone(), json!({ "proof": proof("d2", 20) })).await,
+        ),
+    ] {
+        assert_eq!(response.errors.len(), 1, "{label}");
+        assert!(
+            response.errors[0]
+                .message
+                .contains("transient input exceeds its size limit"),
+            "{label}: {:?}",
+            response.errors
+        );
+        assert!(
+            !serde_json::to_string(&response)?.contains(&large),
+            "{label}"
+        );
+    }
+    assert_eq!(probe.counts(), before, "refused before the resolver ran");
+    assert_eq!(stored_for(&db, "bounded-machine").await?[0].sequence, 1);
+    // A value inside both limits is accepted.
+    let mut inside = proof(&"y".repeat(300), 8);
+    inside["sequence"] = json!(5);
+    let fits = run(with_variable, json!({ "proof": inside })).await;
+    assert!(fits.errors.is_empty(), "{:?}", fits.errors);
+    Ok(())
+}
+
+/// An acknowledged retry releases the existing row through the read policy,
+/// like any mutation result.
+async fn acknowledgement_respects_read_policy(base: &Database<Backend>) -> TestResult {
+    let probe = Probe::default();
+    let db = configured(base, AuthorizationMode::default(), &probe);
+    for who in ["blind-row-machine", "blind-field-machine"] {
+        let first = execute(
+            &db,
+            &probe,
+            who,
+            &snapshot_mutation("hidden-payload", 1, "h1"),
+        )
+        .await;
+        let retry = execute(
+            &db,
+            &probe,
+            who,
+            &snapshot_mutation("hidden-payload", 1, "h1"),
+        )
+        .await;
+        assert_eq!(stored_for(&db, who).await?.len(), 1, "{who}");
+        // The retry was acknowledged, and it discloses exactly what the
+        // write that created the row disclosed.
+        let (first, retry) = (serde_json::to_value(&first)?, serde_json::to_value(&retry)?);
+        assert!(
+            !retry.to_string().contains("hidden-payload"),
+            "{who}: {retry}"
+        );
+        let result = |response: &Value| response["data"][r("upsertStatusSnapshot")].clone();
+        if who == "blind-row-machine" {
+            assert_eq!(result(&retry)["success"], json!(true), "{retry}");
+            assert_eq!(result(&retry)["action"], Value::Null, "{retry}");
+            assert_eq!(result(&retry)[f("statusSnapshot")], Value::Null, "{retry}");
+            assert_eq!(result(&first)[f("statusSnapshot")], Value::Null, "{first}");
+        } else {
+            assert_eq!(retry["errors"], first["errors"], "{who}");
+            assert_eq!(
+                retry["errors"][0]["extensions"]["code"],
+                json!("FORBIDDEN"),
+                "{retry}"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1191,6 +1593,47 @@ async fn concurrent_upserts_serialise(base: &Database<Backend>) -> TestResult {
     );
     assert_eq!(rows[0].payload, format!("concurrent-{}", rows[0].sequence));
     assert_eq!(rows[0].digest, format!("c{}", rows[0].sequence));
+    for (sequence, outcome) in &outcomes {
+        if let Err(code) = outcome {
+            assert!(LOSER_CODES.contains(&code.as_str()), "{sequence}: {code}");
+        }
+    }
+
+    // Two first writes of a key that does not exist yet, held in their
+    // `Before` hooks until both have looked the key up (where the backend
+    // lets two transactions get that far).
+    let race = Race(Arc::new(tokio::sync::Barrier::new(2)));
+    let first_writes = graphql_orm::futures::future::join_all((1..=2).map(|sequence| {
+        let (db, probe, race) = (db.clone(), probe.clone(), race.clone());
+        async move {
+            let query = snapshot_mutation(&format!("absent-{sequence}"), sequence, "a");
+            let (schema, request) = request(&db, &probe, &query);
+            let response = schema
+                .execute(request.data(machine("absent-racer")).data(race))
+                .await;
+            (sequence, code(&response), response.errors.is_empty())
+        }
+    }))
+    .await;
+    let absent = stored_for(&db, "absent-racer").await?;
+    assert_eq!(absent.len(), 1, "{first_writes:?}");
+    let winners = first_writes
+        .iter()
+        .filter(|(_, _, accepted)| *accepted)
+        .map(|(sequence, _, _)| *sequence)
+        .collect::<Vec<_>>();
+    assert!(!winners.is_empty(), "{first_writes:?}");
+    assert_eq!(
+        Some(absent[0].sequence),
+        winners.iter().copied().max(),
+        "{first_writes:?}"
+    );
+    for (sequence, code, accepted) in &first_writes {
+        if !accepted {
+            let code = code.as_deref().unwrap_or("no code");
+            assert!(LOSER_CODES.contains(&code), "{sequence}: {code}");
+        }
+    }
 
     // A sequential tail still orders correctly after the race.
     let latest = rows[0].sequence;
@@ -1203,6 +1646,11 @@ async fn concurrent_upserts_serialise(base: &Database<Backend>) -> TestResult {
     assert_eq!(stored_for(&db, "racer").await?.len(), 1);
     Ok(())
 }
+
+/// What a request that lost a race may report: the hook's stale-snapshot
+/// refusal (`CONFLICT`), the database's serialization failure or deadlock
+/// (retryable `SERVICE_UNAVAILABLE`), or its uniqueness violation.
+const LOSER_CODES: [&str; 3] = ["CONFLICT", "SERVICE_UNAVAILABLE", "CONSTRAINT_VIOLATION"];
 
 /// Trusted transaction code can run the same hooks with its own transient
 /// input; a hook cannot grant itself one.
@@ -1227,10 +1675,11 @@ async fn transaction_code_sets_its_own_transient_input(base: &Database<Backend>)
                         sequence: 99,
                         digest: String::new(),
                         nonce: String::new(),
+                        tags: None,
                     })
                     .is_err()
                     && hook_ctx.take_transient_input::<SnapshotProof>().is_err()
-                    && hook_ctx.acknowledge_without_write().is_err();
+                    && !hook_ctx.can_acknowledge_without_write();
                 self.0
                     .lock()
                     .unwrap()
@@ -1254,6 +1703,7 @@ async fn transaction_code_sets_its_own_transient_input(base: &Database<Backend>)
                 sequence: 5,
                 digest: "t".to_owned(),
                 nonce: NONCE.to_owned(),
+                tags: None,
             })?;
             // An extension of the same type is a separate value.
             assert!(tx.extension::<SnapshotProof>().is_none());
@@ -1316,6 +1766,18 @@ async fn every_contract_step(
     undeclared_acknowledgement_is_refused(&fixture.db)
         .await
         .map_err(|error| ("undeclared acknowledgement", error))?;
+    updates_cannot_rewrite_the_key(&fixture.db)
+        .await
+        .map_err(|error| ("update paths", error))?;
+    database_equality_cannot_merge_principals(&fixture.db)
+        .await
+        .map_err(|error| ("database equality", error))?;
+    transient_argument_is_secret_and_bounded(&fixture.db)
+        .await
+        .map_err(|error| ("secret and bounded transient input", error))?;
+    acknowledgement_respects_read_policy(&fixture.db)
+        .await
+        .map_err(|error| ("acknowledgement read policy", error))?;
     concurrent_upserts_serialise(&fixture.db)
         .await
         .map_err(|error| ("concurrent upserts", error))?;

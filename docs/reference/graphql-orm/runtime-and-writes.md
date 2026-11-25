@@ -601,14 +601,16 @@ members stay ordinary public input fields.
 The generated resolver runs in this order:
 
 1. Generated input validation, resolver authentication, operation scopes and operation assurance.
-2. `PrincipalKeyBinding::bind`. An error refuses the mutation here. Nothing has been read or
-   written, and no policy, transform or hook has run.
+2. `PrincipalKeyBinding::bind`. An error refuses the mutation here with a fixed `FORBIDDEN`.
+   Nothing has been read or written, and no policy, transform or hook has run.
 3. The entity write policy, then the transaction.
 4. `WriteInputTransform::before_upsert`. The bound key is already in the input, and the resolver
    writes it again afterwards, so a transform cannot replace it.
-5. The locking conflict lookup by the bound key, then the row write policy on an existing row, the
-   field write policies, the `Before` hook, the write, the row write policy on the row as written,
-   the `After` hook and the commit, as for [every generated write](#hooks).
+5. The locking conflict lookup by the bound key, then the
+   [exact key check](#keys-the-database-compares-equal) on an existing row.
+6. The row write policy on an existing row, the field write policies, the `Before` hook, the
+   write, the exact key check and the row write policy on the row as written, the `After` hook and
+   the commit, as for [every generated write](#hooks).
 
 Every write authorization of an ordinary generated upsert still applies: the resolver auth mode,
 `operation_authorization` scopes, operation assurance, entity, row and field write policies, the
@@ -617,9 +619,46 @@ Every write authorization of an ordinary generated upsert still applies: the res
 Write `bind` so that it derives the key only from verified request data: the authenticated subject,
 or a value your own middleware attached to the request after verifying it. Never read it from an
 argument, a header the client controls or an unverified claim. Return an error when the request
-carries no such value. An `OrmPublicError` keeps its code and message; other errors follow the
-[hook error rules](#hooks). `bind` is synchronous and gets no database handle, so resolve anything
-it needs before the request executes.
+carries no such value. `bind` is synchronous and gets no database handle, so resolve anything it
+needs before the request executes.
+
+Every binding error reaches the client as the same refusal: code `FORBIDDEN`, message
+`the request principal could not be bound` (`PRINCIPAL_KEY_BINDING_REFUSAL`). The error's own code,
+message and extensions are discarded, also under
+`DatabaseBuilder::expose_uncoded_callback_messages(true)`, and the ORM does not log them. Log a
+diagnostic yourself inside `bind` if you need one.
+
+Two principals must never produce the same key. If subject IDs are unique only within a tenant or
+an issuer, encode that tenant or issuer into the key, for example `"{issuer}|{subject}"` with a
+separator neither part can contain.
+
+#### Keys the database compares equal
+
+The conflict lookup and the unique index use the database's equality, which can treat different
+keys as one: SQL Server's default collations ignore case, and so does a SQLite `NOCASE` column.
+`Alice` could then reach the row of `alice`.
+
+The generated upsert closes this itself. It compares every stored bound member with the bound
+value using the key type's exact Rust equality:
+
+- after the locked lookup, before any policy callback, hook or statement;
+- again on the row as written, where it also refuses an insert that landed on a row the lookup did
+  not return.
+
+A mismatch is refused with `FORBIDDEN` and the default message, the same refusal as a row write
+denial, so the response does not reveal that another principal's row exists. Nothing is written,
+and the transaction cannot commit.
+
+Store bound-key columns so that equality preserves identity: a binary or case- and
+accent-sensitive collation on SQL Server (for example `Latin1_General_100_BIN2`), no `NOCASE` on
+SQLite, and a deterministic collation on PostgreSQL. With such a column the check never fires.
+Without one, the second principal is locked out instead of sharing a row.
+
+**PostgreSQL RLS.** If a policy hides the conflicting row from the caller, the lookup returns no
+row and the upsert takes its insert branch. PostgreSQL then refuses the `ON CONFLICT DO UPDATE`
+because the existing row fails the policy, and the ORM reports its `insufficient_privilege` error
+as `FORBIDDEN`. If the database let the statement through, the check on the written row refuses
+it. Either way nothing is committed. Keep the bound row visible to its own principal.
 
 #### What stops a client from setting or replacing the key
 
@@ -632,23 +671,27 @@ it needs before the request executes.
 - **One value on both branches.** The resolver overwrites the field with the bound value before the
   conflict lookup, so the insert branch stores it and the update branch can only match the caller's
   own row. An upsert never updates its conflict columns.
-- **No other generated path.** The generated update and bulk update cannot write the column,
-  because their input does not contain it. A generated create has no binding, so declaring
-  `upsert_bound_key` on an entity that also generates `create` is a compile error: select the
-  mutations you want with `mutation_shapes`, without `create`.
-- **Aliases.** The check is per physical column. A second field that maps the same column with
-  `db_column` and exposes it is a compile error.
+- **No other generated path.** The generated update and bulk update cannot write the column: their
+  GraphQL input does not contain it, and the resolver clears it from the Rust input after
+  `WriteInputTransform::before_update`, so a transform cannot assign it either. A generated create
+  has no binding, so declaring `upsert_bound_key` on an entity that also generates `create` is a
+  compile error: select the mutations you want with `mutation_shapes`, without `create`. Taking
+  part in a nested create is refused for the same reason.
+- **One writer per column.** The check is per physical column. A second field that maps the same
+  column with `db_column`, public or private, is a compile error. So is a bound key on a column
+  that generated writes maintain themselves: `created_at`, `updated_at` or a version column.
 
 These are also compile errors: a bound field that is not a member of the conflict key; a nullable
 field (a `NULL` key never conflicts); a primary-key, version, `write = false`, JSON, spatial or
 read-transformed field; a field bound twice; `upsert_bound_key` without `upsert`, on a
 `repository_entity`, or on an entity whose GraphQL upsert is not generated or not selected; and a
-binding whose `Key` is not the field's type.
+binding whose `Key` is not the field's type. `Key` must implement `Clone` and `PartialEq`.
 
 The guarantee covers generated GraphQL surfaces. These remain yours to review:
 
 - Repository and transaction code is trusted and sets the key itself through the Rust
-  `Create<Entity>Input` and `Update<Entity>Input`.
+  `Create<Entity>Input` and `Update<Entity>Input`. A repository update transform can still assign
+  the column; only generated GraphQL updates clear it.
 - A generated update or delete addresses a row by primary key, not by the bound key. Restrict them
   with a row write policy on the private column, or leave them out of `mutation_shapes`.
 - Handwritten resolvers, raw SQL and runtime GraphQL collections over the same table are outside
@@ -660,6 +703,13 @@ The guarantee covers generated GraphQL surfaces. These remain yours to review:
 upsert. `type` is any `async_graphql::InputType`. `name` sets the argument name before the schema's
 argument case is applied (default `transient`). `required = false` makes the argument nullable.
 `on` is required and accepts `upsert` only.
+
+The request value is bounded. `max_bytes` (default 65536, at most 1048576) limits the bytes of its
+strings, enum names, binary values and object keys, counting eight per number. `max_nodes`
+(default 1024, at most 65536) limits the number of values, list items and object members. A larger
+value is refused with `transient input exceeds its size limit` before it is coerced into your type
+and before the resolver, the binding or any policy runs. This holds for literals and for variables.
+The bound applies to the parsed request, so keep your HTTP body limit as the first line of defence.
 
 The resolver stores the value on the upsert's own transaction before the input transform runs:
 
@@ -675,9 +725,26 @@ let proof = hook_ctx.transient_input::<SnapshotProof>();
   `event.before::<T>()`, the existing row read under the write lock, so that is where to compare a
   proof with stored state.
 - It is not a column, so it is never stored. It is not part of `MutationEvent`, `Changed` events,
-  the change journal, `notify_with` or the mutation result. The ORM never logs it. It is dropped
-  with the transaction, before the commit, so deferred post-commit actions do not see it.
+  the change journal, `notify_with` or the mutation result. It is dropped with the transaction,
+  before the commit, so deferred post-commit actions do not see it.
 - In catalogues it appears only as the upsert's argument and its input type.
+- The argument carries the schema directive `@transientInput`. The AI tool-profile compiler refuses
+  any argument plan that maps such an argument, because tool arguments are retained with the run.
+  An upsert with a required transient input therefore cannot be an AI tool; with an optional one,
+  a tool never sends it.
+
+Where the value can still be seen:
+
+- **Redacted.** The argument is marked `secret`. async-graphql's rendered execution document
+  (`ExtensionContext::stringify_execute_doc`, which its `Logger` extension records) shows
+  `"<secret>"` in place of the whole value, whether it was sent as a literal or as a variable.
+- **Not redacted: the raw request.** `Debug` of an `async_graphql::Request`, its `query` text and
+  its `variables`, and anything your HTTP layer logs before the schema runs, still contain the
+  value. Do not log raw requests for a schema that accepts transient input.
+- **Not redacted: your own callbacks.** The ORM never formats the value into an error or a log
+  line. An error that your transform or hook builds from it is your text: with a public code it
+  reaches the client, and without one it is a server-side diagnostic that
+  `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` writes to the log.
 - It is kept apart from [transaction extensions](#transaction-extensions): `extension::<T>()` never
   returns a request's transient input, and extensions still cannot be set by request input.
 
@@ -723,12 +790,15 @@ a request the hook neither refuses nor acknowledges is written and delivered as 
 `acknowledge_without_write` is refused with `CONFLICT`, which fails the mutation, everywhere else:
 on the insert branch, in the `After` phase, in an input transform, in repository and transaction
 writes, in other mutations, on an entity without `upsert_acknowledge`, and in the nested writes a
-hook makes. `can_acknowledge_without_write()` tells a shared hook whether the call is allowed.
+hook makes. The refused call also marks the transaction refused. A hook that ignores the error
+cannot let the write through: the commit rolls back and the mutation fails with `FORBIDDEN`. Call
+`can_acknowledge_without_write()` first in a hook shared by several paths.
 
 Concurrent upserts for one key are ordered by the transaction: `BEGIN IMMEDIATE` on SQLite,
 `SERIALIZABLE` on PostgreSQL and SQL Server, with the lookup locking an existing row. A request that
-loses a race is refused by your hook against the row the winner wrote, or by the database as a
-retryable conflict. It never creates a second row.
+loses a race is refused by your hook against the row the winner wrote, or by the database: a
+serialization failure or deadlock is a retryable `SERVICE_UNAVAILABLE`, and a uniqueness violation
+is `CONSTRAINT_VIOLATION`. It never creates a second row.
 
 ## Search Document Maintenance
 

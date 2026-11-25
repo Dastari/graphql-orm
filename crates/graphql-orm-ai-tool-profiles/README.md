@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
+AI tool profiles 0.32.0 refuses argument plans that map a transient mutation
+argument (`@transientInput`).
+See the [migration guide](MIGRATION.md#0320-transient-mutation-arguments).
+
 AI tool profiles 0.31.0 adds typed endpoint validation reasons for provider
 profile saves and reports, including missing or malformed stored endpoints.
 See the [migration guide](MIGRATION.md#0310-provider-endpoint-path-error).

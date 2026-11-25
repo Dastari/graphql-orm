@@ -1073,6 +1073,79 @@ fn resolve_upsert_config(
     }
 }
 
+/// Where an entity takes part in a generated nested create (#893): its own
+/// `nested_create_keys`, or a relation declaring `nested_create`. Read from
+/// the raw attribute tokens, so the combination with a principal-bound key is
+/// refused whichever derive learns the options first.
+fn nested_create_participation(input: &DeriveInput) -> Option<proc_macro2::Span> {
+    fn names(tokens: proc_macro2::TokenStream, wanted: &str) -> Option<proc_macro2::Span> {
+        tokens.into_iter().find_map(|token| match token {
+            proc_macro2::TokenTree::Ident(ident) if ident == wanted => Some(ident.span()),
+            proc_macro2::TokenTree::Group(group) => names(group.stream(), wanted),
+            _ => None,
+        })
+    }
+    let list = |attr: &syn::Attribute, attribute: &str| match &attr.meta {
+        // `cfg_attr` is expanded before derives run.
+        syn::Meta::List(list) if list.path.is_ident(attribute) => Some(list.tokens.clone()),
+        _ => None,
+    };
+    input
+        .attrs
+        .iter()
+        .find_map(|attr| names(list(attr, "graphql_entity")?, "nested_create_keys"))
+        .or_else(|| {
+            let syn::Data::Struct(data) = &input.data else {
+                return None;
+            };
+            data.fields.iter().find_map(|field| {
+                field
+                    .attrs
+                    .iter()
+                    .find_map(|attr| names(list(attr, "relation")?, "nested_create"))
+            })
+        })
+}
+
+#[cfg(test)]
+mod nested_create_participation_tests {
+    use super::nested_create_participation;
+
+    fn participates(tokens: proc_macro2::TokenStream) -> bool {
+        nested_create_participation(&syn::parse2(tokens).expect("derive input")).is_some()
+    }
+
+    #[test]
+    fn finds_both_declarations_of_a_nested_create() {
+        // The child's own declaration.
+        assert!(participates(quote::quote! {
+            #[graphql_entity(table = "lines", nested_create_keys = ["order_id"])]
+            struct Line { id: String, order_id: String }
+        }));
+        // A parent relation that creates children.
+        assert!(participates(quote::quote! {
+            #[graphql_entity(table = "orders")]
+            struct Order {
+                id: String,
+                #[relation(target = "Line", from = "id", to = "order_id", multiple, nested_create)]
+                lines: Vec<Line>,
+            }
+        }));
+        // Neither: other options and other attributes that share a word.
+        assert!(!participates(quote::quote! {
+            #[graphql_entity(table = "orders", upsert = "nested_create_keys")]
+            #[doc = "nested_create"]
+            struct Order {
+                id: String,
+                #[relation(target = "Line", from = "id", to = "order_id", multiple)]
+                lines: Vec<Line>,
+                #[graphql_orm(private)]
+                nested_create: String,
+            }
+        }));
+    }
+}
+
 /// A principal-bound conflict-key member of the generated GraphQL upsert.
 struct ResolvedUpsertBoundKey {
     field_name: syn::Ident,
@@ -1087,9 +1160,33 @@ struct ResolvedUpsertBoundKey {
 /// assertion over the entity's `SERVER_ONLY_COLUMNS`; the checks here give
 /// the declaration its own diagnostics.
 fn resolve_upsert_bound_keys(
+    input: &DeriveInput,
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
     entity_meta: &crate::entity::EntityMetadata,
     upsert_config: Option<&ResolvedUpsertConfig>,
+    backend: BackendKind,
 ) -> syn::Result<Vec<ResolvedUpsertBoundKey>> {
+    // A nested create writes a row from client input without the binding,
+    // exactly as a generated create would (#893).
+    if let (Some(declared), Some(span)) = (
+        entity_meta.upsert_bound_keys.first(),
+        nested_create_participation(input),
+    ) {
+        let mut error = syn::Error::new(
+            declared.span,
+            "upsert_bound_key cannot be combined with nested creates: a nested create has no principal binding and would store the key type's default value",
+        );
+        error.combine(syn::Error::new(span, "nested create declared here"));
+        return Err(error);
+    }
+    let physical = |column: &str| crate::entity::relation_column_identity(backend, column, true);
+    let same_column = |left: &str, right: &str| {
+        if backend == BackendKind::Postgres {
+            left == right
+        } else {
+            left.eq_ignore_ascii_case(right)
+        }
+    };
     let mut resolved: Vec<ResolvedUpsertBoundKey> = Vec::new();
     for declared in &entity_meta.upsert_bound_keys {
         let refuse = |reason: &str| {
@@ -1151,6 +1248,38 @@ fn resolve_upsert_bound_keys(
             return Err(refuse(
                 "must be stored and read as bound: no read transform, json or spatial mapping",
             ));
+        }
+        // No other generated writer may share the physical column: the
+        // implicit timestamp writers, a version column, or a second field.
+        let column = physical(&field.db_column);
+        if ["created_at", "updated_at"]
+            .iter()
+            .any(|implicit| same_column(&column, implicit))
+            || field.meta.is_version
+            || field
+                .meta
+                .timestamp_behavior(&field.rust_name)
+                .update_updated_at
+        {
+            return Err(refuse(
+                "maps a column that generated writes maintain themselves (created_at, updated_at or a version column): the implicit writer would overwrite the bound key",
+            ));
+        }
+        for other in fields {
+            let Some(other_name) = other.ident.as_ref() else {
+                continue;
+            };
+            let other_meta = parse_field_metadata(other)?;
+            if *other_name == field.field_name || other_meta.is_relation || other_meta.skip_db {
+                continue;
+            }
+            let other_rust = other_name.to_string();
+            let other_column = physical(other_meta.db_column.as_deref().unwrap_or(&other_rust));
+            if same_column(&column, &other_column) {
+                return Err(refuse(&format!(
+                    "shares its column with field `{other_rust}`: no second field may write a principal-bound column"
+                )));
+            }
         }
         resolved.push(ResolvedUpsertBoundKey {
             field_name: field.field_name.clone(),
@@ -1498,10 +1627,12 @@ fn generated_resolver_schema_signature(
     if let Some(transient) = &entity_meta.transient_input {
         let ty = &transient.ty;
         signature.push_str(&format!(
-            "transient_input={:?} name={:?} required={}\n",
+            "transient_input={:?} name={:?} required={} max_bytes={} max_nodes={}\n",
             quote!(#ty).to_string(),
             transient.name,
-            transient.required
+            transient.required,
+            transient.max_bytes,
+            transient.max_nodes
         ));
     }
     if entity_meta.upsert_acknowledge.is_some() {
@@ -2454,7 +2585,8 @@ fn generate_graphql_operations_unfiltered(
         backend,
         auto_generated_pk,
     )?;
-    let upsert_bound_keys = resolve_upsert_bound_keys(&entity_meta, upsert_config.as_ref())?;
+    let upsert_bound_keys =
+        resolve_upsert_bound_keys(input, fields, &entity_meta, upsert_config.as_ref(), backend)?;
     let graphql_upsert_enabled = upsert_config.as_ref().is_some_and(|config| {
         config.fields.iter().all(|field| {
             field.graphql_create_visible
@@ -5334,27 +5466,90 @@ fn generate_graphql_operations_unfiltered(
             }
         })
         .collect::<proc_macro2::TokenStream>();
+    // Exact comparison of each stored bound member with the bound value: the
+    // database's own equality may fold case, accents or padding.
+    let principal_key_mismatch = |row: proc_macro2::TokenStream| {
+        let members = upsert_bound_keys
+            .iter()
+            .zip(&bound_key_idents)
+            .map(|(key, ident)| {
+                let field_name = &key.field_name;
+                quote! { #row.#field_name != #ident }
+            });
+        quote! { false #(|| #members)* }
+    };
+    let principal_key_preimage_check = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        let mismatch = principal_key_mismatch(quote! { current_entity });
+        quote! {
+            if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
+                if #mismatch {
+                    return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch());
+                }
+            }
+        }
+    };
+    // The written row must hold the bound key exactly, and an insert must not
+    // have landed on a row the lookup did not see (one hidden by RLS, or one
+    // that only the database's equality matches).
+    let principal_key_postimage_check = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        let mismatch = principal_key_mismatch(quote! { entity });
+        quote! {
+            if #mismatch
+                || (current_entity.is_none() && #pk_id_for_entity != __gom_created_event_id)
+            {
+                return ::std::result::Result::Err(hook_ctx.__refuse_principal_key_mismatch());
+            }
+        }
+    };
+    let principal_key_created_id = if upsert_bound_keys.is_empty() {
+        quote! {}
+    } else {
+        quote! { let __gom_created_event_id = ::std::clone::Clone::clone(&event_id); }
+    };
+    // Generated updates never assign a principal-bound column, whatever an
+    // input transform put in the input.
+    let principal_key_update_reset = upsert_bound_keys
+        .iter()
+        .map(|key| {
+            let field_name = &key.field_name;
+            quote! { input.#field_name = ::std::default::Default::default(); }
+        })
+        .collect::<proc_macro2::TokenStream>();
     let (transient_argument, transient_store) = match &entity_meta.transient_input {
         Some(transient) => {
             let ty = &transient.ty;
+            let (max_bytes, max_nodes) = (transient.max_bytes, transient.max_nodes);
+            let bounded = quote! {
+                ::graphql_orm::graphql::orm::BoundedTransientInput<#ty, #max_bytes, #max_nodes>
+            };
             let name = apply_graphql_case(&transient.name, argument_case);
             let description =
                 "Transient input for this request; never stored or published".to_string();
+            // `secret` keeps the value out of async-graphql's rendered
+            // execution document; the directive marks it in the schema.
+            let attribute = quote! {
+                #[graphql(
+                    name = #name,
+                    desc = #description,
+                    secret,
+                    directive = ::graphql_orm::graphql::orm::transient_input_argument::apply()
+                )]
+            };
             if transient.required {
                 (
-                    quote! {
-                        #[graphql(name = #name, desc = #description)] __gom_transient: #ty,
-                    },
-                    quote! { hook_ctx.__set_transient_input::<#ty>(__gom_transient); },
+                    quote! { #attribute __gom_transient: #bounded, },
+                    quote! { hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?; },
                 )
             } else {
                 (
-                    quote! {
-                        #[graphql(name = #name, desc = #description)] __gom_transient: ::std::option::Option<#ty>,
-                    },
+                    quote! { #attribute __gom_transient: ::std::option::Option<#bounded>, },
                     quote! {
                         if let ::std::option::Option::Some(__gom_transient) = __gom_transient {
-                            hook_ctx.__set_transient_input::<#ty>(__gom_transient);
+                            hook_ctx.__set_transient_input::<#ty>(__gom_transient.0)?;
                         }
                     },
                 )
@@ -5397,6 +5592,9 @@ fn generate_graphql_operations_unfiltered(
         generates_public_upsert: mutations_disabled.is_none() && generates_public_upsert,
         principal_key_resolution: &principal_key_resolution,
         principal_key_assignment: &principal_key_assignment,
+        principal_key_preimage_check: &principal_key_preimage_check,
+        principal_key_created_id: &principal_key_created_id,
+        principal_key_postimage_check: &principal_key_postimage_check,
         transient_argument: &transient_argument,
         transient_store: &transient_store,
         acknowledge: entity_meta.upsert_acknowledge.is_some(),
@@ -8456,6 +8654,7 @@ fn generate_graphql_operations_unfiltered(
             mutation_output_release: &mutation_output_release,
             update_many_operation_description: &update_many_operation_description,
             update_many_mutation_name: &update_many_mutation_name,
+            principal_key_update_reset: &principal_key_update_reset,
             update_many_requires_scopes: &update_many_requires_scopes,
             where_arg_name: &where_arg_name,
             where_arg_description: &where_arg_description,
@@ -9787,6 +9986,7 @@ fn generate_graphql_operations_unfiltered(
                             ::std::option::Option::Some(policy_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
                             &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                        #principal_key_update_reset
                         #(#update_runtime_policy_checks)*
                     } else {
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::repository_in_transaction(

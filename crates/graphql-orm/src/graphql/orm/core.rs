@@ -1270,12 +1270,20 @@ pub struct __WriteAcknowledgementScope(Option<WriteAcknowledgement>);
 /// Derive the key only from verified request data, such as the authenticated
 /// subject or a value the host's own middleware attached. Return an error when
 /// there is no such value: the mutation is then refused and nothing is read
-/// or written. An [`OrmPublicError`](crate::graphql::errors::OrmPublicError)
-/// keeps its code and message; any other error follows the rules for policy
-/// callback errors.
+/// or written. Every binding error reaches the client as the same fixed
+/// `FORBIDDEN` refusal. The error's own code, message and extensions are
+/// discarded, so a binding cannot leak a diagnostic.
+///
+/// Two principals must never share a key. Scope the key yourself: when
+/// subject IDs are unique only within a tenant or an issuer, encode that
+/// tenant or issuer into the key. Store the column with a binary or otherwise
+/// identity-preserving comparison. Under a case- or accent-insensitive
+/// collation the database treats distinct keys as one; the generated upsert
+/// then refuses the second principal instead of sharing the row.
 pub trait PrincipalKeyBinding: Send + Sync + 'static {
-    /// The key column's Rust type.
-    type Key: Clone + Send + Sync + 'static;
+    /// The key column's Rust type. Stored keys are compared with the bound
+    /// value by this type's exact equality, whatever the database collation.
+    type Key: Clone + PartialEq + Send + Sync + 'static;
 
     /// The key for this request's principal.
     fn bind(ctx: &async_graphql::Context<'_>) -> async_graphql::Result<Self::Key>;
@@ -1286,7 +1294,106 @@ pub trait PrincipalKeyBinding: Send + Sync + 'static {
 pub fn __bind_principal_key<K: PrincipalKeyBinding>(
     ctx: &async_graphql::Context<'_>,
 ) -> async_graphql::Result<K::Key> {
-    K::bind(ctx).map_err(crate::graphql::errors::graphql_error_from_callback)
+    // The host's error is dropped whole: no message, code or extension of it
+    // reaches the client or a diagnostic under any compatibility setting.
+    K::bind(ctx).map_err(|_| {
+        crate::graphql::errors::OrmPublicError::with_message(
+            crate::graphql::errors::OrmErrorCode::Forbidden,
+            PRINCIPAL_KEY_BINDING_REFUSAL,
+        )
+        .into_graphql_error()
+    })
+}
+
+/// The fixed message of a refused principal-key binding.
+pub const PRINCIPAL_KEY_BINDING_REFUSAL: &str = "the request principal could not be bound";
+
+/// Marks a generated argument as a transient mutation input in the schema:
+/// `@transientInput`. Tool-profile compilers refuse to map such an argument.
+#[async_graphql::TypeDirective(name = "transientInput", location = "ArgumentDefinition")]
+#[doc(hidden)]
+pub fn transient_input_argument() {}
+
+/// A generated transient argument: `T`, refused before coercion when its
+/// request value is larger than `MAX_BYTES` or has more than `MAX_NODES`
+/// values. It has `T`'s GraphQL type.
+#[doc(hidden)]
+pub struct BoundedTransientInput<T, const MAX_BYTES: usize, const MAX_NODES: usize>(pub T);
+
+/// Whether a request value stays within a byte and node budget. Bytes count
+/// string, enum and binary contents and object keys, and eight per number;
+/// nodes count every value, list item and object member. Stops at the first
+/// excess.
+fn transient_value_within(
+    value: &async_graphql::Value,
+    bytes: &mut usize,
+    nodes: &mut usize,
+) -> bool {
+    fn take(budget: &mut usize, amount: usize) -> bool {
+        match budget.checked_sub(amount) {
+            Some(rest) => {
+                *budget = rest;
+                true
+            }
+            None => false,
+        }
+    }
+    if !take(nodes, 1) {
+        return false;
+    }
+    match value {
+        async_graphql::Value::Null => true,
+        async_graphql::Value::Boolean(_) => take(bytes, 1),
+        async_graphql::Value::Number(_) => take(bytes, 8),
+        async_graphql::Value::String(text) => take(bytes, text.len()),
+        async_graphql::Value::Enum(name) => take(bytes, name.len()),
+        async_graphql::Value::Binary(data) => take(bytes, data.len()),
+        async_graphql::Value::List(items) => items
+            .iter()
+            .all(|item| transient_value_within(item, bytes, nodes)),
+        async_graphql::Value::Object(members) => members.iter().all(|(key, member)| {
+            take(bytes, key.len()) && transient_value_within(member, bytes, nodes)
+        }),
+    }
+}
+
+impl<T, const MAX_BYTES: usize, const MAX_NODES: usize> async_graphql::InputType
+    for BoundedTransientInput<T, MAX_BYTES, MAX_NODES>
+where
+    T: async_graphql::InputType,
+{
+    type RawValueType = T::RawValueType;
+
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
+        T::create_type_info(registry)
+    }
+
+    fn parse(value: Option<async_graphql::Value>) -> async_graphql::InputValueResult<Self> {
+        // Measured on the request value, before `T` clones or coerces it.
+        if let Some(value) = &value {
+            let (mut bytes, mut nodes) = (MAX_BYTES, MAX_NODES);
+            if !transient_value_within(value, &mut bytes, &mut nodes) {
+                return Err(async_graphql::InputValueError::custom(
+                    "transient input exceeds its size limit",
+                ));
+            }
+        }
+        T::parse(value)
+            .map(Self)
+            .map_err(async_graphql::InputValueError::propagate)
+    }
+
+    fn to_value(&self) -> async_graphql::Value {
+        self.0.to_value()
+    }
+
+    fn as_raw_value(&self) -> Option<&Self::RawValueType> {
+        self.0.as_raw_value()
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -2427,12 +2534,17 @@ where
     ///
     /// Refused with `CONFLICT` everywhere else, including the insert branch,
     /// repository and transaction writes, other mutations, the `After` phase
-    /// and the nested writes a hook makes. The refusal fails the mutation, so
-    /// an acknowledgement is never silently replaced by a write.
+    /// and the nested writes a hook makes. The refusal also marks the
+    /// transaction refused: a hook that swallows the error cannot let the
+    /// write through, because the commit then rolls back with `FORBIDDEN`. An
+    /// acknowledgement is never silently replaced by a write.
     pub fn acknowledge_without_write(
         &mut self,
     ) -> Result<(), crate::graphql::errors::OrmPublicError> {
         if !self.can_acknowledge_without_write() {
+            // A hook that ignores this error still cannot let the write
+            // through: the transaction no longer commits.
+            self.runtime_state.refuse_write();
             return Err(crate::graphql::errors::OrmPublicError::with_message(
                 crate::graphql::errors::OrmErrorCode::Conflict,
                 "this write cannot be acknowledged without writing",
@@ -2459,13 +2571,27 @@ where
         matches!(state, Some(WriteAcknowledgement::Acknowledged))
     }
 
-    /// Store a generated mutation's transient argument.
+    /// Store a generated mutation's transient argument. Like
+    /// [`Self::set_transient_input`], refused inside a mutation hook.
     #[doc(hidden)]
-    pub fn __set_transient_input<T>(&mut self, value: T)
+    pub fn __set_transient_input<T>(&mut self, value: T) -> async_graphql::Result<()>
     where
         T: Send + Sync + 'static,
     {
+        self.require_transaction_owner()
+            .map_err(crate::graphql::errors::OrmPublicError::into_graphql_error)?;
         self.extensions.insert(TransientMutationInput(value));
+        Ok(())
+    }
+
+    /// Refuse a principal-bound upsert whose conflict lookup or write reached
+    /// a row that does not hold exactly the bound key. The refusal is the
+    /// generic row-write denial, so it does not reveal that another
+    /// principal's row exists, and it blocks the commit.
+    #[doc(hidden)]
+    pub fn __refuse_principal_key_mismatch(&mut self) -> async_graphql::Error {
+        self.runtime_state.refuse_write();
+        crate::graphql::errors::OrmPublicError::forbidden().into_graphql_error()
     }
 
     fn require_transaction_owner(&self) -> Result<(), crate::graphql::errors::OrmPublicError> {

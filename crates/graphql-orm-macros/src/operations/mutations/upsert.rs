@@ -38,6 +38,12 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) principal_key_resolution: &'a TokenStream,
     /// Writes the resolved keys into `input`.
     pub(in crate::operations) principal_key_assignment: &'a TokenStream,
+    /// Refuses an existing row that does not hold the bound key exactly.
+    pub(in crate::operations) principal_key_preimage_check: &'a TokenStream,
+    /// Remembers the ID an insert would create, for the post-image check.
+    pub(in crate::operations) principal_key_created_id: &'a TokenStream,
+    /// Refuses a written row that does not hold the bound key exactly.
+    pub(in crate::operations) principal_key_postimage_check: &'a TokenStream,
     /// The typed transient argument, with its trailing comma.
     pub(in crate::operations) transient_argument: &'a TokenStream,
     /// Stores the transient argument on the mutation transaction.
@@ -82,6 +88,9 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         generates_public_upsert,
         principal_key_resolution,
         principal_key_assignment,
+        principal_key_preimage_check,
+        principal_key_created_id,
+        principal_key_postimage_check,
         transient_argument,
         transient_store,
         acknowledge,
@@ -179,6 +188,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                // Before any policy callback, hook or statement.
+                #principal_key_preimage_check
                 if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                     db.ensure_writable_row(
                         ::std::option::Option::Some(ctx),
@@ -209,6 +220,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     .as_ref()
                     .map(|entity| #pk_id_for_entity)
                     .unwrap_or_else(|| #created_pk_id_string);
+                #principal_key_created_id
                 let lookup_input = input.clone();
                 let change_input = input.clone();
                 let sql = #struct_name::__gom_rebind_sql(&#upsert_graphql_sql_expression, 1);
@@ -255,6 +267,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
+                #principal_key_postimage_check
                 #graphql_post_image_check
                 #struct_name::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;

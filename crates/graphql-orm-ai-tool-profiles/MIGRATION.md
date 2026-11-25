@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.32.0 transient mutation arguments
+
+**No action.** Profile compilation now fails with `InvalidConfiguration` when
+an argument plan names an argument that the finished schema declares
+`@transientInput`. The ORM adds that directive only to the transient argument
+of a generated upsert that opts in (ORM 0.230.0), so no existing schema has
+one. Manifests and fingerprints of existing profiles are unchanged.
+
 ## 0.31.0 provider endpoint path error
 
 **No action.** The shared, non-exhaustive `AiError` adds

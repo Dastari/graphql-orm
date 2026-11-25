@@ -16,6 +16,10 @@ fn principal_bound_upserts_refuse_unsafe_declarations() {
     cases.compile_fail("tests/ui/principal_upserts/bound_nullable.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_primary_key.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_public_alias.rs");
+    cases.compile_fail("tests/ui/principal_upserts/transient_max_nodes_over_ceiling.rs");
+    cases.compile_fail("tests/ui/principal_upserts/transient_max_bytes_zero.rs");
+    cases.compile_fail("tests/ui/principal_upserts/bound_timestamp_alias.rs");
+    cases.compile_fail("tests/ui/principal_upserts/bound_private_alias.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_repository_entity.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_upsert_not_selected.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_with_create.rs");

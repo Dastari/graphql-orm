@@ -117,8 +117,19 @@ pub(crate) struct TransientInputMetadata {
     /// The argument name before the schema's argument case is applied.
     pub(crate) name: String,
     pub(crate) required: bool,
+    /// Largest accepted request value, in bytes.
+    pub(crate) max_bytes: usize,
+    /// Largest accepted request value, in values.
+    pub(crate) max_nodes: usize,
     pub(crate) span: proc_macro2::Span,
 }
+
+/// Default and ceiling of a transient input's `max_bytes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_BYTES_CEILING: usize = 1024 * 1024;
+/// Default and ceiling of a transient input's `max_nodes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_NODES: usize = 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_NODES_CEILING: usize = 65_536;
 
 /// A declared conditional update-assurance selector.
 #[derive(Clone)]
@@ -475,6 +486,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let mut name = None;
                     let mut on = None;
                     let mut required = None;
+                    let mut max_bytes = None;
+                    let mut max_nodes = None;
                     meta.parse_nested_meta(|option| {
                         if option.path.is_ident("type") {
                             if ty.is_some() {
@@ -518,8 +531,30 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                             }
                             let lit: syn::LitBool = option.value()?.parse()?;
                             required = Some(lit.value);
+                        } else if option.path.is_ident("max_bytes") || option.path.is_ident("max_nodes") {
+                            let bytes = option.path.is_ident("max_bytes");
+                            let (slot, ceiling) = if bytes {
+                                (&mut max_bytes, TRANSIENT_INPUT_MAX_BYTES_CEILING)
+                            } else {
+                                (&mut max_nodes, TRANSIENT_INPUT_MAX_NODES_CEILING)
+                            };
+                            if slot.is_some() {
+                                return Err(option.error("transient_input size limits may only be declared once each"));
+                            }
+                            let lit: syn::LitInt = option.value()?.parse()?;
+                            let value = lit.base10_parse::<usize>()?;
+                            if value == 0 || value > ceiling {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!(
+                                        "transient_input {} must be between 1 and {ceiling}",
+                                        if bytes { "max_bytes" } else { "max_nodes" }
+                                    ),
+                                ));
+                            }
+                            *slot = Some(value);
                         } else {
-                            return Err(option.error("unsupported transient_input option; expected type, on, name or required"));
+                            return Err(option.error("unsupported transient_input option; expected type, on, name, required, max_bytes or max_nodes"));
                         }
                         Ok(())
                     })?;
@@ -533,6 +568,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ty,
                         name: name.unwrap_or_else(|| "transient".to_owned()),
                         required: required.unwrap_or(true),
+                        max_bytes: max_bytes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_BYTES),
+                        max_nodes: max_nodes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_NODES),
                         span,
                     });
                 } else if meta.path.is_ident("upsert_acknowledge") {
