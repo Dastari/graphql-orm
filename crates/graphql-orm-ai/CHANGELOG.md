@@ -16,18 +16,15 @@ supersedes: []
   `AiCodexAppServerTurnDispatch` by value. Hosts use the protocol actor and
   `AiCodexAppServerWriter` to deliver it. The cloneable turn input contains
   unavailable markers for entity references.
-- **Added (off by default).** Codex registrations can opt in to a single
-  resolved `turn/start` write with a freshness bound of up to 60 seconds.
-  Stale or oversized resolutions fall back to markers. An incomplete resolved
-  write poisons the process writer and triggers a forced tree kill. Both
-  forms check dispatch scope at transport, and pending turn registration
-  follows a successful write and flush. Attempted writes retire their request
-  IDs, and a failed or cancelled transport write poisons even an unscoped
-  writer.
-- Tool-free turns accept entity-reference blocks. The protocol actor
-  allowlists lifecycle metadata in thread and turn snapshots and user-message
-  echoes. This excludes retained thread previews and display names. No data
-  migration is needed.
+- **Breaking (#828).** Replaces 0.159.0's additive Codex dispatch hook
+  (#875). `AiCodexAppServerDispatchTurn<'_>`, the `start_dispatch_turn`
+  override and `write_dispatch_turn` are removed. The resolved `turn/start`
+  write (off by default, freshness bound of up to 60 seconds) now goes
+  through the consuming dispatch: stale or oversized resolutions fall back
+  to markers, an incomplete resolved write poisons the process writer and
+  triggers a forced tree kill, and attempted writes retire their request IDs.
+  The protocol actor still allowlists lifecycle metadata in thread and turn
+  snapshots and user-message echoes. No data migration is needed.
 
 ## Unreleased - 0.163.0
 

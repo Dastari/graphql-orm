@@ -1858,9 +1858,10 @@ pub(crate) fn relation_server_only_columns(
             .iter()
             .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)
     };
-    // Resolve every mapping as the generated SQL does: table qualifiers
-    // dropped, quoting removed and bare PostgreSQL names case-folded, so an
-    // alias that reaches the same column through other spelling is found.
+    // Resolve every mapping as the generated SQL does: quoting removed and
+    // bare PostgreSQL names case-folded (qualified db_column names are
+    // refused at compile time), so an alias that reaches the same column
+    // through other spelling is found.
     let physical = |parsed: &ParsedField| {
         let rust_name = parsed.field.ident.as_ref().unwrap().to_string();
         relation_column_identity(
