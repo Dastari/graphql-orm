@@ -10,6 +10,65 @@ supersedes: []
 
 # Migration Guide
 
+## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
+
+**No action.** The default uses the legacy journal recorder and full backup
+key format. The opt-in is PostgreSQL-only and requires the
+ORM `change-journal` feature.
+
+1. Upgrade all recorder installers, writers and backup workers to compatible
+   versions, including backup 0.31.0 if you use `OrmBackupAdapter`. Stop
+   writes, deployments and backup jobs for the cutover. Complete and retain
+   any legacy backups you need before changing the recorder.
+2. With the usual journal search path, as the schema owner, install the
+   recorder for all journaled entities using the schema target or
+   `Database::ensure_change_journal_recorder`. Call
+   `Database::enable_canonical_change_journal_keys().await?`. This reserves
+   a sequence boundary for the resolved journal. A retry returns the same
+   boundary. Legacy rows remain stored, and the old cursors are refused.
+3. Enable the backup crate's `canonical-journal-keys` feature, construct
+   `OrmBackupAdapter` with `with_canonical_change_journal_keys()`, and take a
+   new full backup before resuming writes. Record the returned
+   boundary as its initial journal checkpoint. If any canonical writes
+   occurred before this full backup, capture a fresh checkpoint under
+   quiescence at the full snapshot instead. Use the ORM adapter's
+   `schema_snapshot` for the chain's schema identity. Delegate every host
+   `schema_snapshot` call live to the ORM adapter so the after-export recheck
+   sees key storage changes. To implement `export_incremental`, hold one read
+   fence or stop writers and schema changes across the journal read and row
+   export. While writes are stopped, call `Database::export_changes` with
+   `ChangeWindow { after_sequence: Some(<parent checkpoint>), until: i64::MAX }`
+   (`until` is a Unix timestamp in seconds), then index `OrmBackupAdapter::export_full` by
+   `(table_name, primary_key)`. Keep the last action per exact key in
+   sequence order. Pass delete keys through as tombstones. For a final create
+   or update, use the matching exported row and fail if it is missing.
+   Include object metadata from that same export and advance the checkpoint
+   only after the incremental is committed.
+4. Enable canonical mode on a canonical restore target before applying the
+   backup. Keep a legacy-configured target available for retained legacy
+   snapshots. After a restore, start a new incremental chain from a full
+   snapshot and a current checkpoint.
+
+Canonical keys support PostgreSQL's built-in `boolean`, `smallint`,
+`integer`, `bigint`, `real`, `double precision`, `numeric`, `uuid`,
+`timestamp`, `timestamptz`, `date`, `text`, `varchar`, `bytea`, and
+`jsonb`. Other types, including `char(n)`, `citext`, `time`, `inet` and
+domains, are refused at cutover or when installing a recorder in canonical
+mode. Full export also checks single-key tables without recorders and still
+requires portable column values. Composite-key tables are full-only. A
+spelling change under a nondeterministic collation records an old-key delete
+and a new-key create.
+
+The backup schema identity includes live key types and type modifiers for
+the adapter's single-key backup entities. Tables outside the backup do not
+affect restore compatibility. The underlying error for a key storage
+mismatch names the affected table and column.
+Pause backup jobs during key DDL and take a new full backup and checkpoint
+after every key storage type change, including a change later reverted. The
+cutover is one-way because rounded legacy keys can lose the original value.
+Build every compaction tool that handles canonical chains with the backup
+crate's `canonical-journal-keys` feature for exact float decoding.
+
 ## 0.218.0 to 0.219.0: Indirect query assurance
 
 **Action needed.** If you require assurance on a runtime collection query or
