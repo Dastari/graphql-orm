@@ -1131,8 +1131,7 @@ macro_rules! sqlx_backup_runtime {
                     BackupValueKind::DateTime => row.try_get::<Option<String>, _>(column).and_then(|value| {
                         value
                             .map(|value| {
-                                parse_backup_date_time(&value)
-                                    .map(|value| BackupValue::String(value.as_str().to_owned()))
+                                parse_backup_date_time(&value).map(BackupValue::String)
                             })
                             .unwrap_or(Ok(BackupValue::Null))
                     }),

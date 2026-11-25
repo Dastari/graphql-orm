@@ -1,6 +1,6 @@
 //! Internal time types and the compatibility rules for existing temporal text.
 
-use chrono::{Datelike, Timelike};
+use chrono::{Datelike, SecondsFormat, Timelike};
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Date, Duration, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
@@ -16,69 +16,100 @@ const NAIVE_T_FRACTION: &[time::format_description::FormatItem<'_>] =
 const NAIVE_SPACE_FRACTION: &[time::format_description::FormatItem<'_>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond]");
 
-// Retain the year bounds of the existing chrono API despite time's wider range.
-const MIN_YEAR: i32 = -262_143;
-const MAX_YEAR: i32 = 262_142;
+// Use the same internal range even when a consumer opts into time/large-dates.
+pub(crate) fn is_default_time_year(year: i32) -> bool {
+    (-9999..=9999).contains(&year)
+}
 
-/// The fraction of a leap second must survive until formatting or comparison.
+/// Preserve the full chrono range alongside the internal time engine.
 #[derive(Clone, Copy)]
-pub(crate) struct Timestamp {
-    pub(crate) value: OffsetDateTime,
-    pub(crate) leap_second: bool,
+pub(crate) enum Timestamp {
+    Time {
+        utc: PrimitiveDateTime,
+        offset: UtcOffset,
+        leap_second: bool,
+    },
+    Chrono(chrono::DateTime<chrono::FixedOffset>),
 }
 
 impl Timestamp {
     pub(crate) fn from_chrono(value: chrono::DateTime<chrono::FixedOffset>) -> Self {
-        let (utc, leap_second) = from_chrono_naive(value.naive_utc());
+        let Some((utc, leap_second)) = from_chrono_naive(value.naive_utc()) else {
+            return Self::Chrono(value);
+        };
         let offset = UtcOffset::from_whole_seconds(value.offset().local_minus_utc())
             .expect("chrono offsets fit in time");
-        Self {
-            value: utc.assume_utc().to_offset(offset),
+        Self::Time {
+            utc,
+            offset,
             leap_second,
         }
     }
 
-    pub(crate) fn from_naive(
-        value: PrimitiveDateTime,
-        leap_second: bool,
-        offset: UtcOffset,
-    ) -> Self {
-        Self {
-            value: value.assume_offset(offset),
-            leap_second,
+    pub(crate) fn from_utc(utc: PrimitiveDateTime) -> Self {
+        Self::Time {
+            utc,
+            offset: UtcOffset::UTC,
+            leap_second: false,
+        }
+    }
+
+    pub(crate) fn subsec_nanos(self) -> u32 {
+        match self {
+            Self::Time {
+                utc, leap_second, ..
+            } => utc.nanosecond() + if leap_second { 1_000_000_000 } else { 0 },
+            Self::Chrono(value) => value.timestamp_subsec_nanos(),
         }
     }
 
     pub(crate) fn ordering_key(self) -> (i64, u32) {
-        (
-            self.value.unix_timestamp(),
-            self.value.nanosecond() + if self.leap_second { 1_000_000_000 } else { 0 },
-        )
+        let seconds = match self {
+            Self::Time { utc, .. } => utc.assume_utc().unix_timestamp(),
+            Self::Chrono(value) => value.timestamp(),
+        };
+        (seconds, self.subsec_nanos())
     }
 
     pub(crate) fn to_chrono(self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-        let (sec, nanos) = self.ordering_key();
-        let offset = chrono::FixedOffset::east_opt(self.value.offset().whole_seconds())?;
-        chrono::DateTime::from_timestamp(sec, nanos).map(|value| value.with_timezone(&offset))
+        match self {
+            Self::Time { offset, .. } => {
+                let (sec, nanos) = self.ordering_key();
+                let offset = chrono::FixedOffset::east_opt(offset.whole_seconds())?;
+                chrono::DateTime::from_timestamp(sec, nanos)
+                    .map(|value| value.with_timezone(&offset))
+            }
+            Self::Chrono(value) => Some(value),
+        }
     }
 
     pub(crate) fn canonical_utc(self) -> String {
-        let utc = self.value.to_offset(UtcOffset::UTC);
-        let (mut rounded, mut leap) = (utc, self.leap_second);
-        if let Some(candidate) = utc.checked_add(Duration::nanoseconds(500))
-            && candidate.year() <= MAX_YEAR
+        if let Self::Time {
+            utc, leap_second, ..
+        } = self
+            && let Some(rounded) = utc.checked_add(Duration::nanoseconds(500))
+            && is_default_time_year(rounded.year())
         {
-            leap &= candidate.second() == utc.second();
-            rounded = candidate;
+            let leap = leap_second && rounded.second() == utc.second();
+            let seconds = rounded.second() + u8::from(leap);
+            return format!(
+                "{}T{:02}:{:02}:{seconds:02}.{:06}Z",
+                display_date(rounded.date()),
+                rounded.hour(),
+                rounded.minute(),
+                rounded.microsecond(),
+            );
         }
-        let seconds = rounded.second() + u8::from(leap);
-        format!(
-            "{}T{:02}:{:02}:{seconds:02}.{:06}Z",
-            display_date(rounded.date()),
-            rounded.hour(),
-            rounded.minute(),
-            rounded.microsecond(),
-        )
+
+        // Rounding can cross time's year bounds.
+        let utc = self.to_chrono().expect("timestamps fit in chrono").to_utc();
+        let rounded = utc
+            .checked_add_signed(chrono::Duration::nanoseconds(500))
+            .unwrap_or(utc);
+        rounded
+            .with_nanosecond(rounded.nanosecond() / 1_000 * 1_000)
+            .unwrap_or(rounded)
+            .to_rfc3339_opts(SecondsFormat::Micros, true)
     }
 }
 
@@ -113,31 +144,42 @@ fn rfc3339(text: &str) -> Option<Timestamp> {
         text
     };
     let value = OffsetDateTime::parse(text, &Rfc3339).ok()?;
-    Some(Timestamp { value, leap_second })
+    let offset = value.offset();
+    let utc = utc_in_time(value.date().with_time(value.time()), offset)?;
+    Some(Timestamp::Time {
+        utc,
+        offset,
+        leap_second,
+    })
+}
+
+// Convert through checked calendar arithmetic so an offset crossing the year
+// boundary can fall back to chrono.
+pub(crate) fn utc_in_time(
+    local: PrimitiveDateTime,
+    offset: UtcOffset,
+) -> Option<PrimitiveDateTime> {
+    let utc = local.checked_sub(Duration::seconds(i64::from(offset.whole_seconds())))?;
+    is_default_time_year(utc.year()).then_some(utc)
 }
 
 pub(crate) fn parse_relaxed_timestamp(text: &str) -> Result<Timestamp, chrono::ParseError> {
     if let Some(parsed) = rfc3339(text) {
         return Ok(parsed);
     }
-    // Canonical stored values with a signed year can use the same time parser
-    // as ordinary naive timestamps. Keep the legacy grammar for older spellings.
-    if text.starts_with(['+', '-'])
-        && let Some(naive) = text.strip_suffix('Z')
-        && let Some(value) = parse_naive_with_year(naive, b'T')
-    {
-        return Ok(Timestamp::from_naive(value, false, UtcOffset::UTC));
-    }
     text.parse().map(Timestamp::from_chrono)
 }
 
-pub(crate) fn from_chrono_date(date: chrono::NaiveDate) -> Date {
+pub(crate) fn from_chrono_date(date: chrono::NaiveDate) -> Option<Date> {
+    if !is_default_time_year(date.year()) {
+        return None;
+    }
     let month = Month::try_from(date.month() as u8).expect("valid chrono month");
-    Date::from_calendar_date(date.year(), month, date.day() as u8)
-        .expect("chrono dates fit in time")
+    Date::from_calendar_date(date.year(), month, date.day() as u8).ok()
 }
 
-pub(crate) fn from_chrono_naive(value: chrono::NaiveDateTime) -> (PrimitiveDateTime, bool) {
+pub(crate) fn from_chrono_naive(value: chrono::NaiveDateTime) -> Option<(PrimitiveDateTime, bool)> {
+    let date = from_chrono_date(value.date())?;
     let leap_second = value.nanosecond() >= 1_000_000_000;
     let clock = Time::from_hms_nano(
         value.hour() as u8,
@@ -146,7 +188,7 @@ pub(crate) fn from_chrono_naive(value: chrono::NaiveDateTime) -> (PrimitiveDateT
         value.nanosecond() % 1_000_000_000,
     )
     .expect("valid chrono clock");
-    (from_chrono_date(value.date()).with_time(clock), leap_second)
+    Some((date.with_time(clock), leap_second))
 }
 
 pub(crate) fn to_chrono_date(date: Date) -> Option<chrono::NaiveDate> {
@@ -180,19 +222,13 @@ pub(crate) fn parse_naive(text: &str, separator: u8) -> Option<PrimitiveDateTime
     if text.as_bytes().get(4) != Some(&b'-') {
         return None;
     }
-    parse_naive_with_year(text, separator)
-}
-
-fn parse_naive_with_year(text: &str, separator: u8) -> Option<PrimitiveDateTime> {
     let description = match (separator, text.contains('.')) {
         (b'T', false) => NAIVE_T,
         (b'T', true) => NAIVE_T_FRACTION,
         (_, false) => NAIVE_SPACE,
         (_, true) => NAIVE_SPACE_FRACTION,
     };
-    PrimitiveDateTime::parse(text, description)
-        .ok()
-        .filter(|value| is_chrono_date(value.date()))
+    PrimitiveDateTime::parse(text, description).ok()
 }
 
 pub(crate) fn parse_calendar(text: &str) -> Option<Timestamp> {
@@ -204,31 +240,23 @@ pub(crate) fn parse_calendar(text: &str) -> Option<Timestamp> {
         (b' ', "%Y-%m-%d %H:%M:%S%.f"),
     ] {
         if let Some(value) = parse_naive(text, separator) {
-            return Some(Timestamp::from_naive(value, false, UtcOffset::UTC));
+            return Some(Timestamp::from_utc(value));
         }
         if let Ok(value) = chrono::NaiveDateTime::parse_from_str(text, legacy) {
-            let (value, leap) = from_chrono_naive(value);
-            return Some(Timestamp::from_naive(value, leap, UtcOffset::UTC));
+            return Some(Timestamp::from_chrono(value.and_utc().fixed_offset()));
         }
     }
-    let date = parse_date(text).or_else(|| {
-        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .ok()
-            .map(from_chrono_date)
-    })?;
-    Some(Timestamp::from_naive(
-        date.midnight(),
-        false,
-        UtcOffset::UTC,
+    if let Some(date) = parse_date(text) {
+        return Some(Timestamp::from_utc(date.midnight()));
+    }
+    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+    Some(Timestamp::from_chrono(
+        date.and_hms_opt(0, 0, 0)?.and_utc().fixed_offset(),
     ))
 }
 
 pub(crate) fn calendar_today() -> chrono::NaiveDate {
     to_chrono_date(OffsetDateTime::now_utc().date()).expect("the current year fits in chrono")
-}
-
-pub(crate) fn is_chrono_date(date: Date) -> bool {
-    (MIN_YEAR..=MAX_YEAR).contains(&date.year())
 }
 
 pub(crate) fn display_date(date: Date) -> String {

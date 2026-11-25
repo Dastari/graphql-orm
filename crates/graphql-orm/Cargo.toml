@@ -74,7 +74,7 @@ serde_json = "1"
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 tiberius = { workspace = true, optional = true }
-time = { version = "0.3.53", features = ["large-dates", "macros", "parsing"] }
+time = { version = "0.3.53", features = ["macros", "parsing"] }
 tokio = { version = "1", features = ["sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { workspace = true, optional = true }

@@ -65,12 +65,21 @@ fn runtime_datetime_boundaries_match_chrono() {
 #[test]
 fn stored_signed_years_match_chrono() {
     for text in [
+        "-262144-12-31T23:59:59Z",
         "-262143-01-01T00:00:00Z",
+        "-262142-01-01T00:00:00.000000501Z",
         "-262143-01-01T00:00:00+00:01",
         "+262142-12-31T23:59:59.999999999Z",
         "+262143-01-01T00:00:00Z",
         "-10000-02-29T00:03:00.000000501-08:00",
         "+10000-01-01T00:00:00.000000Z",
+        "-9999-01-01T00:00:00+00:01",
+        "-10000-12-31T23:59:59.999999500Z",
+        "-10000-12-31T23:59:59-00:01",
+        "-9999-12-31T23:59:60.000000499Z",
+        "+9999-12-31T23:59:59.999999500Z",
+        "9999-12-31T23:59:59-00:01",
+        "9999-12-31T23:59:59.999999500Z",
         "+2020-1-2T3:4:5 UTC",
     ] {
         let expected = text
@@ -83,6 +92,7 @@ fn stored_signed_years_match_chrono() {
             expected.as_deref(),
             "{text}"
         );
+        assert_strict_parity(text);
     }
 }
 
@@ -159,6 +169,18 @@ fn temporal_text_classification_matches_chrono() {
         assert_text_kind(text);
     }
     assert_text_kind("2024-02-29T23:59:00.1234567891234567890");
+    for year in [
+        -262_144, -262_143, -262_142, -10_000, -9999, 9999, 10_000, 262_142, 262_143,
+    ] {
+        for suffix in [
+            "-01-01",
+            "-01-01 00:00:00.123456789 UTC",
+            "-01-01T00:00:00.123456789+00:01",
+            "-01-01T00:00:00.123456789Z",
+        ] {
+            assert_text_kind(&format!("{year:+05}{suffix}"));
+        }
+    }
 }
 
 #[test]
@@ -213,6 +235,13 @@ fn date_filter_between_order_matches_chrono_calendar_parsing() {
         "2000-2-9 23:59:60.5",
         "2000-02-10",
         "2000-02-30",
+        "-10000-12-31 23:59:59.999999999",
+        "-9999-01-01",
+        "9999-12-31T23:00:00-01:00",
+        "+10000-01-01 00:00:00",
+        "-262143-01-01",
+        "+262142-12-31",
+        "+262143-01-01",
     ];
     for start in examples {
         for end in examples {
@@ -240,6 +269,10 @@ fn sqlite_calendar_arithmetic_matches_chrono_at_boundaries() {
     for today in [
         chrono::NaiveDate::MIN,
         chrono::NaiveDate::MAX,
+        chrono::NaiveDate::from_ymd_opt(-10_000, 12, 31).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(-9999, 1, 1).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(9999, 12, 31).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(10_000, 1, 1).unwrap(),
         chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
         chrono::NaiveDate::from_ymd_opt(2000, 2, 29).unwrap(),
         chrono::NaiveDate::from_ymd_opt(2100, 3, 1).unwrap(),

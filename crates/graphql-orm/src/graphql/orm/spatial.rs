@@ -575,8 +575,9 @@ pub fn date_filter_truth_at(
             return Some(false);
         };
         let value = value.ordering_key();
-        let today = temporal::from_chrono_date(today);
-        let today_start = midnight_key(today);
+        let Some(today_start) = calendar_day(today, 0) else {
+            return Some(false);
+        };
         let Some(tomorrow_start) = calendar_day(today, 1) else {
             return Some(false);
         };
@@ -648,13 +649,15 @@ fn date_filter_has_calendar_predicate(filter: &crate::graphql::filters::DateFilt
         || filter.lte_relative.is_some()
 }
 
-fn midnight_key(date: time::Date) -> (i64, u32) {
-    (date.midnight().assume_utc().unix_timestamp(), 0)
-}
-
-fn calendar_day(date: time::Date, days: i32) -> Option<(i64, u32)> {
-    let date = date.checked_add(time::Duration::days(i64::from(days)))?;
-    crate::temporal::is_chrono_date(date).then(|| midnight_key(date))
+fn calendar_day(date: chrono::NaiveDate, days: i32) -> Option<(i64, u32)> {
+    if let Some(date) = crate::temporal::from_chrono_date(date)
+        && let Some(date) = date.checked_add(time::Duration::days(i64::from(days)))
+        && crate::temporal::is_default_time_year(date.year())
+    {
+        return Some((date.midnight().assume_utc().unix_timestamp(), 0));
+    }
+    let date = date.checked_add_signed(chrono::TimeDelta::days(i64::from(days)))?;
+    Some((date.and_hms_opt(0, 0, 0)?.and_utc().timestamp(), 0))
 }
 
 fn sqlite_calendar_today() -> chrono::NaiveDate {

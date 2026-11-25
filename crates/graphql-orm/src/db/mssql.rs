@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiberius::{ColumnData, Config, Query};
-use time::{Date, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -2216,39 +2216,28 @@ fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> 
     use tiberius::ToSql;
 
     let valid_date = |date: Date| (1..=9999).contains(&date.year());
+    let date_error =
+        || sqlx::Error::Encode("value is outside the SQL Server date or datetime2 range".into());
     match *value.kind() {
-        TemporalKind::Date(date) => {
-            let date = temporal::from_chrono_date(date);
-            if valid_date(date) {
-                Ok(owned_temporal_column(date.to_sql()))
-            } else {
-                Err(sqlx::Error::Encode(
-                    "value is outside the SQL Server date or datetime2 range".into(),
-                ))
-            }
-        }
-        TemporalKind::DateTime(time) => {
-            let (value, leap) = temporal::from_chrono_naive(time);
-            if valid_date(value.date()) && !leap {
-                Ok(owned_temporal_column(value.to_sql()))
-            } else {
-                Err(sqlx::Error::Encode(
-                    "value is outside the SQL Server date or datetime2 range".into(),
-                ))
-            }
-        }
+        TemporalKind::Date(date) => temporal::from_chrono_date(date)
+            .filter(|date| valid_date(*date))
+            .map(|date| owned_temporal_column(date.to_sql()))
+            .ok_or_else(date_error),
+        TemporalKind::DateTime(time) => temporal::from_chrono_naive(time)
+            .filter(|(value, leap)| valid_date(value.date()) && !leap)
+            .map(|(value, _)| owned_temporal_column(value.to_sql()))
+            .ok_or_else(date_error),
         TemporalKind::DateTimeOffset(time) => {
-            let time = temporal::Timestamp::from_chrono(time);
-            let local = time.value;
-            let utc = local.to_offset(UtcOffset::UTC);
-            let offset = local.offset().whole_seconds();
-            if offset % 60 == 0
-                && offset.abs() <= 14 * 3600
-                && !time.leap_second
-                && valid_date(local.date())
+            let seconds = time.offset().local_minus_utc();
+            if seconds % 60 == 0
+                && seconds.abs() <= 14 * 3600
+                && let temporal::Timestamp::Time { utc, offset, leap_second: false } =
+                    temporal::Timestamp::from_chrono(time)
                 && valid_date(utc.date())
+                && let Some(local) = utc.checked_add(time::Duration::seconds(i64::from(seconds)))
+                && valid_date(local.date())
             {
-                Ok(owned_temporal_column(local.to_sql()))
+                Ok(owned_temporal_column(local.assume_offset(offset).to_sql()))
             } else {
                 Err(sqlx::Error::Encode(
                     "timestamp is outside the SQL Server datetimeoffset range".into(),
@@ -3116,6 +3105,42 @@ mod tests {
                 TemporalKind::Unparsed => panic!("could not parse {text}"),
             };
             assert_eq!(encode_temporal(&value).unwrap(), expected, "{text}");
+        }
+
+        use chrono::{Datelike, Timelike};
+
+        for year in [
+            "-262144", "-262143", "-262142", "-10000", "-9999", "9999", "+9999", "+10000",
+            "+262142", "+262143",
+        ] {
+            for suffix in [
+                "-01-01",
+                "-12-31T23:59:59.123456789",
+                "-12-31T23:59:59.123456789-00:01",
+                "-12-31T23:59:59.123456789+00:01",
+            ] {
+                let text = format!("{year}{suffix}");
+                let SqlValue::Temporal(value) = SqlValue::temporal_text(text.clone()) else {
+                    unreachable!();
+                };
+                let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
+                let valid_time = |stamp: chrono::NaiveDateTime| {
+                    valid_date(stamp.date()) && stamp.nanosecond() < 1_000_000_000
+                };
+                let expected = match *value.kind() {
+                    TemporalKind::Date(date) if valid_date(date) => Some(date.into_sql()),
+                    TemporalKind::DateTime(stamp) if valid_time(stamp) => Some(stamp.into_sql()),
+                    TemporalKind::DateTimeOffset(stamp) if valid_time(stamp.naive_utc()) => stamp
+                        .naive_utc()
+                        .checked_add_signed(chrono::TimeDelta::seconds(i64::from(
+                            stamp.offset().local_minus_utc(),
+                        )))
+                        .filter(|stamp| valid_time(*stamp))
+                        .map(|_| stamp.into_sql()),
+                    _ => None,
+                };
+                assert_eq!(encode_temporal(&value).ok(), expected, "{text}");
+            }
         }
     }
 

@@ -305,7 +305,7 @@ impl RuntimeDateTime {
         let parsed = temporal::parse_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        if !parsed.value.nanosecond().is_multiple_of(1_000) {
+        if !parsed.subsec_nanos().is_multiple_of(1_000) {
             return Err(RuntimeRecordError::new(
                 RuntimeRecordErrorCode::InvalidValue,
             ));
@@ -363,19 +363,9 @@ impl RuntimeDateTime {
     }
 
     /// Canonicalize a UTC date-time to portable microsecond precision.
-    #[cfg(any(
-        feature = "sqlite",
-        feature = "postgres",
-        all(test, feature = "runtime-graphql")
-    ))]
-    pub(crate) fn from_utc(value: time::OffsetDateTime) -> Self {
-        Self(
-            temporal::Timestamp {
-                value,
-                leap_second: false,
-            }
-            .canonical_utc(),
-        )
+    #[cfg(all(test, feature = "runtime-graphql"))]
+    pub(crate) fn from_utc(value: time::PrimitiveDateTime) -> Self {
+        Self(temporal::Timestamp::from_utc(value).canonical_utc())
     }
 
     /// Return the canonical UTC RFC 3339 representation.
@@ -1491,12 +1481,15 @@ fn decode_postgres_timestamp(micros: i64) -> Option<temporal::Timestamp> {
     if matches!(micros, i64::MAX | i64::MIN) {
         return None; // PostgreSQL's infinities
     }
-    let value = time::macros::datetime!(2000-01-01 0:00 UTC)
-        .checked_add(time::Duration::microseconds(micros))?;
-    temporal::is_chrono_date(value.date()).then_some(temporal::Timestamp {
-        value,
-        leap_second: false,
-    })
+    if let Some(value) =
+        time::macros::datetime!(2000-01-01 0:00).checked_add(time::Duration::microseconds(micros))
+        && temporal::is_default_time_year(value.year())
+    {
+        return Some(temporal::Timestamp::from_utc(value));
+    }
+    let epoch = chrono::DateTime::from_timestamp(946_684_800, 0)?;
+    let value = epoch.checked_add_signed(chrono::TimeDelta::microseconds(micros))?;
+    Some(temporal::Timestamp::from_chrono(value.fixed_offset()))
 }
 
 #[cfg(feature = "postgres")]
@@ -1572,19 +1565,34 @@ mod postgres_temporal_tests {
 
     #[test]
     fn postgres_binary_temporal_boundaries_match_chrono() {
+        const POSTGRES_EPOCH: i64 = 946_684_800_000_000;
         for micros in [
             i64::MIN,
             i64::MIN + 1,
             i64::MAX - 1,
             i64::MAX,
-            -946_684_800_000_000,
+            -POSTGRES_EPOCH,
             -1,
             0,
             1,
-            DateTime::<Utc>::MIN_UTC.timestamp_micros() - 946_684_800_000_000,
-            DateTime::<Utc>::MAX_UTC.timestamp_micros() - 946_684_800_000_000,
+            DateTime::<Utc>::MIN_UTC.timestamp_micros() - POSTGRES_EPOCH - 1,
+            DateTime::<Utc>::MIN_UTC.timestamp_micros() - POSTGRES_EPOCH,
+            DateTime::<Utc>::MAX_UTC.timestamp_micros() - POSTGRES_EPOCH,
+            DateTime::<Utc>::MAX_UTC.timestamp_micros() - POSTGRES_EPOCH + 1,
         ] {
             assert_postgres_decode(micros);
+        }
+        for year in [-262_143, -262_142, -10_000, -9999, 9999, 10_000, 262_142] {
+            let date = chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
+            let boundary = date
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_micros()
+                - POSTGRES_EPOCH;
+            for micros in [boundary - 1, boundary, boundary + 1] {
+                assert_postgres_decode(micros);
+            }
         }
     }
 

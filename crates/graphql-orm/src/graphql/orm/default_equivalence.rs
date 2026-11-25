@@ -141,13 +141,6 @@ fn timestamptz(text: &str) -> Option<crate::temporal::Timestamp> {
     // `YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM[:SS]]`; BC years and other styles fail.
     let split = text.get(19..)?.find(['+', '-'])? + 19;
     let local = text.get(..split)?;
-    let (naive, leap) = temporal::parse_naive(local, b' ')
-        .map(|value| (value, false))
-        .or_else(|| {
-            chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f")
-                .ok()
-                .map(temporal::from_chrono_naive)
-        })?;
     let offset = text.get(split..)?;
     let sign = if offset.starts_with('-') { -1 } else { 1 };
     let parts = offset[1..].split(':').collect::<Vec<_>>();
@@ -165,12 +158,19 @@ fn timestamptz(text: &str) -> Option<crate::temporal::Timestamp> {
         .map(|(part, scale)| part.parse::<i32>().map(|value| value * scale))
         .sum::<Result<i32, _>>()
         .ok()?;
-    if seconds >= 24 * 3600 {
-        return None;
+    if let Some(naive) = temporal::parse_naive(local, b' ')
+        && let Ok(offset) = time::UtcOffset::from_whole_seconds(sign * seconds)
+        && seconds < 24 * 3600
+        && let Some(utc) = temporal::utc_in_time(naive, offset)
+    {
+        return Some(temporal::Timestamp::from_utc(utc));
     }
-    let offset = time::UtcOffset::from_whole_seconds(sign * seconds).ok()?;
-    let value = temporal::Timestamp::from_naive(naive, leap, offset);
-    temporal::is_chrono_date(value.value.to_offset(time::UtcOffset::UTC).date()).then_some(value)
+    let naive = chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f").ok()?;
+    let offset = chrono::FixedOffset::east_opt(sign * seconds)?;
+    naive
+        .and_local_timezone(offset)
+        .single()
+        .map(temporal::Timestamp::from_chrono)
 }
 
 /// Rewrites deparsed default text to the spelling it has with
@@ -314,6 +314,10 @@ mod tests {
             ("2000-02-29 00:00:00.000001", "-00:19:32", -1172),
             ("2016-12-31 23:59:60.5", "+00", 0),
             ("2017-01-01 00:59:60.5", "+01", 3600),
+            ("9999-12-31 23:59:59", "-01", -3600),
+            ("-9999-01-01 00:00:00", "+01", 3600),
+            ("+10000-01-01 00:00:00", "+01", 3600),
+            ("-10000-12-31 23:59:59", "-01", -3600),
             ("+262142-12-31 23:59:59", "-01", -3600),
             ("-262143-01-01 00:00:00", "+01", 3600),
         ] {
