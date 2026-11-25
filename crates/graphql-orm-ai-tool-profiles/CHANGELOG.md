@@ -19,6 +19,10 @@ supersedes: []
   capability broker can describe generated mutations. Fingerprints, plan
   schemas and compilation are unchanged.
   [Migration](MIGRATION.md#0330-mutation-and-subscription-signatures)
+- **Action needed (#551)** if you construct `AiCapabilitySearchCandidate`
+  literally. It gains `approval`, the entry's reviewed approval rule, so a
+  broker can decide rule admission from a held candidate. Deserializing a
+  candidate without it yields `never`.
 
 ## Unreleased - 0.32.0
 

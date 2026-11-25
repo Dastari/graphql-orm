@@ -4,8 +4,11 @@ mod brokered;
 mod media;
 mod native_preflight;
 mod task_context;
+#[cfg(all(test, feature = "sqlite"))]
+pub(crate) use brokered::{BROKERED_CALL_EVIDENCE_FORMAT, open_call_arguments};
 pub(crate) use brokered::{
-    ResolvedApplicationCall, resolved_arguments_match, row_records_call, row_records_parts,
+    BrokeredRuleFence, ResolvedApplicationCall, brokered_rules_admit, protected_arguments_match,
+    row_records_call, row_records_parts,
 };
 pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
@@ -770,7 +773,7 @@ impl OrmAiApplicationToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                resolved.arguments.clone(),
+                resolved.protected_arguments()?,
             )
             .await?;
         Ok((
@@ -2293,6 +2296,11 @@ impl OrmAiApplicationToolCallService {
     /// resolved to, exactly as [`Self::execute_automatic_mutation`] executes
     /// the direct definition. The durable row keeps both identities and the
     /// tool result answers the provider's broker call.
+    ///
+    /// `fence` re-proves the mutation's rule admission as the last step
+    /// before dispatch, after the pre-effect checkpoint is durable: rules
+    /// that changed or no longer admit the mutation by then refuse it as a
+    /// durable not-started outcome, and nothing is dispatched.
     pub(crate) async fn execute_brokered_automatic_mutation(
         &self,
         lease: &AiRunLease,
@@ -2300,6 +2308,7 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
         resolved: ResolvedApplicationCall,
+        fence: BrokeredRuleFence,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
         Box::pin(self.boxed_unapproved(
             lease,
@@ -2307,7 +2316,7 @@ impl OrmAiApplicationToolCallService {
             context,
             route,
             UnapprovedToolMode::AutomaticMutation,
-            Some(resolved),
+            Some((resolved, fence)),
         ))
         .await
     }
@@ -2322,7 +2331,7 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
         mode: UnapprovedToolMode,
-        brokered: Option<ResolvedApplicationCall>,
+        brokered: Option<(ResolvedApplicationCall, BrokeredRuleFence)>,
     ) -> futures::future::BoxFuture<'a, Result<AiConsequentialToolCallOutcome, AiError>> {
         Box::pin(self.execute_unapproved(lease, provider_result, context, route, mode, brokered))
     }
@@ -2334,7 +2343,7 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
         mode: UnapprovedToolMode,
-        brokered: Option<ResolvedApplicationCall>,
+        brokered: Option<(ResolvedApplicationCall, BrokeredRuleFence)>,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
         self.validate_outer_binding(lease, provider_result, &context, &route)?;
         let provider_call = provider_result
@@ -2343,12 +2352,12 @@ impl OrmAiApplicationToolCallService {
             .ok_or_else(|| AiError::InvalidInput("tool call index is out of bounds".to_owned()))?;
         // Only an automatic mutation is ever reached through the broker here;
         // a brokered read keeps the broker's own read path.
-        let resolved = match brokered {
-            Some(resolved) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
-                resolved.bind_provider_call(provider_call)?
+        let (resolved, fence) = match brokered {
+            Some((resolved, fence)) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
+                (resolved.bind_provider_call(provider_call)?, Some(fence))
             }
             Some(_) => return Err(AiError::Forbidden),
-            None => ResolvedApplicationCall::direct(provider_call),
+            None => (ResolvedApplicationCall::direct(provider_call), None),
         };
         let argument_bytes = serde_json::to_vec(&resolved.arguments)
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
@@ -2428,7 +2437,7 @@ impl OrmAiApplicationToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                resolved.arguments.clone(),
+                resolved.protected_arguments()?,
             )
             .await?;
         let started_event_id = Uuid::new_v4();
@@ -2538,36 +2547,72 @@ impl OrmAiApplicationToolCallService {
         let provenance = provenance
             .map(|origin| origin.with_effect_execution(lease))
             .transpose()?;
-        let (execution, renewed_lease) = Box::pin(self.run_service.run_with_lease_heartbeat(
-            lease,
-            tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
-                if generated_query {
-                    self.runtime
-                        .execute_query_capability(
-                            lease.principal_reference(),
-                            &resolved.tool_id,
-                            &resolved.tool_fingerprint,
-                            resolved.arguments.clone(),
-                            request.invocation.clone(),
-                        )
-                        .await
-                } else if let Some(prepared) = prepared_mutation {
-                    self.runtime
-                        .execute_prepared_automatic_mutation(lease.principal_reference(), prepared)
-                        .await
-                } else {
-                    self.runtime
-                        .execute_tool_with_provenance(
-                            lease.principal_reference(),
-                            &descriptor.id,
-                            request,
-                            provenance.clone(),
-                        )
-                        .await
-                }
-            }),
-        ))
-        .await;
+        // The pre-effect rule fence of a brokered mutation: the last step
+        // before dispatch, after every preparation and persistence await. A
+        // rule change or revocation committed before this check refuses the
+        // mutation without dispatch.
+        let rule_refusal = match &fence {
+            Some(fence) => Box::pin(brokered_rules_admit(
+                fence.rules.as_ref(),
+                lease,
+                &fence.scope,
+                resolved.rule_fingerprint.as_deref().unwrap_or_default(),
+                &resolved.tool_fingerprint,
+                (ToolMaturity::AutonomousWrite, AiApprovalRule::None),
+            ))
+            .await
+            .is_err(),
+            None => false,
+        };
+        let (execution, renewed_lease) = if rule_refusal {
+            let proof = crate::execution_rejection::attest(
+                &descriptor.fingerprint,
+                provenance.as_ref(),
+                prepared_mutation
+                    .as_ref()
+                    .map_or(&request, |prepared| prepared.request()),
+                crate::ToolPreExecutionRejectionReason::AuthorizationDenied,
+            )
+            .map_err(|_| AiError::Conflict)?;
+            (
+                Ok(Err(AiError::ToolRejectedBeforeExecution(proof))),
+                lease.clone(),
+            )
+        } else {
+            Box::pin(self.run_service.run_with_lease_heartbeat(
+                lease,
+                tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
+                    if generated_query {
+                        self.runtime
+                            .execute_query_capability(
+                                lease.principal_reference(),
+                                &resolved.tool_id,
+                                &resolved.tool_fingerprint,
+                                resolved.arguments.clone(),
+                                request.invocation.clone(),
+                            )
+                            .await
+                    } else if let Some(prepared) = prepared_mutation {
+                        self.runtime
+                            .execute_prepared_automatic_mutation(
+                                lease.principal_reference(),
+                                prepared,
+                            )
+                            .await
+                    } else {
+                        self.runtime
+                            .execute_tool_with_provenance(
+                                lease.principal_reference(),
+                                &descriptor.id,
+                                request,
+                                provenance.clone(),
+                            )
+                            .await
+                    }
+                }),
+            ))
+            .await
+        };
         let execution = execution.unwrap_or(Err(AiError::ToolExecutionFailed));
         let lease = &renewed_lease;
         let ToolExecutionOutcome {
@@ -3192,6 +3237,7 @@ pub struct OrmAiConsequentialToolCallService {
     approval_service: OrmAiApprovalService,
     preview_builder: Arc<dyn AiCanonicalActionPreviewBuilder>,
     provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
+    rule_resolver: Option<Arc<dyn crate::AiAgentRuleResolver>>,
 }
 
 // Private phase data, not execution authority: consumption and fresh resolver
@@ -3214,6 +3260,9 @@ struct PreparedApprovedExecution {
     disclosure_schema_fingerprint: String,
     expected_owner_principal_kind: String,
     expected_owner_subject: String,
+    /// Resolution of a broker-routed call, re-proved against current rules
+    /// immediately before dispatch.
+    brokered: Option<ResolvedApplicationCall>,
 }
 
 struct PreparedConsequentialRequest {
@@ -3448,21 +3497,25 @@ impl OrmAiConsequentialToolCallService {
         .await
         .map_err(|error| map_orm(OrmPublicError::from(error)))?
         .ok_or(AiError::Conflict)?;
-        let brokered = if call.provider_tool_id.is_some() {
-            let arguments = self
-                .application_tools
-                .open(
-                    &policy,
-                    protection_context(
-                        "graphql_orm_ai_tool_calls",
-                        call.id,
-                        "protected_arguments",
-                        &scope,
-                    ),
-                    call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
-                )
-                .await?;
-            Some(ResolvedApplicationCall::from_record(&call, arguments)?)
+        // The protected evidence, not the clear columns, decides whether the
+        // row is broker-routed; the two must agree.
+        let arguments = self
+            .application_tools
+            .open(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    call.id,
+                    "protected_arguments",
+                    &scope,
+                ),
+                call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
+            )
+            .await?;
+        let resolved = ResolvedApplicationCall::from_record(&call, arguments)?;
+        let brokered = if resolved.is_brokered() {
+            Box::pin(self.brokered_approval_rules_admit(lease, &scope, &resolved)).await?;
+            Some(resolved)
         } else {
             None
         };
@@ -3516,7 +3569,52 @@ impl OrmAiConsequentialToolCallService {
             approval_service,
             preview_builder,
             provider_session_service: None,
+            rule_resolver: None,
         }
+    }
+
+    /// Lets this service execute approvals of generated mutations reached
+    /// through the fixed capability broker.
+    ///
+    /// For a broker-routed tool call, finalization and approved execution
+    /// resolve current hierarchical rules with `rule_resolver` for the exact
+    /// claimed lease and scope. They refuse unless those rules are the ones
+    /// that admitted the mutation (bound in the call's protected evidence)
+    /// and still admit its own fingerprint as a one-shot supervised write,
+    /// once before the approval is consumed and again immediately before
+    /// the resolver is dispatched. Without a resolver every broker-routed
+    /// approval is refused. Direct calls are unaffected. Use the same
+    /// resolver as the classified coordinator.
+    #[must_use]
+    pub fn with_rule_resolver(
+        mut self,
+        rule_resolver: Arc<dyn crate::AiAgentRuleResolver>,
+    ) -> Self {
+        self.rule_resolver = Some(rule_resolver);
+        self
+    }
+
+    /// Re-proves the rule admission of one broker-routed approval.
+    async fn brokered_approval_rules_admit(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        resolved: &ResolvedApplicationCall,
+    ) -> Result<(), AiError> {
+        let rules = self.rule_resolver.as_ref().ok_or(AiError::Forbidden)?;
+        let rule_fingerprint = resolved
+            .rule_fingerprint
+            .as_deref()
+            .ok_or(AiError::Conflict)?;
+        brokered_rules_admit(
+            rules.as_ref(),
+            lease,
+            scope,
+            rule_fingerprint,
+            &resolved.tool_fingerprint,
+            (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot),
+        )
+        .await
     }
 
     /// Enables exact retained-session parking across approval waits.
@@ -3758,7 +3856,7 @@ impl OrmAiConsequentialToolCallService {
                     "protected_arguments",
                     &context.scope,
                 ),
-                resolved.arguments.clone(),
+                resolved.protected_arguments()?,
             )
             .await?;
         let provenance = if !resolved.is_brokered()
@@ -4236,9 +4334,17 @@ impl OrmAiConsequentialToolCallService {
                         .ok_or(AiError::PersistenceFailed)?,
                 )
                 .await?;
-            if canonical_json_hash(&arguments)? != call.argument_hash {
-                return Err(AiError::PersistenceFailed);
-            }
+            // A broker-routed row runs its resolved plan only while current
+            // rules are still the ones that admitted it; its envelope and
+            // clear columns must agree, so it cannot be run as a direct row.
+            let resolved = ResolvedApplicationCall::from_record(&call, arguments)?;
+            let brokered = if resolved.is_brokered() {
+                Box::pin(self.brokered_approval_rules_admit(lease, &scope, &resolved)).await?;
+                Some(resolved.clone())
+            } else {
+                None
+            };
+            let arguments = resolved.arguments;
             let context = AiApplicationToolCallContext {
                 provider_turn_index: u32::try_from(call.provider_turn_index)
                     .map_err(|_| AiError::PersistenceFailed)?,
@@ -4380,6 +4486,7 @@ impl OrmAiConsequentialToolCallService {
                 disclosure_schema_fingerprint,
                 expected_owner_principal_kind: session.owner_principal_kind,
                 expected_owner_subject: session.owner_subject,
+                brokered,
             })
         })
     }
@@ -4414,6 +4521,7 @@ impl OrmAiConsequentialToolCallService {
                 disclosure_schema_fingerprint,
                 expected_owner_principal_kind,
                 expected_owner_subject,
+                brokered,
             } = execution;
             let consumed = self
                 .approval_service
@@ -4448,8 +4556,38 @@ impl OrmAiConsequentialToolCallService {
                         .map_err(|_| AiError::Conflict)
                 })
                 .transpose()?;
+            // Rules are re-proved at the pre-effect boundary, after consumption
+            // and cancellation: a broker-routed mutation whose rules changed or
+            // stopped admitting it since its approval is refused without
+            // dispatch, as a durable not-started outcome.
+            let rule_refusal = match &brokered {
+                Some(resolved) => {
+                    Box::pin(self.brokered_approval_rules_admit(&running_lease, &scope, resolved))
+                        .await
+                        .is_err()
+                }
+                None => false,
+            };
+            let refusal_proof = if rule_refusal {
+                let request = prepared
+                    .as_ref()
+                    .map_or(&request, |prepared| prepared.request());
+                Some(
+                    crate::execution_rejection::attest(
+                        &descriptor.fingerprint,
+                        provenance.as_ref(),
+                        request,
+                        crate::ToolPreExecutionRejectionReason::AuthorizationDenied,
+                    )
+                    .map_err(|_| AiError::Conflict)?,
+                )
+            } else {
+                None
+            };
             let approved_execution = async {
-                if let Some(prepared) = prepared {
+                if let Some(proof) = refusal_proof {
+                    Ok(Err(AiError::ToolRejectedBeforeExecution(proof)))
+                } else if let Some(prepared) = prepared {
                     tokio::time::timeout(
                         self.application_tools
                             .limits

@@ -1283,6 +1283,12 @@ pub struct AiCapabilitySearchCandidate {
     pub capability_fingerprint: String,
     /// Exact index-entry fingerprint.
     pub entry_fingerprint: String,
+    /// Reviewed approval classification of the entry. A broker uses it to
+    /// decide hierarchical-rule admission from the held candidate alone,
+    /// before any current-index lookup. A candidate without it is treated
+    /// as [`AiApprovalRule::Never`].
+    #[serde(default = "never_approved")]
+    pub approval: AiApprovalRule,
     /// Operations of an [`AiCapabilityKind::GeneratedEntity`] candidate, in
     /// operation-name order. Empty for every other kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1842,6 +1848,10 @@ fn rank_operation_entries<'a>(
         .collect()
 }
 
+const fn never_approved() -> AiApprovalRule {
+    AiApprovalRule::Never
+}
+
 fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandidate {
     AiCapabilitySearchCandidate {
         id: entry.id.clone(),
@@ -1854,6 +1864,7 @@ fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandida
         operation_shape: entry.operation_shape,
         capability_fingerprint: entry.capability_fingerprint.clone(),
         entry_fingerprint: entry.fingerprint.clone(),
+        approval: entry.approval,
         operations: entry
             .operations
             .iter()

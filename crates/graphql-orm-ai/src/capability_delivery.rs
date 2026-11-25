@@ -469,6 +469,20 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
     )
 }
 
+/// Fingerprint of the frozen fixed-broker execute definition of the current
+/// broker version: the only provider-facing identity a broker-routed
+/// tool-call row may carry.
+pub(crate) fn fixed_broker_execute_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        fixed_broker_definitions()
+            .into_iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
+            .map(|definition| definition.fingerprint)
+            .unwrap_or_default()
+    })
+}
+
 fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
     let index_fingerprint = None;
     let discover = fixed_discovery_definition();
@@ -2026,7 +2040,11 @@ pub struct AiCapabilityBrokerSession {
     brokered_mutations: bool,
     /// Hierarchical rules a classified coordinator bound for brokered
     /// mutations. Without them no mutation is discoverable or executable.
-    mutation_rules: Arc<Mutex<Option<crate::AiResolvedRuleSet>>>,
+    ///
+    /// A value, not shared state: binding returns a new session for the
+    /// classified turn alone, so a clone taken before binding, or one a
+    /// read-only plan holds, never inherits another plan's rules.
+    mutation_rules: Option<Arc<crate::AiResolvedRuleSet>>,
 }
 
 impl AiCapabilityBrokerSession {
@@ -2043,7 +2061,7 @@ impl AiCapabilityBrokerSession {
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
             brokered_mutations: false,
-            mutation_rules: Arc::new(Mutex::new(None)),
+            mutation_rules: None,
         })
     }
 
@@ -2158,50 +2176,78 @@ impl AiCapabilityBrokerSession {
         self.brokered_mutations
     }
 
-    /// Binds the classified coordinator's current rules for brokered
-    /// mutations. A later call must bind rules with the same fingerprint.
+    /// Returns this session bound to the classified coordinator's current
+    /// rules for brokered mutations. The returned value alone carries them:
+    /// this session, and every clone taken from it, stays unbound. Binding a
+    /// session already bound to rules with a different fingerprint is a
+    /// conflict. A session that does not broker mutations is returned
+    /// unchanged.
     pub(crate) fn bind_mutation_rules(
         &self,
         rules: &crate::AiResolvedRuleSet,
-    ) -> Result<(), AiError> {
+    ) -> Result<Self, AiError> {
         if !self.brokered_mutations {
-            return Ok(());
+            return Ok(self.clone());
         }
-        let mut bound = self
+        if self
             .mutation_rules
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        match bound.as_ref() {
-            Some(current) if current.fingerprint() != rules.fingerprint() => Err(AiError::Conflict),
-            Some(_) => Ok(()),
-            None => {
-                *bound = Some(rules.clone());
-                Ok(())
-            }
+            .as_ref()
+            .is_some_and(|current| current.fingerprint() != rules.fingerprint())
+        {
+            return Err(AiError::Conflict);
         }
+        let mut bound = self.clone();
+        bound.mutation_rules = Some(Arc::new(rules.clone()));
+        Ok(bound)
+    }
+
+    /// Fingerprint of the rules bound for brokered mutations, if any.
+    pub(crate) fn mutation_rule_fingerprint(&self) -> Option<&str> {
+        self.mutation_rules
+            .as_ref()
+            .map(|rules| rules.fingerprint())
     }
 
     /// Whether the bound rules admit this generated mutation entry at its
     /// reviewed classification.
     fn brokers_mutation_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+        entry.kind == AiCapabilityKind::GeneratedMutation
+            && self.brokers_mutation(&entry.capability_fingerprint, entry.approval)
+    }
+
+    /// Whether the bound rules admit a generated mutation with this exact
+    /// capability fingerprint at the reviewed classification `approval`.
+    fn brokers_mutation(&self, capability_fingerprint: &str, approval: AiApprovalRule) -> bool {
         // TODO(#910): a generated `@transientInput` argument must never be
         // offered through the broker. The marker is not on this base yet;
         // once it is, refuse any mutation whose compact schema carries one
         // here, before discovery, describe or execute can reach it.
-        if !self.brokered_mutations || entry.kind != AiCapabilityKind::GeneratedMutation {
+        if !self.brokered_mutations {
             return false;
         }
-        let Some(binding) = brokered_mutation_binding(entry.approval) else {
+        let Some(binding) = brokered_mutation_binding(approval) else {
             return false;
         };
-        self.mutation_rules
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(|rules| {
-                rules.constrain_tool(&entry.capability_fingerprint, binding.0, binding.1)
-                    == Some(binding.1)
-            })
+        self.mutation_rules.as_ref().is_some_and(|rules| {
+            rules.constrain_tool(capability_fingerprint, binding.0, binding.1) == Some(binding.1)
+        })
+    }
+
+    /// Whether this run's broker reaches a held candidate, decided from the
+    /// candidate alone, before any current-index lookup. Describe applies
+    /// it first, so a candidate this run may not reach is the same stale
+    /// selection whether or not the catalogue has since changed.
+    fn brokers_candidate(&self, candidate: &crate::AiCapabilitySearchCandidate) -> bool {
+        match candidate.kind {
+            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery => true,
+            AiCapabilityKind::ReviewedStatic => self
+                .brokered_static_tools
+                .contains(&candidate.capability_fingerprint),
+            AiCapabilityKind::GeneratedMutation => {
+                self.brokers_mutation(&candidate.capability_fingerprint, candidate.approval)
+            }
+            _ => false,
+        }
     }
 
     /// Whether `arguments` name a loaded reference this session holds for a
@@ -3874,6 +3920,17 @@ impl AiCapabilityDiscoveryBroker {
                 )
             })
             .ok_or_else(stale_selection)?;
+        // Admission is decided from the held candidate first: a candidate
+        // this run's rules or brokered tools do not reach is a stale
+        // selection, never a distinguishable catalogue-drift outcome.
+        if !search
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == capability_id)
+            .is_some_and(|candidate| session.brokers_candidate(candidate))
+        {
+            return Err(stale_selection());
+        }
         let indexes = self.current_indexes.current_index_set(run)?;
         // The run holds this exact candidate, so reporting catalogue drift
         // discloses nothing the principal was not already shown.
@@ -4692,6 +4749,19 @@ impl AiCapabilityDeliveryTurn {
         state.static_fingerprints = selected_fingerprints.clone();
         state.generation = generation;
         Ok(())
+    }
+
+    /// Returns this delivery with its broker session bound to the classified
+    /// coordinator's rules for brokered mutations
+    /// ([`AiCapabilityBrokerSession::bind_mutation_rules`]). Only the
+    /// returned delivery carries them; the turn it was cloned from, and any
+    /// other clone, stays closed to mutations.
+    pub(crate) fn with_mutation_rules(
+        mut self,
+        rules: &crate::AiResolvedRuleSet,
+    ) -> Result<Self, AiError> {
+        self.session = self.session.bind_mutation_rules(rules)?;
+        Ok(self)
     }
 
     /// Exact crate-authored definition of one broker operation in this
@@ -7463,7 +7533,7 @@ mod tests {
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
             brokered_mutations: false,
-            mutation_rules: Arc::new(Mutex::new(None)),
+            mutation_rules: None,
         };
         assert!(matches!(
             broker
@@ -7649,9 +7719,10 @@ mod tests {
             allowed: AtomicBool::new(true),
             policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
         });
+        let current = Arc::new(CurrentIndexes(RwLock::new(Arc::new(indexes))));
         let broker = AiCapabilityDiscoveryBroker::new(
             Arc::new(Resolver(principal)),
-            Arc::new(CurrentIndexes(RwLock::new(Arc::new(indexes)))),
+            current.clone(),
             authority.clone(),
             Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
             Duration::seconds(30),
@@ -7690,8 +7761,7 @@ mod tests {
         // own) never admit a mutation.
         let narrow = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
             .expect("session")
-            .with_brokered_mutations();
-        narrow
+            .with_brokered_mutations()
             .bind_mutation_rules(&mutation_rules(Some(BTreeSet::from([
                 fixed_broker_definitions()[0].fingerprint.clone(),
             ]))))
@@ -7702,14 +7772,17 @@ mod tests {
             .expect("narrow discovery");
         assert!(discovery["candidates"].as_array().unwrap().is_empty());
 
-        // Rules admitting the approval-required mutation alone.
-        let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+        // Rules admitting the approval-required mutation alone. Binding
+        // returns the bound session; the session it was taken from, and any
+        // clone of it, stays closed.
+        let opted = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
             .expect("session")
             .with_brokered_mutations();
+        let unbound_clone = opted.clone();
         let rules = mutation_rules(Some(BTreeSet::from([archive
             .capability_fingerprint
             .clone()])));
-        session.bind_mutation_rules(&rules).expect("bind rules");
+        let session = opted.bind_mutation_rules(&rules).expect("bind rules");
         session
             .bind_mutation_rules(&rules)
             .expect("same rules rebind");
@@ -7717,6 +7790,16 @@ mod tests {
             session.bind_mutation_rules(&mutation_rules(None)),
             Err(AiError::Conflict)
         ));
+        for closed in [&opted, &unbound_clone] {
+            let discovery = broker
+                .dispatch_discover(&principal_reference, &run, closed, &mutation_search)
+                .await
+                .expect("unbound clone discovery");
+            assert!(
+                discovery["candidates"].as_array().unwrap().is_empty(),
+                "a clone never inherits another plan's rules"
+            );
+        }
         let discovery = broker
             .dispatch_discover(&principal_reference, &run, &session, &mutation_search)
             .await
@@ -7824,11 +7907,25 @@ mod tests {
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
             brokered_mutations: true,
-            mutation_rules: Arc::new(Mutex::new(Some(mutation_rules(Some(BTreeSet::new()))))),
+            mutation_rules: Some(Arc::new(mutation_rules(Some(BTreeSet::new())))),
         };
         assert!(matches!(
             broker
                 .authorize_broker_execution(&principal_reference, &run, &revoked_rules, &execute)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        // An unbound clone sharing this run's broker state still describes
+        // no mutation, and executes none of its loaded references.
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &opted, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+        ));
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(&principal_reference, &run, &opted, &execute)
                 .await,
             Err(AiError::Forbidden)
         ));
@@ -7839,6 +7936,27 @@ mod tests {
                 .authorize_broker_execution(&principal_reference, &run, &session, &execute)
                 .await,
             Err(AiError::Forbidden)
+        ));
+        authority.allowed.store(true, Ordering::SeqCst);
+
+        // After a catalogue change, a held mutation candidate the turn's
+        // rules refuse is the same stale selection as before; only a turn
+        // that may reach it learns of the drift.
+        *current.0.write().unwrap() = Arc::new(
+            AiCapabilityIndexSet::compile([generated_index("target-policy-v1")])
+                .expect("index set"),
+        );
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &narrow, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+        ));
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &session, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
         ));
     }
 

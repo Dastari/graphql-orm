@@ -326,16 +326,34 @@ impl NativeExecution {
         else {
             return Ok(None);
         };
-        let (maturity, approval) = resolved
+        let binding = resolved
             .mutation_binding(self.services.applications.runtime().tool_catalog())
             .ok_or(AiError::Forbidden)?;
+        let approval = binding.1;
+        // The turn's rules admitted the mutation at discovery. Broker
+        // resolution awaited, so re-resolve current rules now: they must
+        // still be this turn's rules and admit the mutation's own
+        // fingerprint. The automatic path re-proves them again at its
+        // pre-effect boundary, and approved execution at consumption and
+        // dispatch.
         if resolution
             .rules()
-            .constrain_tool(&resolved.tool_fingerprint, maturity, approval)
+            .constrain_tool(&resolved.tool_fingerprint, binding.0, approval)
             != Some(approval)
+            || resolved.rule_fingerprint.as_deref() != Some(self.fingerprint.as_str())
         {
             return Err(AiError::Forbidden);
         }
+        Box::pin(crate::orm_tools::brokered_rules_admit(
+            self.rules.as_ref(),
+            lease,
+            &self.scope,
+            &self.fingerprint,
+            &resolved.tool_fingerprint,
+            binding,
+        ))
+        .await
+        .map_err(|_| AiError::Forbidden)?;
         let disposition = if approval == crate::AiApprovalRule::None {
             AiApplicationToolDisposition::AutomaticMutation
         } else {
@@ -381,6 +399,10 @@ impl NativeExecution {
                             context,
                             self.route.clone(),
                             resolved,
+                            crate::orm_tools::BrokeredRuleFence {
+                                rules: self.rules.clone(),
+                                scope: self.scope.clone(),
+                            },
                         ),
                 )
                 .await?

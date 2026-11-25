@@ -185,8 +185,9 @@ impl AiSupervisedAgentTurnPlan {
         {
             return Err(AiError::Conflict);
         }
-        // Brokered mutations follow exactly this turn's rules.
-        delivery.session().bind_mutation_rules(&self.rules)?;
+        // Brokered mutations follow exactly this turn's rules, on this
+        // turn's own delivery value only.
+        let delivery = delivery.with_mutation_rules(&self.rules)?;
         self.capability_delivery = Some(delivery);
         Ok(self)
     }

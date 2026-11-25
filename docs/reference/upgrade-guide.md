@@ -76,7 +76,7 @@ changelog to decide.
 - **Action needed** — next breaking ORM/macros release (#793). Check existing dotted columns and delimit each literal name explicitly. [Migration](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793)
 - **Action needed** — AI 0.165.0 (#828). Codex app-server process hosts must adopt the consuming turn dispatch and shared writer. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased)
 - **Action needed** — AI 0.166.0 and AI tool profiles 0.32.0 (#551). Capability broker version 3 adds hierarchical browsing and keyset continuation handles; fixed-broker sessions rebind once and rules that list broker fingerprints must admit the five new ones. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#capability-broker-version-3-551)
-- **Action needed** — AI 0.167.0 and AI tool profiles 0.33.0 (#551). Apply AI schema module 0.86.0; fixed-broker sessions can opt in to generated mutations under the classified native coordinator, and approved generated mutations now execute. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#generated-mutations-through-the-capability-broker-551)
+- **Action needed** — AI 0.167.0 and AI tool profiles 0.33.0 (#551). Apply AI schema module 0.86.0; fixed-broker sessions can opt in to generated mutations under the classified native coordinator (brokered approvals need `OrmAiConsequentialToolCallService::with_rule_resolver`), approved generated mutations now execute, and `AiCapabilitySearchCandidate` gains `approval`. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#generated-mutations-through-the-capability-broker-551)
 
 Changes merged to main after the latest workspace release.
 

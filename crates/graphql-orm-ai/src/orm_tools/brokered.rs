@@ -11,15 +11,50 @@
 use super::*;
 use crate::AiProviderToolCall;
 
+/// Format of the protected evidence a broker-routed tool-call row keeps in
+/// its protected arguments.
+pub(crate) const BROKERED_CALL_EVIDENCE_FORMAT: &str = "graphql-orm-ai/brokered-call/v1";
+
+/// Protected evidence of one broker-routed call, stored as the row's
+/// protected arguments.
+///
+/// It records the broker origin of the row together with the resolved plan,
+/// so the fact that a row was broker-routed lives in the content-protected
+/// envelope, not only in the clear provider-facing columns: clearing those
+/// columns can never make a broker-routed row pass as a direct one. It also
+/// retains the exact offered broker definition fingerprint, the hash of the
+/// provider's original broker arguments and the fingerprint of the rules
+/// that admitted the mutation. The row's own `argument_hash` stays the hash
+/// of the resolved plan.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BrokeredCallEvidence {
+    pub(crate) format: String,
+    pub(crate) provider_tool_id: String,
+    pub(crate) provider_tool_fingerprint: String,
+    pub(crate) provider_argument_hash: String,
+    pub(crate) rule_fingerprint: String,
+    pub(crate) plan: serde_json::Value,
+}
+
+fn json_hash(value: &serde_json::Value) -> String {
+    graphql_orm_ai_tool_profiles::canonical_json_hash(value)
+}
+
 /// One provider call resolved to the exact application capability it runs.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedApplicationCall {
     pub(crate) provider_call_id: String,
     pub(crate) provider_tool_id: AiToolId,
     pub(crate) provider_tool_fingerprint: String,
+    /// Canonical hash of the provider's own arguments.
+    pub(crate) provider_argument_hash: String,
     pub(crate) tool_id: AiToolId,
     pub(crate) tool_fingerprint: String,
     pub(crate) arguments: serde_json::Value,
+    /// Fingerprint of the rules that admitted a brokered mutation; `None`
+    /// for a direct call.
+    pub(crate) rule_fingerprint: Option<String>,
 }
 
 impl ResolvedApplicationCall {
@@ -30,31 +65,48 @@ impl ResolvedApplicationCall {
             provider_call_id: call.call_id().to_owned(),
             provider_tool_id: call.tool_id().clone(),
             provider_tool_fingerprint: call.tool_fingerprint().to_owned(),
+            provider_argument_hash: json_hash(call.arguments()),
             tool_id: call.tool_id().clone(),
             tool_fingerprint: call.tool_fingerprint().to_owned(),
             arguments: call.arguments().clone(),
+            rule_fingerprint: None,
         }
     }
 
     /// Rebuilds the resolved call of one durable tool-call row from its
-    /// stored identities and opened protected arguments.
+    /// stored identities and opened protected arguments
+    /// ([`open_call_arguments`]).
     ///
     /// A broker-routed row is re-resolved from its stored resolved identity
-    /// only; the broker's process-local loaded binding is never needed again.
+    /// and protected evidence only; the broker's process-local loaded
+    /// binding is never needed again.
     pub(crate) fn from_record(
         call: &AiToolCallRecord,
-        arguments: serde_json::Value,
+        opened: serde_json::Value,
     ) -> Result<Self, AiError> {
-        if !valid_provider_identity(call) {
-            return Err(AiError::Conflict);
-        }
-        Ok(Self {
-            provider_call_id: call.provider_call_id.clone(),
-            provider_tool_id: AiToolId::parse(call.provider_facing_tool_id().to_owned())?,
-            provider_tool_fingerprint: call.provider_facing_tool_fingerprint().to_owned(),
-            tool_id: AiToolId::parse(call.tool_id.clone())?,
-            tool_fingerprint: call.tool_fingerprint.clone(),
-            arguments,
+        let (arguments, evidence) = open_call_arguments(call, opened)?;
+        let tool_id = AiToolId::parse(call.tool_id.clone())?;
+        Ok(match evidence {
+            Some(evidence) => Self {
+                provider_call_id: call.provider_call_id.clone(),
+                provider_tool_id: AiToolId::parse(evidence.provider_tool_id)?,
+                provider_tool_fingerprint: evidence.provider_tool_fingerprint,
+                provider_argument_hash: evidence.provider_argument_hash,
+                tool_id,
+                tool_fingerprint: call.tool_fingerprint.clone(),
+                arguments,
+                rule_fingerprint: Some(evidence.rule_fingerprint),
+            },
+            None => Self {
+                provider_call_id: call.provider_call_id.clone(),
+                provider_tool_id: tool_id.clone(),
+                provider_tool_fingerprint: call.tool_fingerprint.clone(),
+                provider_argument_hash: call.argument_hash.clone(),
+                tool_id,
+                tool_fingerprint: call.tool_fingerprint.clone(),
+                arguments,
+                rule_fingerprint: None,
+            },
         })
     }
 
@@ -77,16 +129,45 @@ impl ResolvedApplicationCall {
         }
     }
 
-    /// Proves this resolution answers exactly `call`.
+    /// The value the row protects as its arguments: the provider's own for a
+    /// direct call, or the [`BrokeredCallEvidence`] envelope around the
+    /// resolved plan for a brokered one.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a brokered call without its admitting rule
+    /// fingerprint.
+    pub(crate) fn protected_arguments(&self) -> Result<serde_json::Value, AiError> {
+        if !self.is_brokered() {
+            return Ok(self.arguments.clone());
+        }
+        let rule_fingerprint = self.rule_fingerprint.clone().ok_or(AiError::Conflict)?;
+        serde_json::to_value(BrokeredCallEvidence {
+            format: BROKERED_CALL_EVIDENCE_FORMAT.to_owned(),
+            provider_tool_id: self.provider_tool_id.as_str().to_owned(),
+            provider_tool_fingerprint: self.provider_tool_fingerprint.clone(),
+            provider_argument_hash: self.provider_argument_hash.clone(),
+            rule_fingerprint,
+            plan: self.arguments.clone(),
+        })
+        .map_err(|_| AiError::PersistenceFailed)
+    }
+
+    /// Proves this resolution answers exactly `call`: its call ID, offered
+    /// definition and fingerprint, and its exact arguments.
     pub(crate) fn bind_provider_call(self, call: &AiProviderToolCall) -> Result<Self, AiError> {
         let direct = !self.is_brokered();
         if self.provider_call_id != call.call_id()
             || &self.provider_tool_id != call.tool_id()
             || self.provider_tool_fingerprint != call.tool_fingerprint()
+            || self.provider_argument_hash != json_hash(call.arguments())
             || (direct && &self.arguments != call.arguments())
             || (!direct
-                && crate::AiCapabilityBrokerOperation::from_tool_id(call.tool_id())
-                    != Some(crate::AiCapabilityBrokerOperation::Execute))
+                && (crate::AiCapabilityBrokerOperation::from_tool_id(call.tool_id())
+                    != Some(crate::AiCapabilityBrokerOperation::Execute)
+                    || self.provider_tool_fingerprint
+                        != crate::capability_delivery::fixed_broker_execute_fingerprint()
+                    || self.rule_fingerprint.is_none()))
         {
             return Err(AiError::Conflict);
         }
@@ -118,18 +199,99 @@ impl ResolvedApplicationCall {
 }
 
 /// A broker-routed row stores both provider-facing columns, and its
-/// provider-facing identity is the broker execute definition. A direct row
-/// stores neither.
+/// provider-facing identity is the exact fixed-broker execute definition of
+/// the current broker version. A direct row stores neither.
 pub(crate) fn valid_provider_identity(call: &AiToolCallRecord) -> bool {
     match (&call.provider_tool_id, &call.provider_tool_fingerprint) {
         (None, None) => true,
         (Some(tool_id), Some(fingerprint)) => {
             tool_id == crate::AI_CAPABILITY_EXECUTE_TOOL_ID
-                && valid_sha256(fingerprint)
+                && fingerprint == crate::capability_delivery::fixed_broker_execute_fingerprint()
                 && (tool_id != &call.tool_id || fingerprint != &call.tool_fingerprint)
         }
         _ => false,
     }
+}
+
+/// Splits one row's opened protected arguments into the arguments it runs
+/// with and, for a broker-routed row, its [`BrokeredCallEvidence`].
+///
+/// The envelope and the clear columns must agree: an envelope with cleared
+/// or different provider columns, or provider columns without an envelope,
+/// is refused, so a broker-routed row cannot be downgraded to a direct one.
+/// The arguments' canonical hash must be the row's argument hash. A legacy
+/// direct row opens to its own arguments, unchanged.
+///
+/// # Errors
+///
+/// Returns [`AiError::Conflict`] for any disagreement.
+pub(crate) fn open_call_arguments(
+    call: &AiToolCallRecord,
+    opened: serde_json::Value,
+) -> Result<(serde_json::Value, Option<BrokeredCallEvidence>), AiError> {
+    let enveloped = opened
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|format| format == BROKERED_CALL_EVIDENCE_FORMAT);
+    if !valid_provider_identity(call) {
+        return Err(AiError::Conflict);
+    }
+    if !enveloped {
+        if call.provider_tool_id.is_some() || json_hash(&opened) != call.argument_hash {
+            return Err(AiError::Conflict);
+        }
+        return Ok((opened, None));
+    }
+    let evidence: BrokeredCallEvidence =
+        serde_json::from_value(opened).map_err(|_| AiError::Conflict)?;
+    if call.provider_tool_id.as_deref() != Some(evidence.provider_tool_id.as_str())
+        || call.provider_tool_fingerprint.as_deref()
+            != Some(evidence.provider_tool_fingerprint.as_str())
+        || !valid_sha256(&evidence.provider_argument_hash)
+        || !valid_sha256(&evidence.rule_fingerprint)
+        || json_hash(&evidence.plan) != call.argument_hash
+    {
+        return Err(AiError::Conflict);
+    }
+    Ok((evidence.plan.clone(), Some(evidence)))
+}
+
+/// Re-proves that current hierarchical rules still admit one brokered
+/// mutation: the rules resolved now for this exact lease and scope must be
+/// the ones that admitted it, and must admit its own fingerprint at its
+/// reviewed classification.
+///
+/// # Errors
+///
+/// Returns [`AiError::ReauthorizationFailed`] when the rules changed or no
+/// longer admit the mutation, and propagates a resolver failure.
+pub(crate) async fn brokered_rules_admit(
+    rules: &dyn crate::AiAgentRuleResolver,
+    lease: &AiRunLease,
+    scope: &AiScope,
+    rule_fingerprint: &str,
+    tool_fingerprint: &str,
+    binding: (ToolMaturity, AiApprovalRule),
+) -> Result<(), AiError> {
+    let current = rules.resolve_rules(lease, scope).await?;
+    if current.rules().target_scope() != scope
+        || current.rules().fingerprint() != rule_fingerprint
+        || current
+            .rules()
+            .constrain_tool(tool_fingerprint, binding.0, binding.1)
+            != Some(binding.1)
+    {
+        return Err(AiError::ReauthorizationFailed);
+    }
+    Ok(())
+}
+
+/// The rule fence of one brokered automatic mutation: the resolver and
+/// scope its admission is re-proved against at the pre-effect boundary.
+#[derive(Clone)]
+pub(crate) struct BrokeredRuleFence {
+    pub(crate) rules: Arc<dyn crate::AiAgentRuleResolver>,
+    pub(crate) scope: AiScope,
 }
 
 /// Validates that one broker call names the exact frozen definition this
@@ -219,15 +381,23 @@ impl OrmAiApplicationToolCallService {
         if capability.fingerprint() != execution.capability_fingerprint() {
             return Err(AiError::Forbidden);
         }
+        // The session's rules admitted the mutation; the caller re-proves
+        // them against freshly resolved rules.
+        let rule_fingerprint = session
+            .mutation_rule_fingerprint()
+            .ok_or(AiError::Forbidden)?
+            .to_owned();
         let tool_id = execution.capability_id().clone();
         let tool_fingerprint = execution.capability_fingerprint().to_owned();
         Ok(Some(ResolvedApplicationCall {
             provider_call_id: call.call_id().to_owned(),
             provider_tool_id: call.tool_id().clone(),
             provider_tool_fingerprint: call.tool_fingerprint().to_owned(),
+            provider_argument_hash: json_hash(call.arguments()),
             tool_id,
             tool_fingerprint,
             arguments: execution.into_plan(),
+            rule_fingerprint: Some(rule_fingerprint),
         }))
     }
 }
@@ -236,9 +406,9 @@ impl OrmAiApplicationToolCallService {
 /// by provider call ID and provider-facing identity.
 ///
 /// A direct row's arguments are the provider's own, so their hash must
-/// match. A broker-routed row stores the resolved closed plan instead; the
-/// caller proves its protected arguments against the row's own hash with
-/// [`resolved_arguments_match`].
+/// match. A broker-routed row stores the resolved plan and its protected
+/// evidence instead; the caller proves the provider's original arguments
+/// against that evidence with [`protected_arguments_match`].
 pub(crate) fn row_records_call(
     call: &AiToolCallRecord,
     requested: &AiProviderToolCall,
@@ -264,21 +434,28 @@ pub(crate) fn row_records_parts(
         && call.provider_call_id == call_id
         && call.provider_facing_tool_id() == tool_id
         && call.provider_facing_tool_fingerprint() == tool_fingerprint
-        && (call.provider_tool_id.is_some()
-            || call.argument_hash == canonical_json_hash(arguments)?))
+        && (call.provider_tool_id.is_some() || call.argument_hash == json_hash(arguments)))
 }
 
-/// Whether a row's opened protected arguments are the ones it must hold:
-/// the provider's own for a direct row, or, for a broker-routed row, the
-/// stored resolved plan whose canonical hash is the row's argument hash.
-pub(crate) fn resolved_arguments_match(
+/// Whether a row's opened protected arguments are exactly the evidence of
+/// the provider's requested call: the provider's own arguments for a direct
+/// row, or, for a broker-routed row, an envelope that agrees with the row
+/// ([`open_call_arguments`]) and retains the requested broker fingerprint
+/// and the hash of the provider's original arguments.
+pub(crate) fn protected_arguments_match(
     call: &AiToolCallRecord,
+    provider_tool_fingerprint: &str,
     provider_arguments: &serde_json::Value,
     retained: &serde_json::Value,
 ) -> Result<bool, AiError> {
-    if call.provider_tool_id.is_some() {
-        Ok(canonical_json_hash(retained)? == call.argument_hash)
-    } else {
-        Ok(retained == provider_arguments)
-    }
+    let Ok((arguments, evidence)) = open_call_arguments(call, retained.clone()) else {
+        return Ok(false);
+    };
+    Ok(match evidence {
+        Some(evidence) => {
+            evidence.provider_tool_fingerprint == provider_tool_fingerprint
+                && evidence.provider_argument_hash == json_hash(provider_arguments)
+        }
+        None => &arguments == provider_arguments,
+    })
 }

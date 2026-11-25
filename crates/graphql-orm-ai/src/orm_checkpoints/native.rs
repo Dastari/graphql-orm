@@ -145,8 +145,9 @@ impl OrmAiCoordinatorCheckpointService {
                     .await?;
                 let matches = match expected {
                     Some(expected) => retained == *expected,
-                    None => crate::orm_tools::resolved_arguments_match(
+                    None => crate::orm_tools::protected_arguments_match(
                         &call,
+                        requested.tool_fingerprint(),
                         requested.arguments(),
                         &retained,
                     )?,
@@ -631,8 +632,12 @@ impl OrmAiCoordinatorCheckpointService {
                     call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
                 )
                 .await?;
-            if !crate::orm_tools::resolved_arguments_match(&call, &requested.arguments, &arguments)?
-            {
+            if !crate::orm_tools::protected_arguments_match(
+                &call,
+                &requested.tool_fingerprint,
+                &requested.arguments,
+                &arguments,
+            )? {
                 return Err(AiError::Conflict);
             }
             let manifest = &outcome.egress_manifest;

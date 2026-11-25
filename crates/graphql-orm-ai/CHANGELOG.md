@@ -27,9 +27,18 @@ supersedes: []
   Tool-call rows keep both identities: AI schema module 0.86.0 adds nullable
   `provider_tool_id` and `provider_tool_fingerprint`. Tool results and
   provider continuation use the provider-facing identity; preparation,
-  approval binding, rules and execution use the resolved one. The discover,
+  approval binding, rules and execution use the resolved one. A brokered
+  row's protected arguments are an evidence envelope that binds its broker
+  origin, the exact offered broker fingerprint, the provider's original
+  argument hash and the admitting rule fingerprint, so it cannot be
+  downgraded to a direct row. Current rules are re-proved after broker
+  resolution and immediately before dispatch; approved execution of a
+  brokered mutation needs `OrmAiConsequentialToolCallService::with_rule_resolver`
+  and re-proves them before consumption and before dispatch. The rule
+  binding is per turn: a delivery clone never inherits it. The discover,
   browse and execute broker definitions change, in the same release as
-  broker version 3. New API: `AiToolCatalog::mutation_capability_signature`.
+  broker version 3. New API: `AiToolCatalog::mutation_capability_signature`,
+  `OrmAiConsequentialToolCallService::with_rule_resolver`.
   Subscriptions stay outside the broker.
   [Migration](MIGRATION.md#generated-mutations-through-the-capability-broker-551)
 - **Fixed.** An approved generated mutation now executes. The approval

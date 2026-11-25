@@ -1039,7 +1039,11 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         )
         .unwrap(),
     );
-    let consequential = Arc::new(consequential.with_provider_session_service(sessions.clone()));
+    let consequential = Arc::new(
+        consequential
+            .with_provider_session_service(sessions.clone())
+            .with_rule_resolver(Arc::new(NativeTestRuleResolver)),
+    );
     // This fixture can prepend a rejected read to the four mixed callbacks.
     // Keep application admission aligned with its eight-call coordinator limit.
     let applications = Arc::new(OrmAiApplicationToolCallService::new(
