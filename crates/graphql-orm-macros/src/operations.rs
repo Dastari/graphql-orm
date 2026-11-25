@@ -284,7 +284,8 @@ const TRAVERSAL_READ_CATEGORIES: &[&str] = &[
 /// `single_read` for to-one traversal. When that category is not declared but
 /// another read category is, every declared read category's requirement
 /// applies. Scope templates bind root arguments that a traversal does not
-/// have, so they refuse it. `GraphQLEntity` and
+/// have, so they refuse it. After scopes, traversal checks assurance on
+/// every generated query root of the target. `GraphQLEntity` and
 /// `RepositoryEntity` emit this so every relation target carries it. A
 /// malformed declaration, which `GraphQLOperations` reports, refuses every
 /// traversal rather than adding a second diagnostic here.
@@ -321,6 +322,24 @@ pub(crate) fn relation_traversal_authorization_tokens(
         };
         let list_scope = scope("list");
         let single_scope = scope("single_read");
+        let assurance = (!crate::entity::has_repository_entity_attribute(&input.attrs)).then(|| {
+            quote! {
+                // GraphQLOperations provides the names of its enabled query
+                // roots. A target without that derive has no generated roots.
+                #[allow(dead_code)]
+                trait QueryRootsFallback {
+                    const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] = &[];
+                }
+                impl<T> QueryRootsFallback for T {}
+                for &field_name in Self::__GOM_QUERY_ROOT_FIELDS {
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        field_name,
+                    )?;
+                }
+            }
+        });
         Ok(quote! {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
             if multiple {
@@ -328,6 +347,7 @@ pub(crate) fn relation_traversal_authorization_tokens(
             } else {
                 #single_scope
             }
+            #assurance
             ::std::result::Result::Ok(())
         })
     })()

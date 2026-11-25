@@ -33,6 +33,13 @@ for historical context.
   query for every type and collation.
   [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
 
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
 ## Unreleased - operation catalogue 0.15.0
 
 - **Fixed (#544).** Authorization-metadata fix. The resolver catalogue

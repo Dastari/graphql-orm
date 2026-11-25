@@ -538,6 +538,22 @@ mod ledgers {
             emit_fk = false
         )]
         pub vaults: Vec<RefVault>,
+        /// To-one relation to a root-guarded target, with its own field policy.
+        #[graphql(skip)]
+        #[graphql_orm(read_policy = "guarded.ledger.read")]
+        #[relation(target = "RefLedger", from = "ledger_id", to = "id", emit_fk = false)]
+        pub guarded_ledger: Option<RefLedger>,
+        /// To-many relation to a root-guarded target, with its own field policy.
+        #[graphql(skip)]
+        #[graphql_orm(read_policy = "guarded.ledgers.read")]
+        #[relation(
+            target = "RefLedger",
+            from = "id",
+            to = "owner_id",
+            multiple,
+            emit_fk = false
+        )]
+        pub guarded_ledgers: Vec<RefLedger>,
     }
 
     #[derive(
@@ -693,11 +709,21 @@ fn resolver_catalogue_references_match_the_enforced_traversal_requirements() {
         // traversal requires more than any one root.
         ("archives", GraphqlResolverAuthorization::SubgraphOnly),
         ("badge", GraphqlResolverAuthorization::SubgraphOnly),
+        // The same targets are `same_as_root` above, but a declared field
+        // policy on the relation is enforced by the subgraph and is stricter
+        // than any root's requirement.
+        ("guardedLedger", GraphqlResolverAuthorization::SubgraphOnly),
+        ("guardedLedgers", GraphqlResolverAuthorization::SubgraphOnly),
     ] {
         let relation = resolvers
             .relation("RefOwner", field)
             .unwrap_or_else(|| panic!("RefOwner.{field} is not catalogued"));
         assert_eq!(relation.authorization, expected, "RefOwner.{field}");
+        assert_eq!(
+            relation.has_field_policy,
+            field.starts_with("guarded"),
+            "RefOwner.{field}"
+        );
     }
     let exported = resolvers.export_json().unwrap();
     for scope in ["ledgers.list", "ledgers.read", "archives.", "badges.list"] {

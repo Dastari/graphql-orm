@@ -156,8 +156,8 @@ declared, its search policy key; both are checked through the field policy provi
 the search key as `policy_key`. A `search_relation` source needs the relation field's read policy,
 its declared search policy, read access to the target entity and the read policy of every copied
 target field. On the GraphQL search root it also needs the target's relation traversal requirement
-(its `auth` mode and operation scopes, as for the relation field itself). The search document combines all sources, so denying any one refuses the whole search
-with `FORBIDDEN`; it is never answered from the remaining sources. The pool-bound
+(its `auth` mode, operation scopes, and assurance). The search document combines
+all sources, so a denial refuses the whole search with its public error code. The pool-bound
 `Entity::search(pool, …)` builder has no request and no policy provider: it is a trusted, unchecked
 host API that applies none of these checks. See
 [Field authority for read arguments](#field-authority-for-read-arguments).
@@ -466,12 +466,20 @@ category's requirement together. For example, a target that declares only
 `single_read` and `keyset_list` scopes needs both of those for a to-many
 traversal, even though it has no `list` category. Declare the mapped category
 explicitly to require exactly its scopes. A target that declares no read
-category applies only its `auth` mode.
+category requires no operation scopes.
 A category declared with scope templates (`all_scope_templates` or
 `any_scope_templates`) refuses traversal with `FORBIDDEN`, because a
 traversal has no root arguments to bind. `GraphQLEntity` and
 `RepositoryEntity` emit this requirement for every entity, so an entity without
 generated operations still applies its `auth` mode to traversal.
+
+After auth and scopes, generated traversal enforces every required assurance
+policy registered on the target's generated list, get-by-id, keyset, scan,
+search, and aggregate query coordinates. Registering any one of these is
+enough to protect every generated relation path into that target. A refusal
+returns the evaluator's public error, such as `STEP_UP_REQUIRED`, before
+reading target rows, checking existence, or counting rows. See
+[operation assurance](../../architecture/operation-assurance.md#generated-relation-traversal).
 
 ## Denied and absent relation targets
 
