@@ -1187,9 +1187,9 @@ macro_rules! sqlx_backup_runtime {
                         .try_get::<Option<Vec<u8>>, _>(column)
                         .map(|value| value.map(BackupValue::Bytes).unwrap_or(BackupValue::Null)),
                     // A `TIMESTAMPTZ` is an instant; reading it typed is independent of the session
-                    // `TimeZone`. `check_portable_date_times` has already refused values chrono cannot hold.
+                    // `TimeZone`. `check_portable_date_times` has already refused values outside the portable range.
                     BackupValueKind::DateTime => row
-                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column)
+                        .try_get::<Option<time::OffsetDateTime>, _>(column)
                         .map(|value| {
                             value
                                 .map(|value| {

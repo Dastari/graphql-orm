@@ -239,13 +239,23 @@ impl SqlValue {
     pub fn temporal_text(text: String) -> Self {
         let value = text.trim();
         let naive = value.strip_suffix(" UTC").unwrap_or(value);
-        let kind = if let Ok(date) = value.parse::<chrono::NaiveDate>() {
+        use crate::temporal;
+
+        let date = temporal::parse_date(value)
+            .and_then(temporal::to_chrono_date)
+            .or_else(|| value.parse().ok());
+        let kind = if let Some(date) = date {
             TemporalKind::Date(date)
-        } else if let Ok(date_time) = value.parse::<chrono::DateTime<chrono::FixedOffset>>() {
+        } else if let Some(date_time) = temporal::parse_relaxed_timestamp(value)
+            .ok()
+            .and_then(temporal::Timestamp::to_chrono)
+        {
             TemporalKind::DateTimeOffset(date_time)
-        } else if let Ok(date_time) = naive
-            .parse::<chrono::NaiveDateTime>()
-            .or_else(|_| chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%d %H:%M:%S%.f"))
+        } else if let Some(date_time) = temporal::parse_naive(naive, b'T')
+            .or_else(|| temporal::parse_naive(naive, b' '))
+            .and_then(|value| temporal::to_chrono_naive(value, false))
+            .or_else(|| naive.parse().ok())
+            .or_else(|| chrono::NaiveDateTime::parse_from_str(naive, "%Y-%m-%d %H:%M:%S%.f").ok())
         {
             TemporalKind::DateTime(date_time)
         } else {

@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.229.0
+
+- **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time
+  normalization, calendar arithmetic, and database codecs. **No action.**
+  [Migration](MIGRATION.md#02160-to-02290-internal-date-time-engine)
+
 ## Unreleased - ORM/macros 0.216.0
 
 - **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use

@@ -110,8 +110,7 @@ pub(super) fn postgres_typed_defaults_equal(
         Class::Bytea => hex_bytea(&live)? == hex_bytea(&target)?,
         Class::Timestamptz => {
             let (live, target) = (timestamptz(&live)?, timestamptz(&target)?);
-            (live.timestamp(), live.timestamp_subsec_nanos())
-                == (target.timestamp(), target.timestamp_subsec_nanos())
+            live.ordering_key() == target.ordering_key()
         }
     })
 }
@@ -133,14 +132,22 @@ fn hex_bytea(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Parse an RFC 3339 instant or PostgreSQL ISO `DateStyle` timestamptz output.
-fn timestamptz(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(text) {
+fn timestamptz(text: &str) -> Option<crate::temporal::Timestamp> {
+    use crate::temporal;
+
+    if let Ok(value) = temporal::parse_rfc3339(text) {
         return Some(value);
     }
     // `YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM[:SS]]`; BC years and other styles fail.
     let split = text.get(19..)?.find(['+', '-'])? + 19;
-    let naive =
-        chrono::NaiveDateTime::parse_from_str(text.get(..split)?, "%Y-%m-%d %H:%M:%S%.f").ok()?;
+    let local = text.get(..split)?;
+    let (naive, leap) = temporal::parse_naive(local, b' ')
+        .map(|value| (value, false))
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f")
+                .ok()
+                .map(temporal::from_chrono_naive)
+        })?;
     let offset = text.get(split..)?;
     let sign = if offset.starts_with('-') { -1 } else { 1 };
     let parts = offset[1..].split(':').collect::<Vec<_>>();
@@ -158,8 +165,12 @@ fn timestamptz(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
         .map(|(part, scale)| part.parse::<i32>().map(|value| value * scale))
         .sum::<Result<i32, _>>()
         .ok()?;
-    let offset = chrono::FixedOffset::east_opt(sign * seconds)?;
-    naive.and_local_timezone(offset).single()
+    if seconds >= 24 * 3600 {
+        return None;
+    }
+    let offset = time::UtcOffset::from_whole_seconds(sign * seconds).ok()?;
+    let value = temporal::Timestamp::from_naive(naive, leap, offset);
+    temporal::is_chrono_date(value.value.to_offset(time::UtcOffset::UTC).date()).then_some(value)
 }
 
 /// Rewrites deparsed default text to the spelling it has with

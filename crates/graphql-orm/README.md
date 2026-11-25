@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.229.0 uses `time` 0.3 internally for date-time handling. Existing
+chrono fields and stored date-time formats carry forward without migration.
+See the [migration guide](../../MIGRATION.md#02160-to-02290-internal-date-time-engine).
+
 Version 0.216.0 lets PostgreSQL choose the join for native search on
 generated `#[graphql_rls]` entities with a column-based default sort. Both
 RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).

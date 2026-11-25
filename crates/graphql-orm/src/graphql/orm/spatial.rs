@@ -569,13 +569,15 @@ pub fn date_filter_truth_at(
     }
 
     if date_filter_has_calendar_predicate(filter) {
-        let Some(value) = parse_calendar_value(value) else {
+        use crate::temporal;
+
+        let Some(value) = temporal::parse_calendar(value) else {
             return Some(false);
         };
-        let Some(today_start) = today.and_hms_opt(0, 0, 0) else {
-            return Some(false);
-        };
-        let Some(tomorrow_start) = today_start.checked_add_days(chrono::Days::new(1)) else {
+        let value = value.ordering_key();
+        let today = temporal::from_chrono_date(today);
+        let today_start = midnight_key(today);
+        let Some(tomorrow_start) = calendar_day(today, 1) else {
             return Some(false);
         };
 
@@ -589,8 +591,7 @@ pub fn date_filter_truth_at(
             return Some(false);
         }
         if let Some(days) = filter.recent_days {
-            let Some(lower) = today_start.checked_sub_days(chrono::Days::new((days - 1) as u64))
-            else {
+            let Some(lower) = calendar_day(today, 1 - days) else {
                 return Some(false);
             };
             if value < lower || value >= tomorrow_start {
@@ -598,7 +599,7 @@ pub fn date_filter_truth_at(
             }
         }
         if let Some(days) = filter.within_days {
-            let Some(upper) = today_start.checked_add_days(chrono::Days::new(days as u64)) else {
+            let Some(upper) = calendar_day(today, days) else {
                 return Some(false);
             };
             if value < today_start || value >= upper {
@@ -606,7 +607,7 @@ pub fn date_filter_truth_at(
             }
         }
         if let Some(relative) = &filter.gte_relative {
-            let Some(lower) = checked_relative_date(today_start, relative.days) else {
+            let Some(lower) = calendar_day(today, relative.days) else {
                 return Some(false);
             };
             if value < lower {
@@ -614,8 +615,7 @@ pub fn date_filter_truth_at(
             }
         }
         if let Some(relative) = &filter.lte_relative {
-            let Some(upper) = checked_relative_date(today_start, relative.days.saturating_add(1))
-            else {
+            let Some(upper) = calendar_day(today, relative.days.saturating_add(1)) else {
                 return Some(false);
             };
             if value >= upper {
@@ -648,31 +648,15 @@ fn date_filter_has_calendar_predicate(filter: &crate::graphql::filters::DateFilt
         || filter.lte_relative.is_some()
 }
 
-fn parse_calendar_value(value: &str) -> Option<chrono::NaiveDateTime> {
-    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Some(value.naive_utc());
-    }
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(value) = chrono::NaiveDateTime::parse_from_str(value, format) {
-            return Some(value);
-        }
-    }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .ok()
-        .and_then(|value| value.and_hms_opt(0, 0, 0))
+fn midnight_key(date: time::Date) -> (i64, u32) {
+    (date.midnight().assume_utc().unix_timestamp(), 0)
 }
 
-fn checked_relative_date(
-    today_start: chrono::NaiveDateTime,
-    days: i32,
-) -> Option<chrono::NaiveDateTime> {
-    if days < 0 {
-        today_start.checked_sub_days(chrono::Days::new(i64::from(days).unsigned_abs()))
-    } else {
-        today_start.checked_add_days(chrono::Days::new(days as u64))
-    }
+fn calendar_day(date: time::Date, days: i32) -> Option<(i64, u32)> {
+    let date = date.checked_add(time::Duration::days(i64::from(days)))?;
+    crate::temporal::is_chrono_date(date).then(|| midnight_key(date))
 }
 
 fn sqlite_calendar_today() -> chrono::NaiveDate {
-    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive()
+    crate::temporal::calendar_today()
 }

@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.216.0"
+version = "0.229.0"
 dependencies = [
  "async-graphql",
  "base64 0.22.1",
@@ -2526,6 +2526,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tiberius",
+ "time",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2536,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.216.0"
+version = "0.229.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",
@@ -7397,7 +7398,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7521,6 +7522,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -7607,6 +7609,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -7647,6 +7650,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -7673,6 +7677,7 @@ dependencies = [
  "serde_urlencoded",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "url",
  "uuid",
@@ -8020,6 +8025,7 @@ dependencies = [
  "pretty-hex",
  "rust_decimal",
  "thiserror 1.0.69",
+ "time",
  "tokio",
  "tokio-util",
  "tracing",
@@ -8028,9 +8034,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.55"
+version = "0.3.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
+checksum = "18dfaaeddcb932337b5e7866ee7d0ce9b76d2fd092997146f187ec09b4558a50"
 dependencies = [
  "deranged",
  "num-conv",
@@ -8048,9 +8054,9 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "time-macros"
-version = "0.2.32"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+checksum = "c431b87111666e491a90baa837f914fb45cd5dc3c268591b0220ff5057f2085f"
 dependencies = [
  "num-conv",
  "time-core",

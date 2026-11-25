@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.216.0"
+version = "0.229.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2608,6 +2608,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tiberius",
+ "time",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2669,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.216.0"
+version = "0.229.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",
@@ -7767,6 +7768,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -7853,6 +7855,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -7893,6 +7896,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -7919,6 +7923,7 @@ dependencies = [
  "serde_urlencoded",
  "sqlx-core",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "url",
  "uuid",
@@ -8259,6 +8264,7 @@ dependencies = [
  "pretty-hex",
  "rust_decimal",
  "thiserror 1.0.69",
+ "time",
  "tokio",
  "tokio-util",
  "tracing",

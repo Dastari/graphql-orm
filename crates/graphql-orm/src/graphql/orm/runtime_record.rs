@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
 
-use chrono::{SecondsFormat, Timelike, Utc};
+use crate::temporal;
 
 use super::{
     CollectionId, DecimalValue, FieldId, NoDefaultBackend, OrmBackend, RelationCardinality,
@@ -286,10 +286,10 @@ impl RuntimeDateTime {
     /// So is the leap second `9999-12-31T23:59:60Z`, which PostgreSQL stores
     /// as year 10000.
     pub fn parse(value: &str) -> Result<Self, RuntimeRecordError> {
-        let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
+        let parsed = temporal::parse_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        Self::from_utc(parsed.with_timezone(&Utc)).portable()
+        Self(parsed.canonical_utc()).portable()
     }
 
     /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
@@ -302,29 +302,29 @@ impl RuntimeDateTime {
     /// one with nonzero nanoseconds below microsecond precision, or one whose
     /// UTC year is outside 0001 to 9999.
     pub fn parse_exact(value: &str) -> Result<Self, RuntimeRecordError> {
-        let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
+        let parsed = temporal::parse_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        if parsed.nanosecond() % 1_000 != 0 {
+        if !parsed.value.nanosecond().is_multiple_of(1_000) {
             return Err(RuntimeRecordError::new(
                 RuntimeRecordErrorCode::InvalidValue,
             ));
         }
-        Self::from_utc(parsed.with_timezone(&Utc)).portable()
+        Self(parsed.canonical_utc()).portable()
     }
 
     /// Decode a value a backend already holds, or its serialized form, without
     /// the range check, so a row written before the check existed can still be
     /// read, returned and used as a cursor or comparison value. Strict
     /// RFC 3339 cannot spell the signed extended years those rows may hold,
-    /// such as `+10000-01-01T00:00:00.000000Z`, so retry them with chrono's
-    /// general parser. The result is never new stored data: runtime mutations
-    /// refuse to write a value that is not [`is_portable`](Self::is_portable).
+    /// such as `+10000-01-01T00:00:00.000000Z`, so allow the legacy
+    /// spelling when reading those values. Runtime mutations refuse to write
+    /// a value that is not [`is_portable`](Self::is_portable).
     pub(crate) fn parse_stored(value: &str) -> Result<Self, RuntimeRecordError> {
-        let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        let parsed = temporal::parse_rfc3339(value)
             .or_else(|error| {
                 if value.starts_with(['+', '-']) {
-                    value.parse::<chrono::DateTime<chrono::FixedOffset>>()
+                    temporal::parse_relaxed_timestamp(value)
                 } else {
                     Err(error)
                 }
@@ -332,7 +332,7 @@ impl RuntimeDateTime {
             .map_err(|error| {
                 RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
             })?;
-        Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+        Ok(Self(parsed.canonical_utc()))
     }
 
     /// Whether this value can be stored and read back on every backend: its
@@ -343,7 +343,7 @@ impl RuntimeDateTime {
     /// write it.
     pub fn is_portable(&self) -> bool {
         // The canonical form has exactly 27 bytes for a four-digit year.
-        // Chrono can also produce year zero and signed extended years: SQLite
+        // Stored data can also contain year zero and signed extended years: SQLite
         // would store their text but strict RFC 3339 cannot read it back, and
         // PostgreSQL refuses both. PostgreSQL also stores the final leap
         // second of 9999 as year 10000.
@@ -363,15 +363,19 @@ impl RuntimeDateTime {
     }
 
     /// Canonicalize a UTC date-time to portable microsecond precision.
-    pub(crate) fn from_utc(value: chrono::DateTime<Utc>) -> Self {
-        let rounded = value
-            .checked_add_signed(chrono::Duration::nanoseconds(500))
-            .unwrap_or(value);
-        let microsecond_nanos = (rounded.nanosecond() / 1_000) * 1_000;
-        let value = rounded
-            .with_nanosecond(microsecond_nanos)
-            .unwrap_or(rounded);
-        Self(value.to_rfc3339_opts(SecondsFormat::Micros, true))
+    #[cfg(any(
+        feature = "sqlite",
+        feature = "postgres",
+        all(test, feature = "runtime-graphql")
+    ))]
+    pub(crate) fn from_utc(value: time::OffsetDateTime) -> Self {
+        Self(
+            temporal::Timestamp {
+                value,
+                leap_second: false,
+            }
+            .canonical_utc(),
+        )
     }
 
     /// Return the canonical UTC RFC 3339 representation.
@@ -1453,7 +1457,7 @@ where
 fn postgres_get_timestamptz(
     row: &sqlx::postgres::PgRow,
     field: &RuntimeFieldHandle,
-) -> Result<Option<chrono::DateTime<Utc>>, RuntimeRecordError> {
+) -> Result<Option<temporal::Timestamp>, RuntimeRecordError> {
     use sqlx::{Row, ValueRef};
     let value = row
         .try_get_raw(field.physical_column.as_str())
@@ -1464,10 +1468,11 @@ fn postgres_get_timestamptz(
     // sqlx reports a mismatched column type before it decodes anything, and
     // parses text results with range checks; only binary values reach the
     // unchecked addition.
-    if !<chrono::DateTime<Utc> as sqlx::Type<sqlx::Postgres>>::compatible(&value.type_info())
+    if !<time::OffsetDateTime as sqlx::Type<sqlx::Postgres>>::compatible(&value.type_info())
         || value.format() != sqlx::postgres::PgValueFormat::Binary
     {
-        return postgres_get_optional::<chrono::DateTime<Utc>>(row, field);
+        return postgres_get_optional::<chrono::DateTime<chrono::Utc>>(row, field)
+            .map(|value| value.map(|utc| temporal::Timestamp::from_chrono(utc.fixed_offset())));
     }
     let invalid = || RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).for_field(field);
     let bytes: [u8; 8] = value
@@ -1475,19 +1480,22 @@ fn postgres_get_timestamptz(
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(invalid)?;
-    let micros = i64::from_be_bytes(bytes);
-    // `infinity` and `-infinity` are the extreme values.
-    if micros == i64::MAX || micros == i64::MIN {
-        return Err(invalid());
-    }
-    let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .ok_or_else(invalid)?
-        .and_utc();
-    epoch
-        .checked_add_signed(chrono::TimeDelta::microseconds(micros))
+    decode_postgres_timestamp(i64::from_be_bytes(bytes))
         .map(Some)
         .ok_or_else(invalid)
+}
+
+#[cfg(feature = "postgres")]
+fn decode_postgres_timestamp(micros: i64) -> Option<temporal::Timestamp> {
+    if matches!(micros, i64::MAX | i64::MIN) {
+        return None; // PostgreSQL's infinities
+    }
+    let value = time::macros::datetime!(2000-01-01 0:00 UTC)
+        .checked_add(time::Duration::microseconds(micros))?;
+    temporal::is_chrono_date(value.date()).then_some(temporal::Timestamp {
+        value,
+        leap_second: false,
+    })
 }
 
 #[cfg(feature = "postgres")]
@@ -1526,7 +1534,7 @@ impl RuntimeRowDecoder for super::PostgresBackend {
                 .map(RuntimeValue::Bytes)
                 .unwrap_or(RuntimeValue::Null)),
             RuntimeValueKind::DateTime => Ok(postgres_get_timestamptz(row, field)?
-                .map(RuntimeDateTime::from_utc)
+                .map(|value| RuntimeDateTime(value.canonical_utc()))
                 .map(RuntimeValue::DateTime)
                 .unwrap_or(RuntimeValue::Null)),
             RuntimeValueKind::Decimal(definition) => {
@@ -1535,6 +1543,54 @@ impl RuntimeRowDecoder for super::PostgresBackend {
                     None => Ok(RuntimeValue::Null),
                 }
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_temporal_tests {
+    use super::decode_postgres_timestamp;
+    use chrono::{DateTime, TimeDelta, Utc};
+    use proptest::prelude::*;
+
+    fn chrono_decode(micros: i64) -> Option<DateTime<Utc>> {
+        if matches!(micros, i64::MAX | i64::MIN) {
+            return None;
+        }
+        DateTime::from_timestamp(946_684_800, 0)?
+            .checked_add_signed(TimeDelta::microseconds(micros))
+    }
+
+    fn assert_postgres_decode(micros: i64) {
+        assert_eq!(
+            decode_postgres_timestamp(micros).map(|t| t.canonical_utc()),
+            chrono_decode(micros).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
+            "{micros}"
+        );
+    }
+
+    #[test]
+    fn postgres_binary_temporal_boundaries_match_chrono() {
+        for micros in [
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX - 1,
+            i64::MAX,
+            -946_684_800_000_000,
+            -1,
+            0,
+            1,
+            DateTime::<Utc>::MIN_UTC.timestamp_micros() - 946_684_800_000_000,
+            DateTime::<Utc>::MAX_UTC.timestamp_micros() - 946_684_800_000_000,
+        ] {
+            assert_postgres_decode(micros);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn postgres_binary_temporal_range_matches_chrono(micros: i64) {
+            assert_postgres_decode(micros);
         }
     }
 }
