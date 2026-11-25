@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **Action needed** — ORM/macros 0.221.0 (#905). Review statically unreadable fields used in generated relation search documents. [Migration](../../MIGRATION.md#5-review-private-fields-in-generated-search-documents-905)
+- **Action needed** — ORM 0.221.0 (#880). Use index constructors and review SQL Server covering index mismatches before applying migrations. [Migration](../../MIGRATION.md#6-review-sql-server-covering-indexes-in-schema-plans-880)
 - **Action needed** — next breaking ORM/macros release (#833). Add a wildcard to `TransactionMode` matches and handle fallible transaction database access. [Migration](../../MIGRATION.md#1-match-transaction-modes-with-a-wildcard-833)
 - **Action needed** — next breaking ORM/macros release (#521). Review generated SQL Server keyset orders on pools that opt into native temporal text binding. [Migration](../../MIGRATION.md#2-review-sql-server-keyset-orders-on-opted-in-pools-521)
 - **Action needed** — next breaking ORM/macros release (#793). Check existing dotted columns and delimit each literal name explicitly. [Migration](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793)

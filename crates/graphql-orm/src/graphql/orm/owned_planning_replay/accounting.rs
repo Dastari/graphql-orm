@@ -233,7 +233,7 @@ pub(super) fn target(s: &OwnedSchemaModel, sz: Size, l: &mut Ledger, cap: usize)
         let members = table
             .indexes
             .iter()
-            .map(|i| i.columns.len() as u64)
+            .map(|i| (i.columns.len() + i.included_columns.len()) as u64)
             .sum::<u64>();
         c = c
             .add(op(cols, key)?.times(members)?)?

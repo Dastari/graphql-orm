@@ -16,6 +16,13 @@ for historical context.
 
 ## Unreleased - next breaking ORM/macros release
 
+- **Breaking (#905):** Generated relation search documents reject statically
+  unreadable target fields unless the target field opts in with
+  `#[graphql_orm(allow_search_document)]`.
+- **Breaking (#880):** SQL Server index introspection retains `INCLUDE`
+  columns for drift checks and migration plans. `IndexDef` and `IndexModel`
+  are non-exhaustive and expose the included columns separately.
+
 - **Breaking (#833):** `TransactionMode` is non-exhaustive. Its new
   `ReadSnapshot` variant runs the same policy-aware, read-only transaction
   as the dedicated snapshot methods. The general callback supports generated

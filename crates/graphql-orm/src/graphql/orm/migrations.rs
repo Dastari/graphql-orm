@@ -1811,8 +1811,9 @@ pub(super) fn validate_migration_step_capabilities<'a>(
             return Err(sqlx::Error::Protocol(overlong.to_string()));
         }
     }
-    if backend == DatabaseBackend::Mssql {
-        for step in &steps {
+    for step in &steps {
+        validate_index_include_backend(backend, step)?;
+        if backend == DatabaseBackend::Mssql {
             validate_mssql_step(step)?;
         }
     }
@@ -2879,6 +2880,33 @@ fn refused_mssql_step_sql(error: sqlx::Error) -> &'static str {
     }
 }
 
+fn created_indexes<'a, 'b>(step: &'a StepRef<'b>) -> &'a [IndexRef<'b>] {
+    match step {
+        StepRef::CreateTable(table) => &table.indexes,
+        StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
+        _ => &[],
+    }
+}
+
+// Infallible renderers return a failing statement before any of the plan's DDL.
+const UNSUPPORTED_INDEX_INCLUDE_SQL: &str = "GRAPHQL_ORM_ERROR: index INCLUDE requires SQL Server";
+
+fn validate_index_include_backend(
+    backend: DatabaseBackend,
+    step: &StepRef<'_>,
+) -> crate::Result<()> {
+    if backend != DatabaseBackend::Mssql
+        && created_indexes(step)
+            .iter()
+            .any(|index| !index.included_columns.is_empty())
+    {
+        return Err(sqlx::Error::Protocol(
+            "index INCLUDE requires SQL Server".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_mssql_step(step: &StepRef<'_>) -> crate::Result<()> {
     let append_only = match step {
         StepRef::CreateTable(table) if table.append_only => {
@@ -2901,12 +2929,7 @@ fn validate_mssql_step(step: &StepRef<'_>) -> crate::Result<()> {
             "SQL Server append-only triggers require a local table and no retention purge".into(),
         ));
     }
-    let indexes = match step {
-        StepRef::CreateTable(table) => table.indexes.as_slice(),
-        StepRef::CreateIndex { index, .. } => std::slice::from_ref(index),
-        _ => &[],
-    };
-    for index in indexes {
+    for index in created_indexes(step) {
         let Some(predicate) = &index.predicate else {
             continue;
         };
@@ -3042,6 +3065,19 @@ fn render_create_index_statement(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let include = if index.included_columns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " INCLUDE ({})",
+            index
+                .included_columns
+                .iter()
+                .map(|column| backend.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    };
     let predicate = index
         .predicate
         .as_ref()
@@ -3049,7 +3085,7 @@ fn render_create_index_statement(
             format!(" WHERE {}", render_index_predicate(backend, predicate))
         });
     format!(
-        "CREATE {}INDEX {} ON {}{} ({}){}",
+        "CREATE {}INDEX {} ON {}{} ({}){include}{}",
         unique,
         backend.quote_identifier(index.name),
         backend.render_table_identifier_path(table_name),
@@ -3991,16 +4027,23 @@ fn render_sqlite_table_rebuild_statements(
 /// Invalid SQL Server index predicates render a statement that raises
 /// an error. Use [`try_render_migration_step`] to receive the error in Rust.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
-    try_render_migration_step(backend, step)
-        .unwrap_or_else(|error| vec![refused_mssql_step_sql(error).to_owned()])
+    try_render_migration_step(backend, step).unwrap_or_else(|error| {
+        let refusal = if backend == DatabaseBackend::Mssql {
+            refused_mssql_step_sql(error)
+        } else {
+            UNSUPPORTED_INDEX_INCLUDE_SQL
+        };
+        vec![refusal.to_owned()]
+    })
 }
 
-/// Render one step and reject invalid SQL Server index predicates.
+/// Render one step and reject unsupported index definitions.
 pub fn try_render_migration_step(
     backend: DatabaseBackend,
     step: &MigrationStep,
 ) -> crate::Result<Vec<String>> {
     let step = StepRef::from(step);
+    validate_index_include_backend(backend, &step)?;
     if backend == DatabaseBackend::Mssql {
         validate_mssql_step(&step)?;
     }
@@ -4658,6 +4701,12 @@ pub(super) fn render_owned_plan_steps(
     target_for_backend: &SchemaRef<'_>,
     steps: &[OwnedMigrationStep],
 ) -> Vec<String> {
+    if steps
+        .iter()
+        .any(|step| validate_index_include_backend(backend, &StepRef::from(step)).is_err())
+    {
+        return vec![UNSUPPORTED_INDEX_INCLUDE_SQL.to_owned()];
+    }
     if backend == DatabaseBackend::Mssql
         && let Some(error) = steps
             .iter()
@@ -5049,6 +5098,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 name: index_name,
                 columns: column_names,
                 column_directions,
+                included_columns: Vec::new(),
                 is_unique: unique,
                 method: IndexMethod::Default,
                 is_spatial: false,
@@ -5643,6 +5693,7 @@ pub(super) async fn introspect_owned_postgres_connection_including(
                 name: index_name,
                 columns: column_names,
                 column_directions,
+                included_columns: Vec::new(),
                 is_unique: unique,
                 method,
                 is_spatial,
@@ -7059,8 +7110,8 @@ pub async fn introspect_mssql_schema(
 
 /// The ordinary and unique indexes of one table, excluding those that back
 /// its primary key and unique constraints (reported as key and unique
-/// columns). Only row-store key columns are read: included columns and
-/// spatial, XML and columnstore indexes are not part of the model.
+/// columns). Row-store indexes retain both key and included columns. Spatial,
+/// XML and columnstore indexes are outside this model.
 #[cfg(feature = "mssql")]
 async fn introspect_mssql_indexes(
     pool: &<super::MssqlBackend as OrmBackend>::Pool,
@@ -7070,14 +7121,16 @@ async fn introspect_mssql_indexes(
         pool,
         "SELECT i.name AS index_name, CAST(i.is_unique AS bigint) AS is_unique,
                 i.filter_definition AS filter_definition, c.name AS column_name,
-                CAST(ic.is_descending_key AS bigint) AS is_descending
+                CAST(ic.is_descending_key AS bigint) AS is_descending,
+                CAST(ic.is_included_column AS bigint) AS is_included
          FROM sys.indexes AS i
          JOIN sys.index_columns AS ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
          JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
          WHERE i.object_id = OBJECT_ID(@P1)
            AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
-           AND i.is_hypothetical = 0 AND i.type IN (1, 2) AND ic.key_ordinal > 0
-         ORDER BY i.name, ic.key_ordinal",
+           AND i.is_hypothetical = 0 AND i.type IN (1, 2)
+           AND (ic.key_ordinal > 0 OR ic.is_included_column = 1)
+         ORDER BY i.name, ic.key_ordinal, ic.index_column_id",
         &[SqlValue::String(table_path.to_string())],
     )
     .await?;
@@ -7089,7 +7142,6 @@ async fn introspect_mssql_indexes(
             .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "index_name")?);
         let column = DatabaseBackend::Mssql
             .raw_name_in_declared_form(&super::MssqlBackend::try_get_string(&row, "column_name")?);
-        let descending = row.try_get::<i64, _>("is_descending")? != 0;
         if indexes.last().is_none_or(|(index, _)| index.name != name) {
             let mut index = super::owned_schema::IndexModel::new(name, Vec::new());
             index.is_unique = row.try_get::<i64, _>("is_unique")? != 0;
@@ -7099,6 +7151,11 @@ async fn introspect_mssql_indexes(
             indexes.push((index, false));
         }
         let (index, any_descending) = indexes.last_mut().expect("pushed above");
+        if row.try_get::<i64, _>("is_included")? != 0 {
+            index.included_columns.push(column);
+            continue;
+        }
+        let descending = row.try_get::<i64, _>("is_descending")? != 0;
         index.columns.push(column);
         index.column_directions.push(if descending {
             super::core::IndexDirection::Desc

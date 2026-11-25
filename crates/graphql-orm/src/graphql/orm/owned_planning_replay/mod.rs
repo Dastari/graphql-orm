@@ -613,6 +613,7 @@ fn exact_index(a: &IndexModel, b: &IndexModel) -> bool {
     a.name == b.name
         && a.columns == b.columns
         && a.column_directions == b.column_directions
+        && a.included_columns == b.included_columns
         && a.is_unique == b.is_unique
         && a.method == b.method
         && a.is_spatial == b.is_spatial

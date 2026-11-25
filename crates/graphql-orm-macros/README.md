@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Generated relation search documents reject statically unreadable target
+fields unless the target field explicitly opts in.
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 In the next breaking ORM/macros release, `db_column` must designate one
 physical column. A literal dot requires one delimited identifier, such as
 `db_column = "\"event.code\""` on SQLite and PostgreSQL or

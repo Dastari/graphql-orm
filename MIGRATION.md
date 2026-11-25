@@ -70,6 +70,26 @@ dispatch. Use the protocol actor's `write_turn` with the shared process writer.
 See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased).
 No data migration is needed.
 
+### 5. Review private fields in generated search documents (#905)
+
+**Action needed.** Remove a statically unreadable target field from
+`search_relation(fields = [...])`, make the field GraphQL-readable, or mark
+the persisted target field `#[graphql_orm(allow_search_document)]`. Choose
+the opt-in only if callers who may search the source may also discover
+matches on the target field's text. Existing search policies still apply.
+If you remove a source, call the source entity's `rebuild_search_index` to
+remove its text from existing search documents.
+
+### 6. Review SQL Server covering indexes in schema plans (#880)
+
+**Action needed.** Migrate `IndexDef` and `IndexModel` struct literals to
+`IndexDef::new` and `IndexModel::new` (or `IndexModel::from(&index_def)`).
+Use `..` in destructuring patterns. SQL Server plans now distinguish an
+index with `INCLUDE` columns from a plain declaration. Expect new mismatch
+reports and, on managed tables, destructive replacement steps. To keep
+a covering index in the target, declare its included columns with
+`IndexDef::with_included_columns` or set `IndexModel::included_columns`.
+
 ## 0.218.0 to 0.219.0: Indirect query assurance
 
 **Action needed.** If you require assurance on a runtime collection query or

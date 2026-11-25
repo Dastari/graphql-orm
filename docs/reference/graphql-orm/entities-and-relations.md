@@ -167,9 +167,14 @@ is `None`). A matching hit reveals that the row's protected text contains the qu
 that grants a field only for particular rows must deny the record-less case. Allowing `None` there
 allows searching that field's text in every visible row.
 
-`search_relation(fields = [...])` names Rust fields of the target. Each name is checked at compile
-time against the target's persisted fields; an unknown or non-persisted name is a compile error
-that names the field and the target.
+`search_relation(fields = [...])` names persisted Rust fields of the target.
+The derive rejects unknown, non-persisted, or statically unreadable fields
+(`private`, `read = false`, or `input_only`). A host can explicitly mark a
+persisted target field `#[graphql_orm(allow_search_document)]` to allow its
+text in generated relation search documents. A permitted search can expose
+the existence of matches on that text. The annotation leaves the target's
+ordinary read exposure and search source policy checks as declared. A field
+with this annotation cannot serve as a `server_only_key`.
 
 Persisted JSON fields can contribute selected string paths to the same search document with
 `search_json(...)`. Extraction happens in Rust from the entity value, so Postgres and SQLite keep the
@@ -844,13 +849,11 @@ the join outside the relation field or needs public subscribable keys.
 Converting such an entity into a runtime GraphQL schema reports the private
 column as unsupported, as for any statically unreadable column. The ORM cannot
 see surfaces the host writes itself. Handwritten resolvers and object fields,
-custom roots, trusted `order_expression` SQL, repository helpers, search
-documents and host-owned `SimpleObject` getters on metadata-only entities can
-still read, order by or publish the column, and keeping them private is the
-host's responsibility. In particular, a `search_relation(fields = [...])` on
-another relation that copies a server-only key column into a search document
-defeats its privacy: searching for the value reveals which rows hold it. (A
-column declared searchable on its own entity is never certified server-only.)
+custom roots, trusted `order_expression` SQL, repository helpers, handwritten
+search documents and host-owned `SimpleObject` getters on metadata-only
+entities can still read, order by or publish the column, and keeping them
+private is the host's responsibility. Generated relation search documents
+refuse server-only keys at compile time.
 
 `tests/server_only_relation_keys.rs` runs the matrix on SQLite and test-owned
 PostgreSQL and SQL Server in every `AuthorizationMode`, over the loader and
