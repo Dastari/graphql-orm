@@ -10,16 +10,132 @@ supersedes: []
 
 # Migration Guide
 
-## 0.157.0 to 0.158.0: authority-aware host field decisions
+## 0.163.0 to 0.164.0: authority-aware host field decisions
 
 **No action** unless the host `FieldPolicy` overrides
 `can_read_repository_field_with_authority` or
-`can_write_repository_field_with_authority` (new in ORM 0.214.0). Those
+`can_write_repository_field_with_authority` (new in ORM 0.224.0). Those
 overrides now also decide the host-owned fields this crate reads and writes
 through its internal handle: fields of host entities, and any field that
 declares a policy key. A policy that refuses calls without an authority there
 must admit the access this crate presents, or keep allowing those fields.
 The crate's own key-less fields are still answered by the crate.
+
+## 0.162.0 to 0.163.0 skill schemas and provider endpoints
+
+**Action needed** when host code matches `ProviderError::InvalidConfiguration`
+from adapter construction, or when `provider_profile_endpoint_issues` lists
+profiles. No schema or data migration.
+
+- **Skill schemas (#816).** Stored published versions outside the depth or
+  regular-expression bounds remain readable and usable through normal skill
+  resolution. `AiResolvedSkill::has_legacy_schema` marks those versions as
+  legacy. Operators with `AiSkillAction::ManageSkill` in the exact scope can
+  call `OrmAiSkillCatalogService::legacy_skill_schemas` to audit each skill's
+  published history, including superseded versions. It returns only version IDs and
+  SHA-256 digests of the canonical stored schema envelopes. To replace a
+  legacy version, publish a new version with schemas that satisfy the limits
+  of 32 JSON nesting levels and 256 UTF-8 bytes per regular expression.
+- **Provider endpoints (#817).** Profile creates and edits require a root
+  URL for Ollama and a non-root path of at most 2,048 bytes for OpenAI-compatible
+  Responses and Chat Completions. The limit applies to the normalized URL
+  path. Native profile endpoints remain deployment-fixed. A deployment
+  override for Anthropic uses the exact-endpoint path contract at adapter
+  initialization. Existing profiles still load. Use
+  `OrmAiConfigurationService::provider_profile_endpoint_issues` with
+  provider-profile read authority to list profile IDs and content-free
+  reasons for a scope, including missing or malformed stored endpoints.
+  Listed profiles already failed adapter initialization before this release.
+  Adapter path failures now return `ProviderError::InvalidEndpointPath`
+  instead of `InvalidConfiguration`. Any edit to a grandfathered profile,
+  including a display-name-only edit, fails until its URL is corrected.
+  Profile saves that fail the path contract return
+  `AiError::InvalidProviderEndpointPath` (`AI_INVALID_PROVIDER_ENDPOINT_PATH`
+  in GraphQL).
+
+## 0.161.0 to 0.162.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, provider definitions, describe output
+and existing bindings stay unchanged. No AI schema module or data migration
+is needed.
+
+## 0.160.0 to 0.161.0
+
+**No action.** AI 0.161.0 uses ORM 0.215.0. The change adapts one SQL Server
+internal call to the ORM's string-filter renderer and has no AI schema, data or
+public API migration. See the
+[workspace migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers).
+
+## 0.159.0 to 0.160.0
+
+**Action needed.** Move direct Auth dependencies to the published `v0.27.0`
+Git tag in the same upgrade and refresh the host lockfile. AI's principal and
+assurance APIs use types from that source. `RecentMfaPolicy` struct literals
+must now set `required_amr` and `required_context`. Auth denies accepted MFA
+with no recorded method. AI continues to refuse delegated credentials for
+durable work and rehydrates current authority at execution checkpoints.
+
+AI 0.160.0 uses ORM 0.214.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
+for Auth store and token changes.
+
+## 0.158.0 to 0.159.0
+
+**No action.** Resolved reference delivery to Codex app-server requires a
+registration opt-in and a process implementation that passes the dispatch to
+the protocol actor's consuming write. Existing process implementations keep
+receiving markers. The actor filters echoed `userMessage` items and sets
+existing thread `preview` values to the empty string for every host,
+regardless of opt-in. Hosts that display these previews will receive empty
+strings. No data migration is needed. See
+[per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
+
+## 0.157.0 to 0.158.0
+
+**Action needed** on SQL Server. Generate the external schema plan for
+`AiSchemaModule` 0.85.0 through `Database::schema().plan_migration_to_entities`
+with `AiSchemaModule.entities()`. Review the change to
+`dbo.graphql_orm_ai_runs.state` from `NVARCHAR(MAX)` to
+`NVARCHAR(450) COLLATE Latin1_General_100_BIN2` and creation of the
+`idx_graphql_orm_ai_runs_claim_candidates` and
+`idx_graphql_orm_ai_runs_recovery_candidates` indexes.
+
+Plan a maintenance window and quiesce writers. The `ALTER COLUMN` rewrites the
+run table under an exclusive schema modification lock. User-created statistics
+on `state` block the ALTER. Drop them after the preflight and before the ALTER,
+inside the same transaction. A blocked ALTER rolls back the transaction,
+including any drops already performed.
+
+Replace the indicated comment with the reviewed plan statements. Run the whole
+batch on one connection.
+
+The check counts UTF-16 bytes, including trailing spaces and both code units
+of a supplementary character. SQL Server can silently trim trailing spaces
+when narrowing this column, even with `ANSI_WARNINGS ON`.
+
+```sql
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+IF EXISTS (
+    SELECT 1
+    FROM [dbo].[graphql_orm_ai_runs] WITH (TABLOCKX, HOLDLOCK)
+    WHERE DATALENGTH([state]) > 900
+)
+    THROW 50000, N'Cannot narrow graphql_orm_ai_runs.state to NVARCHAR(450): a stored value exceeds 900 bytes.', 1;
+
+-- Insert the reviewed plan statements here, including any required DROP STATISTICS before ALTER COLUMN.
+COMMIT;
+```
+
+No valid run state is that long. Repair or quarantine the corrupt rows before
+retrying the upgrade. The migration keeps values within the bound exactly as
+stored.
+
+**Action needed** on SQLite, PostgreSQL, and SQL Server. Drain active workers
+before opening the new schema-module epoch. Leases granted under the previous
+epoch no longer authorize work after the successor epoch opens. SQLite and
+PostgreSQL require no schema or data migration.
 
 ## 0.156.0 to 0.157.0
 

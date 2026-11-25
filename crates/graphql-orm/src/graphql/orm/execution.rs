@@ -446,10 +446,19 @@ impl MigrationBackend for super::PostgresBackend {
 async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate::Result<()> {
     super::ensure_sql_write_allowed()?;
     let mut transaction = pool.begin().await?;
+    ensure_sqlite_migration_history(&mut transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+async fn ensure_sqlite_migration_history(
+    connection: &mut sqlx::SqliteConnection,
+) -> crate::Result<()> {
     let exists: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
             .bind(MIGRATION_HISTORY_TABLE)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut *connection)
             .await?;
     if exists == 0 {
         sqlx::query(&format!(
@@ -466,14 +475,13 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
         )",
             MIGRATION_HISTORY_TABLE
         ))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
-        transaction.commit().await?;
         return Ok(());
     }
 
     let rows = sqlx::query(&format!("PRAGMA table_info({})", MIGRATION_HISTORY_TABLE))
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut *connection)
         .await?;
     let allowed = ["version", "description", "applied_at"]
         .into_iter()
@@ -535,7 +543,7 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
          OR typeof(version) != 'text' OR applied_at IS NULL OR typeof(applied_at) != 'text'",
         MIGRATION_HISTORY_TABLE
     ))
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut *connection)
     .await?;
     if invalid_rows != 0 {
         return Err(invalid_migration_history(
@@ -558,7 +566,7 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
             "SELECT COUNT(*) FROM {} WHERE description IS NULL OR typeof(description) != 'text'",
             MIGRATION_HISTORY_TABLE
         ))
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut *connection)
         .await?;
         if invalid_descriptions != 0 {
             return Err(invalid_migration_history(
@@ -581,7 +589,7 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
             )",
             upgrade_table
         ))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         let metadata_select = MIGRATION_METADATA_COLUMNS
             .iter()
@@ -601,15 +609,15 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
              SELECT version, 'Legacy migration ' || version, applied_at, {metadata_select}
              FROM {MIGRATION_HISTORY_TABLE}"
         ))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         sqlx::query(&format!("DROP TABLE {MIGRATION_HISTORY_TABLE}"))
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         sqlx::query(&format!(
             "ALTER TABLE {upgrade_table} RENAME TO {MIGRATION_HISTORY_TABLE}"
         ))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await?;
         columns.extend(
             MIGRATION_METADATA_COLUMNS
@@ -624,11 +632,10 @@ async fn ensure_sqlite_migration_history_table(pool: &sqlx::SqlitePool) -> crate
                 "ALTER TABLE {} ADD COLUMN {} {}",
                 MIGRATION_HISTORY_TABLE, column, sql_type
             ))
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         }
     }
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -977,7 +984,25 @@ where
         if let Some(plan) = owned {
             let current = super::migrations::introspect_owned_sqlite_connection(&mut tx).await?;
             plan.check_baseline(&current)?;
-            validate_owned_sqlite_plan(&mut tx, plan).await?;
+            if plan.sqlite_column_drop().is_none() {
+                validate_owned_sqlite_rebuild_plan(&mut tx, plan).await?;
+            }
+        }
+
+        let column_drop = if let Some((table, column)) = owned.and_then(OwnedPlannedMigration::sqlite_column_drop) {
+            let [statement] = statements else {
+                return Err(sqlx::Error::Protocol("invalid isolated SQLite column drop plan".into()).into());
+            };
+            let drop = super::migrations::sqlite_unique_rebuild::column_drop::prepare(
+                &mut tx, table, column, statement.as_ref(),
+            ).await.map_err(sqlx::Error::from)?;
+            ensure_sqlite_migration_history(&mut tx).await?;
+            Some(drop)
+        } else {
+            None
+        };
+
+        if let Some(plan) = owned {
             let recorded: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE} WHERE version = ?"))
                 .bind(version).fetch_one(&mut *tx).await?;
             if let Some(report) = plan.recorded_version_report(recorded != 0)? { return Ok(Some(report)); }
@@ -1020,6 +1045,10 @@ where
         }
 
         for (index, statement) in statements.iter().enumerate() {
+            if let Some(drop) = &column_drop {
+                drop.apply(&mut tx, statement.as_ref()).await?;
+                continue;
+            }
             if let Some(rebuild) = unique_rebuilds.remove(&index) {
                 rebuild.apply(&mut tx).await.map_err(|error| {
                     if error.as_database_error().is_some_and(|error| error.is_unique_violation()) {
@@ -1121,8 +1150,10 @@ pub(super) async fn apply_owned_sqlite_migration(
 ) -> Result<super::AppliedMigrationReport, RuntimeMigrationError> {
     let current = super::migrations::introspect_owned_sqlite_schema(pool).await?;
     plan.check_baseline(&current)?;
-    super::migrations::sqlite_unique_rebuild::preflight(pool, plan.statements()).await?;
-    ensure_sqlite_migration_history_table(pool).await?;
+    if plan.sqlite_column_drop().is_none() {
+        super::migrations::sqlite_unique_rebuild::preflight(pool, plan.statements()).await?;
+        ensure_sqlite_migration_history_table(pool).await?;
+    }
     let metadata = plan.application_metadata();
     if let Some(report) = apply_sqlite_migration_statements_transactionally(
         pool,
@@ -1457,6 +1488,40 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(feature = "sqlite")]
 pub(super) async fn validate_owned_sqlite_plan(
+    connection: &mut sqlx::SqliteConnection,
+    plan: &OwnedPlannedMigration,
+) -> Result<(), RuntimeMigrationError> {
+    use super::migrations::sqlite_unique_rebuild::column_drop::{DropError, prepare};
+    use super::runtime_migration::{
+        RuntimeMigrationDiagnostic, RuntimeMigrationDiagnosticCode, RuntimeMigrationDiagnostics,
+    };
+
+    if let Some((table, column)) = plan.sqlite_column_drop() {
+        let [statement] = plan.statements() else {
+            return Err(
+                sqlx::Error::Protocol("invalid isolated SQLite column drop plan".into()).into(),
+            );
+        };
+        return prepare(connection, table, column, statement)
+            .await
+            .map(|_| ())
+            .map_err(|error| match error {
+                DropError::Refused { subject, .. } => {
+                    RuntimeMigrationDiagnostics(vec![RuntimeMigrationDiagnostic {
+                        code: RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+                        collection: None,
+                        subject: Some(subject),
+                    }])
+                    .into()
+                }
+                DropError::Database(error) => error.into(),
+            });
+    }
+    validate_owned_sqlite_rebuild_plan(connection, plan).await
+}
+
+#[cfg(feature = "sqlite")]
+async fn validate_owned_sqlite_rebuild_plan(
     connection: &mut sqlx::SqliteConnection,
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {

@@ -1,8 +1,12 @@
 mod delete_effect_guard;
 pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
+mod guarded_updates;
 #[doc(hidden)]
 pub use generated_filter::*;
+#[doc(hidden)]
+pub use guarded_updates::__register_guarded_update_table;
+pub(crate) use guarded_updates::is_guarded_update_table;
 mod authorized_page;
 pub use authorized_page::*;
 mod authorized_pagination;
@@ -37,6 +41,7 @@ pub(crate) use read_snapshot::{SNAPSHOT_WRITE_REFUSED, ensure_write_allowed};
 mod read_authorization;
 mod resolver_catalog;
 pub use resolver_catalog::*;
+mod journal_key;
 mod restore_marker;
 mod rls;
 mod root_fields;

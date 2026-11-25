@@ -1263,7 +1263,8 @@ impl AiRuntime {
     }
 
     /// Calls a registered provider only after start readiness and exact egress
-    /// authorization.
+    /// authorization. Entity references permanently use unavailable markers,
+    /// as in [`Self::dispatch_provider`].
     pub async fn stream_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1283,10 +1284,9 @@ impl AiRuntime {
     /// Dispatches a provider request while preserving whether failure occurred
     /// before or after the transport uncertainty boundary.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker. Only
-    /// `AiProviderCallExecutor` and the background-submission
-    /// service resolve references, for the principal they rehydrate.
+    /// Entity references permanently use unavailable markers on this direct
+    /// path because it has no rehydrated run principal. Use
+    /// [`crate::AiProviderCallExecutor`] for current-principal resolution.
     pub async fn dispatch_provider(
         &self,
         provider_kind: &ProviderKind,
@@ -1428,7 +1428,8 @@ impl AiRuntime {
     ///
     /// The responder is authority only for the exact current tool request and
     /// remains outside the provider process. Ordinary providers fail closed
-    /// through their default implementation.
+    /// through their default implementation. Entity references permanently
+    /// use unavailable markers, as in [`Self::dispatch_provider`].
     ///
     /// # Errors
     ///
@@ -1451,8 +1452,9 @@ impl AiRuntime {
         }
     }
 
-    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. It resolves
-    /// no entity reference either.
+    /// Dynamic-tool counterpart of [`Self::dispatch_provider`]. Entity
+    /// references permanently use unavailable markers because the responder
+    /// grants no run principal for inference.
     pub async fn dispatch_provider_with_dynamic_tools(
         &self,
         provider_kind: &ProviderKind,
@@ -1758,8 +1760,9 @@ impl AiRuntime {
     /// Starts a registered provider background response after runtime,
     /// capability, budget, and exact egress validation.
     ///
-    /// This entry point resolves no entity reference: each one in `request`
-    /// is sent as the unavailable marker.
+    /// Entity references permanently use unavailable markers because this
+    /// API has no rehydrated run principal. The ORM background-submission
+    /// service resolves references after rehydrating and authorizing the run.
     ///
     /// # Errors
     ///

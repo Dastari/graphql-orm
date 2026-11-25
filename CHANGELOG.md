@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.214.0 and AI 0.158.0
+## Unreleased - ORM/macros 0.224.0 and AI 0.164.0
 
 - **Added (#291).** A mutation hook's nested writes can be authorized from
   the request that caused them. With
@@ -47,12 +47,184 @@ for historical context.
   same status and authority revalidation as a request, when the host's
   `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
   denies, so `ctx = None` calls stay refused until the host implements it.
-- **Fixed (#291), AI 0.158.0.** The AI crate's internal handle forwards
+- **Fixed (#291), AI 0.164.0.** The AI crate's internal handle forwards
   host-owned repository field decisions to the host policy's
   `*_with_authority` methods; see the
-  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01570-to-01580-authority-aware-host-field-decisions).
+  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01630-to-01640-authority-aware-host-field-decisions).
   **No action.** See the
-  [migration guide](MIGRATION.md#02090-to-02140-explicit-authority-for-hooks-and-workers).
+  [migration guide](MIGRATION.md#02220-to-02240-explicit-authority-for-hooks-and-workers).
+
+## Unreleased - ORM/macros 0.222.0
+
+- **Added (#908).** A generated GraphQL upsert can take a private conflict key
+  from the verified request, carry a typed transient input, and let its hook
+  acknowledge a retry without writing. All three are opt-in entity options.
+  - `upsert_bound_key(field = "...", binding = "path::Type")`: the resolver
+    fills that conflict-key member from `PrincipalKeyBinding::bind` before the
+    conflict lookup, and again after the input transform. The column must be
+    `#[graphql_orm(private)]` with no other GraphQL surface, so no client input
+    can set or replace it. A failed binding refuses the mutation before any
+    policy, read or write, with a fixed `FORBIDDEN` that carries nothing from
+    the binding's own error. A row the database matched but whose stored key
+    is not exactly the bound value is refused with `FORBIDDEN`, so a
+    case-insensitive collation cannot merge two principals. Every ownership
+    refusal is one identical response. Generated updates
+    never assign the column, whatever their input transform does. Every
+    existing write authorization still applies. Unsafe declarations are
+    compile errors, including an entity that also generates `create` or takes
+    part in a nested create, and a key column shared with another field or an
+    implicit timestamp or version writer.
+  - `transient_input(type = "...", on = "upsert")`: a typed argument that
+    `WriteInputContext::transient_input` and `MutationContext::transient_input`
+    expose to the input transform and both hook phases, inside the write
+    transaction. It is never stored or published in `Changed` events or the
+    change journal. The argument is marked `secret`, so async-graphql's
+    rendered execution document redacts it, and `@transientInput`, so AI tool
+    profiles and typed AI capabilities cannot carry it. A request value over
+    `max_bytes` (default 64 KiB) or `max_nodes` (default 1024) is refused
+    before coercion, a value that does not coerce is refused without being
+    quoted, and a defaulted variable in the argument is refused. Transaction
+    code can set one with `MutationContext::set_transient_input`.
+  - `upsert_acknowledge = true`: the `Before` hook may call
+    `MutationContext::acknowledge_without_write` on the update branch. The
+    upsert then writes nothing, publishes nothing and returns the existing row
+    with `action: null`. A call made where it is not allowed also blocks the
+    commit, so a hook that ignores the refusal cannot let the write through.
+
+  [Migration](MIGRATION.md#02210-to-02220-principal-bound-upserts)
+
+## Unreleased - ORM/macros 0.221.0 and operation catalogue 0.16.0
+
+- **Added (#668).** Generated Changed subscriptions can opt in to an opaque
+  cursor and bounded, process-local replay. Replay checks current subscriber
+  authority and signals when a cursor requires a refetch.
+  [Migration](MIGRATION.md#02200-to-02210-generated-changed-replay)
+
+## Unreleased - ORM/macros 0.220.0
+
+- PostgreSQL hosts can opt into canonical change-journal keys (#592). The
+  recorder and full snapshot use the same encoding for single-column keys.
+  The cutover retires legacy cursors and requires a new full backup.
+  [Migration](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys)
+
+## Unreleased - ORM/macros 0.219.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
+
+## Unreleased - ORM/macros 0.218.0
+
+- **Added (#898).** A readable composite relation can declare
+  `server_only_key(from = "...", to = "...")` for a key pair whose target
+  column is server-only (`#[graphql_orm(private)]` with no other GraphQL
+  surface). Generated traversal still joins on the complete tuple, so a target
+  in another partition resolves to `null` or an empty list. The column stays
+  out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
+  with `filter`, `order_aggregate`, `search_relation` or upward propagation is
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
+  [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
+
+## Unreleased - ORM/macros 0.215.0
+
+- **Added (#522).** SQL Server pools can opt in to binding the SQL types
+  declared on generated fields. Eligible ASCII VARCHAR comparisons convert
+  the parameter. Policies, patterns and non-ASCII text retain Unicode binding.
+  INT, SMALLINT and TINYINT can use their native widths. Generated unsigned
+  values outside the declared SQL Server range return `INVALID_INPUT`.
+- **Fixed (#849).** SQL Server character column ALTER statements use the parsed
+  column name when looking up collation, including literal brackets.
+
+## Unreleased - ORM/macros 0.214.0
+
+- **Changed (#857).** The `auth-agql` adapter uses published `agql-auth`
+  `v0.27.0`, locked to `71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+  Upgrade direct Auth dependencies with the ORM.
+  [Migration](MIGRATION.md#02130-to-02140-agql-auth-v0270)
+
+## Unreleased - ORM/macros 0.213.0
+
+- **Fixed (#887, #888).** Compile UI tests coordinate on Cargo's resolved
+  target directory. Consumer fixture builds initialize their own target
+  directories before launching Cargo.
+  [Migration](MIGRATION.md#02120-to-02130-test-harness-coordination)
+
+## Unreleased - ORM/macros 0.212.0
+
+- **Fixed (#882).** An admitted owned SQLite migration with a single column
+  drop can preserve unrelated indexes and incoming foreign keys using native
+  `DROP COLUMN`. Preflight identifies dependencies before live DDL, and the
+  drop and history updates commit together.
+  [Migration](MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
+
+## Unreleased - ORM/macros 0.211.0, operation catalogue 0.14.0
+
+- **Fixed (#883).** Described roots returning a registered generated entity
+  use its schema-bound semantic metadata, including generated list
+  relationship page limits. When distinct Rust types claim the same GraphQL
+  name, catalogue composition reports both sources.
+  [Migration](MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+## Unreleased - ORM/macros 0.210.0, operation catalogue 0.13.0
+
+- **Added (#851).** `#[graphql_entity(update_expected_version = "required")]`
+  makes the generated update's `ExpectedVersion` non-null (`Int!`) in the SDL
+  and the operation catalogue. An omitted or null value is refused by
+  validation, a stale one with `CONFLICT`, and a matching one advances the
+  managed version once. Delete keeps its optional argument.
+- **Added (#851).** `#[graphql_entity(update_assurance(select = "path", levels = "a,b"))]`
+  selects the generated update's assurance policy per request from the typed
+  patch and the locked row. The selection runs inside the write transaction,
+  after the row is locked and before any write. A refusal rolls back the
+  transaction with its related writes and commits no `Changed` event.
+  `UpdateAssuranceInput` and `enforce_selected_assurance` are new. Enforcement
+  fails closed with `AUTHORIZATION_MISCONFIGURED` for an undeclared level, or
+  for a schema without `AssuranceEnforcement`, which is checked before the
+  selector runs. A selector error or panic reaches the client only as a fixed
+  `INTERNAL_ERROR`. A row whose managed version cannot advance is refused
+  before the selector runs. The chosen level is observable to the caller, as the
+  reference documents.
+- **Added (operation catalogue, #851).** `GraphqlConditionalAssurance` and
+  `conditional_assurance()` on generated and resolved descriptors list the
+  levels an operation may require and mark the selection as conditional. The
+  declaration is part of the operation and router-export fingerprints. Both
+  options require an entity that generates neither `update_many` nor `upsert`
+  and declares no `set_null` relation. `RuntimeSchema::from_static_entities*`
+  refuses such entities, whichever typed constructor built their metadata.
+  Entities that opt into neither keep byte-identical SDL, catalogues,
+  fingerprints and debug output.
+
 ## Unreleased - ORM/macros 0.209.0
 
 - `SchemaManager::preflight_unique_indexes` exposes the read-only duplicate-key

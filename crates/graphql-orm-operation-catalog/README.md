@@ -10,6 +10,23 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.16.0 adds optional replay-window facts to client metadata for
+opted-in generated Changed streams.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
+Version 0.14.0 uses Rust type provenance to resolve described root
+results during static schema composition (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version `0.13.0` adds `GraphqlConditionalAssurance` and
+`conditional_assurance()` on generated and resolved operation descriptors. A
+generated update that selects its assurance level per request lists every
+possible level and marks the selection as conditional. The declaration is
+advisory: the owning service enforces the selected level. The declaration is
+part of the operation and router-export fingerprints. Descriptors without one
+keep their fingerprints and debug output. No data migration is needed. See
+[conditional assurance](../../docs/architecture/operation-assurance.md#conditional-assurance-on-generated-updates).
+
 Version `0.11.0` adds two opt-in pieces and changes no existing descriptor,
 wire format or fingerprint. No data migration is needed.
 
@@ -299,11 +316,15 @@ is one of:
 - `subgraph_only`: the requirement is not published. This covers a target
   with no matching exposed root, a target that is not a generated entity of
   the schema, a requirement that binds root arguments (scope templates), and a
-  traversal that requires more than the root does.
+  traversal that requires more than the root does. A relation with a declared
+  field policy also uses `subgraph_only` because the target root cannot
+  describe the policy on the owning field.
 
 The reference is to a static requirement only. The subgraph also applies the
 owning type's authentication mode, field policy, row policy and database
 policy, and a consumer must not treat a reference as permission.
+Older version 1 documents may pair `same_as_root` with `has_field_policy: true`.
+In that case defer the field authorization decision to the subgraph.
 
 ### Out of scope for version 1: handwritten resolvers
 
@@ -354,9 +375,9 @@ locked `serde_json` release does; a unit test pins that spelling, so a
 dependency update that changes it fails the build instead of silently changing
 bindings. The semantic catalogue and client metadata hold none of
 these, so their bytes already equal their RFC 8785 form; receiver-purpose
-variables and arguments can hold fractions, so there the issuer and the
-receiver must both use `canonical_json_hash`. Existing values are unchanged:
-0.11.0 does not move any existing fingerprint or binding to RFC 8785.
+variables and arguments can hold fractions, so the issuer and receiver must
+both use `canonical_json_hash` with the same `serde_json` number encoding.
+Receiver purpose version 1 keeps that encoding.
 
 `rfc8785_canonical_json` refuses an integer that is not exactly an IEEE 754
 double, because RFC 8785 numbers are doubles and encoding it would change the
@@ -401,11 +422,11 @@ beyond equality, and they are not signatures.
 
 ## Errors and migration
 
-The package has no fallible catalog-builder API for ordinary consumers; macro
-and schema compilation reject invalid declarations earlier. Treat a changed
-fingerprint as a review signal, not automatic permission to deploy. Preserve
-the algorithm identifiers with any exported value so a consumer can reject an
-unknown contract version.
+`GraphqlOperationCatalog::try_compose` reports repeated entity identities.
+`GraphqlResolverCatalog::compose` reports invalid resolver metadata or an
+invalid semantic catalogue. Treat a changed fingerprint as a review signal.
+Preserve the algorithm identifiers with any exported value so a consumer can
+reject an unknown contract version.
 
 See the [core macro reference](../../docs/reference/graphql-orm/macros-and-attributes.md),
 and [operation assurance architecture](../../docs/architecture/operation-assurance.md).

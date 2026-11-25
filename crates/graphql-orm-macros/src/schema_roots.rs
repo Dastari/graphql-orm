@@ -187,12 +187,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(|entity| {
             quote! {
-                ::graphql_orm::graphql::orm::with_declared_page_maximum(
+                ::graphql_orm::graphql::orm::GraphqlSemanticEntitySource::of::<#entity>(
                     <#entity as ::graphql_orm::graphql::orm::Entity>
                         ::graphql_semantic_metadata()
-                        .expect("GraphQLEntity must emit semantic metadata")
-                        .clone(),
-                    GRAPHQL_ORM_MAX_PAGE_LIMIT,
+                        .expect("GraphQLEntity must emit semantic metadata"),
                 )
             }
         })
@@ -202,9 +200,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(|semantic_type| {
             quote! {
-                <#semantic_type as ::graphql_orm::graphql::orm::GraphqlSemanticObjectMetadata>
-                    ::graphql_semantic_object()
-                    .clone()
+                ::graphql_orm::graphql::orm::GraphqlSemanticEntitySource::of::<#semantic_type>(
+                    <#semantic_type as ::graphql_orm::graphql::orm::GraphqlSemanticObjectMetadata>
+                        ::graphql_semantic_object(),
+                )
             }
         })
         .collect::<Vec<_>>();
@@ -231,9 +230,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .map(|root| {
             quote! {
                 <#root as ::graphql_orm::graphql::orm::GraphqlCustomOperationMetadata>
-                    ::graphql_custom_result_types()
-                    .iter()
-                    .cloned()
+                    ::graphql_custom_result_type_sources()
             }
         })
         .collect::<Vec<_>>();
@@ -244,7 +241,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! {
                 ::graphql_orm::graphql::orm::InterpretationEntity::of::<#entity, #backend_marker>(
                     #entity::__GOM_INTERPRETATION_SOURCE,
-                )
+                ).with_changed_replay(#entity::__GOM_CHANGED_REPLAY)
             }
         })
         .collect::<Vec<_>>();
@@ -254,7 +251,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 ::graphql_orm::graphql::orm::ClientEntitySource::of::<#entity, #backend_marker>(
                     #entity::__GOM_CHANGED_ROOT_NAME,
                     #entity::__GOM_CHANGED_STARTED_SIGNAL,
-                )
+                ).with_changed_replay(#entity::__GOM_CHANGED_REPLAY)
             }
         });
         quote! {
@@ -426,16 +423,17 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             > = ::std::sync::OnceLock::new();
             CATALOG.get_or_init(|| {
                 let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
-                ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom(
-                    ::std::iter::empty::<
-                        ::graphql_orm::graphql::orm::GraphqlEntitySemanticMetadata
-                    >()
-                        .chain(vec![#(#semantic_entity_items),*])
-                        .chain(vec![#(#semantic_type_items),*])
+                ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom_sources(
+                    [#(#semantic_entity_items),*],
+                    ::std::iter::IntoIterator::into_iter([#(#semantic_type_items),*])
                         #(.chain(#described_result_type_items))*,
                     operation_catalog,
                     ::std::iter::empty()
-                        #(.chain(#semantic_custom_operation_items))*
+                        #(.chain(#semantic_custom_operation_items))*,
+                    |entity| ::graphql_orm::graphql::orm::with_declared_page_maximum(
+                        entity,
+                        GRAPHQL_ORM_MAX_PAGE_LIMIT,
+                    ),
                 )
             })
             .as_ref()

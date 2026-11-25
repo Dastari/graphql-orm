@@ -536,6 +536,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -634,6 +643,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -1107,7 +1125,7 @@ impl RecordMutations {
             } else {
                 ::graphql_orm::graphql::orm::mutation_changes(&["id", "title"], &bind_values)
             };
-            hook_ctx
+            let __gom_before_hook = hook_ctx
                 .__run_generated_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
@@ -1123,7 +1141,8 @@ impl RecordMutations {
                     },
                 )
                 .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback);
+            __gom_before_hook?;
             if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                 Record::__gom_require_managed_version_headroom(current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;

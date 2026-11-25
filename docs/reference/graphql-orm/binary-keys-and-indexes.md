@@ -34,6 +34,9 @@ target fields are public, the GraphQL upsert field is generated as before. If an
 field is absent from the public create input, graphql-orm omits that GraphQL field and retains
 repository and `MutationContext::upsert` capability.
 
+To keep the GraphQL upsert and have the server supply the private key from the verified request,
+declare a [principal-bound conflict key](runtime-and-writes.md#principal-bound-conflict-keys).
+
 ## Named directional ordinary indexes
 
 The original shorthand remains available and produces an all-ascending index

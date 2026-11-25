@@ -92,6 +92,10 @@ to an existing database.
 | `graphql-orm-router-protocol` | Versioned project-neutral subgraph/router declarations | [package README](crates/graphql-orm-router-protocol/README.md) |
 | `graphql-orm-router` | Federated GraphQL router runtime | [package README](crates/graphql-orm-router/README.md) |
 
+PostgreSQL journal users can opt into canonical single-column keys shared by
+the recorder and full snapshots. The cutover starts a fresh incremental
+chain. See the [migration procedure](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
 The packages remain independently consumable. Adding one does not enable the
 others as ORM features.
 
@@ -109,6 +113,11 @@ Do not deploy that configuration. See [authentication and
 authorization](docs/architecture/authentication-and-authorization.md),
 [operation assurance](docs/architecture/operation-assurance.md), and the
 [GraphQL workflow](docs/development/graphql-workflow.md).
+
+SQL Server hosts can declare column types and opt in to parameter binding
+that allows index seeks for ASCII comparison filters over indexed VARCHAR
+columns. Policy and pattern operands and non-ASCII inputs use Unicode
+binding. The opt-in is per connection pool. [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types)
 
 ## Documentation
 

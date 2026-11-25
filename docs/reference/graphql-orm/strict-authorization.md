@@ -286,6 +286,11 @@ rows it may target, whether the row it writes is allowed, and whether the
 caller receives that row back. Row-level isolation that rests on `RowPolicy`
 instead of PostgreSQL RLS relies on all three.
 
+A [principal-bound upsert](runtime-and-writes.md#principal-bound-upserts) takes
+its conflict key from the verified request instead of the input. It narrows
+which row the upsert can reach and replaces no check: the entity, row and field
+write decisions below apply to it unchanged, after the key is bound.
+
 **The written row.** Generated creates, updates, upserts and bulk updates check
 `can_write_row` on the row as written (the post-image), inside the transaction
 and before the `After` hook. This covers GraphQL and repository writes,

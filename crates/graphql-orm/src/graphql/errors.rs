@@ -162,6 +162,14 @@ impl MutationOutcomeTracker {
         self.advance(Self::COMMITTED);
     }
 
+    /// A principal-bound ownership refusal: the transaction can no longer
+    /// commit, so nothing was written, and every such refusal reports the
+    /// same outcome whichever statement it followed.
+    pub fn __ownership_refused(&self) {
+        self.0
+            .store(Self::REFUSED, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The outcome an error raised now would report.
     pub fn outcome(&self) -> MutationOutcome {
         match self.0.load(std::sync::atomic::Ordering::Relaxed) {

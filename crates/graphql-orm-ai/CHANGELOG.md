@@ -10,11 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.158.0
+## Unreleased - 0.164.0
 
-Requires ORM 0.214.0. No public API, GraphQL SDL, persistent schema, broker
+Requires ORM 0.224.0. No public API, GraphQL SDL, persistent schema, broker
 definition or fingerprint change. See the
-[migration guide](MIGRATION.md#01570-to-01580-authority-aware-host-field-decisions).
+[migration guide](MIGRATION.md#01630-to-01640-authority-aware-host-field-decisions).
 
 - **Fixed (#291):** the crate's internal database handle forwards
   repository field decisions for fields the host owns to the host policy's
@@ -22,6 +22,61 @@ definition or fingerprint change. See the
   `can_write_repository_field_with_authority`. A host refusal written in
   those methods is no longer skipped on that handle. Decisions for the
   crate's own key-less fields are unchanged.
+
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
+## Unreleased - 0.162.0
+
+- Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
+  The release benchmark can measure startup separately and export a byte
+  snapshot of the catalogue and model-facing output.
+  [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
+
+## Unreleased - 0.160.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01590-to-01600)
+
+## Unreleased - 0.159.0
+
+- Codex app-server registrations can opt into resolved entity-reference
+  delivery when the host process overrides `start_dispatch_turn`. The host
+  process implementation and its writer are inside the trust boundary. The
+  freshness bound and kill on an abandoned resolved write apply to the writer
+  passed to the protocol actor. Pass the child's stdin directly. A queueing
+  writer can acknowledge the frame before the actual pipe write.
+- For all Codex hosts, the protocol actor filters known user-message echoes
+  and empties thread previews as a best-effort defence-in-depth measure.
+  Tool-free Codex turns also accept entity references. Direct runtime calls
+  permanently send markers (#721).
+
+## Unreleased - 0.158.0
+
+- **Action needed.** Apply the checked SQL Server schema upgrade so claim and
+  expired-lease recovery candidate reads can seek on run state (#848).
+- **Action needed.** Drain workers on all backends before opening the successor
+  epoch under AI schema module 0.85.0.
 
 ## Unreleased - 0.157.0
 

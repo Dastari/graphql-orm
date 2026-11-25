@@ -6,3 +6,4 @@ mod owned_mssql;
 
 mod mssql_correctness;
 mod mssql_integration;
+mod typed_parameters;
