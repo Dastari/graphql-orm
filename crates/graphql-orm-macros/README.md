@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,10 @@ physical column. A literal dot requires one delimited identifier, such as
 `db_column = "\"event.code\""` on SQLite and PostgreSQL or
 `db_column = "[event.code]"` on SQL Server. See the
 [migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
+
+Version 0.219.0 enforces assurance on every enabled entity query root in
+generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
 
 Version 0.218.0 adds the `server_only_key(from, to)` relation option.
 See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).

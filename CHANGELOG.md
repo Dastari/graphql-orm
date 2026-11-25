@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,6 +31,13 @@ for historical context.
   with a literal dot must be explicitly delimited as a single identifier.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
+## Unreleased - ORM/macros 0.219.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
 
 ## Unreleased - ORM/macros 0.218.0
 
