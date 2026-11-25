@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -128,8 +128,8 @@ Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
 preserves existing schemas.
 
-Enforcement keys on the exact root coordinate. A resolver that runs below
-another root passes its own coordinate to `enforce_operation_assurance`.
+Enforcement keys on exact root coordinates. A resolver that runs below a
+root passes the applicable coordinates to `enforce_operation_assurance`.
 Generated Federation entity resolvers, emitted for an entity's
 `federation_key` or `node_id`, run below `_entities`. After resolver auth and
 single-read scopes, they enforce the entity's get-by-id coordinate, every
@@ -137,6 +137,18 @@ enabled generated query root for the entity, and any classification registered
 for `_entities`. All required policies must pass before a database lookup.
 A handwritten `#[graphql(entity)]` resolver gets no assurance check from the
 ORM. Generated dependent deletes use their own delete root.
+
+## Generated Relation Traversal
+
+Generated relation traversal checks every generated query coordinate of the
+target entity after its auth mode and operation scopes and before any target
+row read, existence check, or count. The coordinates cover list, get-by-id,
+keyset, scan, search, and aggregate wherever generated. A requirement on any
+one coordinate applies to all generated relation paths into that target,
+including nested fields and connections, related-row filters, relation-count
+ordering, search relation sources, and relation fields in mutation results.
+Unregistered and unclassified query coordinates carry no requirement.
+Generated Changed streams reject relation selections before registration.
 
 ## Runtime GraphQL Roots
 

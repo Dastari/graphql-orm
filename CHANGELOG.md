@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,12 +14,54 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.227.0
+## Unreleased - ORM/macros 0.219.0
 
 - **Security fix (#902).** Runtime node lookups and relation layers enforce the
   target collection's query assurance before database access. Generated
   Federation lookups enforce assurance on every enabled query root of the
-  entity. [Migration](MIGRATION.md#02270-indirect-query-assurance)
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
+
+## Unreleased - ORM/macros 0.218.0
+
+- **Added (#898).** A readable composite relation can declare
+  `server_only_key(from = "...", to = "...")` for a key pair whose target
+  column is server-only (`#[graphql_orm(private)]` with no other GraphQL
+  surface). Generated traversal still joins on the complete tuple, so a target
+  in another partition resolves to `null` or an empty list. The column stays
+  out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
+  with `filter`, `order_aggregate`, `search_relation` or upward propagation is
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
+  [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
 
 ## Unreleased - ORM/macros 0.215.0
 

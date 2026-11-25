@@ -1,0 +1,5 @@
+error: server_only_key relations cannot declare `order_aggregate`: parent ordering would evaluate the server-only join
+  --> tests/ui/server_only_keys/order_aggregate.rs:27:9
+   |
+27 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^

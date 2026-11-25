@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -409,7 +409,10 @@ changes the relation cardinality. `filter` opts an unconditional public collecti
 authorized target-Where alternatives in generated roots; see
 [authorized collection filters](entities-and-relations.md#authorized-collection-filters). `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
-Relations are not ordinary persisted fields.
+Relations are not ordinary persisted fields. `server_only_key(from = "...", to = "...")`
+marks one composite key pair whose columns stay off every generated GraphQL surface while
+the generated join still uses it; see
+[server-only partition keys](entities-and-relations.md#server-only-partition-keys).
 
 An unconditional readable relation can add a correlated count to its parent
 entity's generated order input:

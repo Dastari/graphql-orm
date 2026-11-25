@@ -1,29 +1,49 @@
-error[E0451]: fields `relation`, `parent_key`, `parent_values`, `fk_columns`, `key_part_kinds`, `where_signature`, `order_signature`, `page_signature`, `filter`, `sorts`, `pagination` and `auth_context` of struct `CompositeRelationQueryKey` are private
-  --> tests/ui/relation_key_literal_refused.rs:9:9
+error: cannot construct `CompositeRelationQueryKey` with struct literal syntax due to private fields
+  --> tests/ui/relation_key_literal_refused.rs:8:5
    |
  8 |     CompositeRelationQueryKey {
-   |     ------------------------- in this type
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
  9 |         relation: "Parent::child",
-   |         ^^^^^^^^ private field
+   |         ------------------------- private field
 10 |         parent_key: RelationKey::from_sql_values(&values),
-   |         ^^^^^^^^^^ private field
+   |         ------------------------------------------------- private field
 11 |         parent_values: values,
-   |         ^^^^^^^^^^^^^ private field
+   |         --------------------- private field
 12 |         fk_columns: vec!["\"id\""],
-   |         ^^^^^^^^^^ private field
+   |         -------------------------- private field
 13 |         key_part_kinds: vec![RelationKeyPartKind::String],
-   |         ^^^^^^^^^^^^^^ private field
+   |         ------------------------------------------------- private field
 14 |         where_signature: None,
-   |         ^^^^^^^^^^^^^^^ private field
+   |         --------------------- private field
 15 |         order_signature: None,
-   |         ^^^^^^^^^^^^^^^ private field
+   |         --------------------- private field
 16 |         page_signature: None,
-   |         ^^^^^^^^^^^^^^ private field
+   |         -------------------- private field
 17 |         filter: None,
-   |         ^^^^^^ private field
+   |         ------------ private field
 18 |         sorts: vec![],
-   |         ^^^^^ private field
+   |         ------------- private field
 19 |         pagination: None,
-   |         ^^^^^^^^^^ private field
+   |         ---------------- private field
 20 |         auth_context: None,
-   |         ^^^^^^^^^^^^ private field
+   |         ------------------ private field
+   |
+   = note: ...and other private field `associate_by_match` that was not provided
+help: you might have meant to use the `__generated` associated function
+   |
+ 8 -     CompositeRelationQueryKey {
+ 9 -         relation: "Parent::child",
+10 -         parent_key: RelationKey::from_sql_values(&values),
+11 -         parent_values: values,
+12 -         fk_columns: vec!["\"id\""],
+13 -         key_part_kinds: vec![RelationKeyPartKind::String],
+14 -         where_signature: None,
+15 -         order_signature: None,
+16 -         page_signature: None,
+17 -         filter: None,
+18 -         sorts: vec![],
+19 -         pagination: None,
+20 -         auth_context: None,
+21 -     }
+ 8 +     CompositeRelationQueryKey::__generated(_, _, _, _, _, _, _, _, _, _, _, _)
+   |

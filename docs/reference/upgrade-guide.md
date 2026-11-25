@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,9 +70,13 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.215.0**; **`graphql-orm-macros` 0.215.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.219.0**; **`graphql-orm-macros` 0.219.0**; **`graphql-orm-operation-catalog` 0.15.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
 
-- **Action needed** — ORM/macros 0.227.0 enforces target query assurance on runtime node lookups, runtime relations and generated Federation entity lookups (#902). Handle step-up errors on these reads. [Migration](../../MIGRATION.md#02270-indirect-query-assurance)
+- **Action needed** — ORM/macros 0.219.0 enforces target query assurance on runtime node lookups, runtime relations and generated Federation entity lookups (#902). Handle step-up errors on these reads. [Migration](../../MIGRATION.md#02180-to-02190-indirect-query-assurance)
+- **No action** — ORM/macros 0.218.0 adds the opt-in `server_only_key` relation option: a composite relation joins on a private partition key that stays off every generated GraphQL surface; handwritten resolvers, trusted SQL ordering and search documents remain the host's responsibility (#898). [Migration](../../MIGRATION.md#02170-to-02180-server-only-relation-join-keys)
+- **Action needed** — ORM/macros 0.217.0 fixes relation traversal assurance (#899). Handle step-up errors when a relation target has required query assurance. [Migration](../../MIGRATION.md#02160-to-02170-relation-target-assurance)
+- **No action** — Operation catalogue 0.15.0 marks field-policy-guarded relationships as `subgraph_only` (#544). [Migration](../../MIGRATION.md#operation-catalogue-0150)
+- **No action** — ORM/macros 0.216.0 let PostgreSQL choose the join for RLS search documents (#555). [Migration](../../MIGRATION.md#02150-to-02160-postgresql-rls-search)
 - **No action** — AI tool profiles 0.30.0 and AI 0.162.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
 - **No action** — ORM/macros 0.215.0 adds opt-in declared SQL Server parameter types and parses column identifiers in the ALTER COLUMN collation lookup (#522, #849). [Migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers)
 - **No action** — AI 0.161.0 uses ORM 0.215.0 and adapts one internal SQL Server call; no AI migration (#522). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01600-to-01610)
