@@ -544,7 +544,7 @@ ambiguous:
 
 | `level` | Needs | Returns |
 | --- | --- | --- |
-| `namespaces` | nothing | each logical namespace with its number of capabilities |
+| `namespaces` | nothing | each logical namespace with at least one admitted capability |
 | `capabilities` | `namespace`, optional `entity` | discover-shaped candidates with a `candidateReference` |
 | `operations` | `namespace` and `entity` | the entity's candidate header (no operation list) and one page of its operations: name, shape, description and result description |
 
@@ -559,18 +559,28 @@ roots, and a namespace appears only with an admitted capability.
 
 Nothing in a browse result depends on what the principal may not see:
 
-- An unknown filter, a filter host policy denies, and a browse whose policy
-  batch would exceed `with_maximum_discovery_authorizations` all return the
-  same empty page. Unlike discover, browse never reports
-  `AI_CAPABILITY_DISCOVERY_TOO_BROAD`, because its exact filters would turn
-  that error into a signal about hidden entries. Size the bound for your
-  largest namespace, or override `authorize_discovery` (at `namespaces` the
-  batch is the whole index set).
+- Policy decides the listed entries in order, in batches of at most
+  `AI_CAPABILITY_BROWSE_POLICY_BATCH` (256) decisions, or the host's
+  `with_maximum_discovery_authorizations` when it is lower (an entity with
+  more grouped roots is decided alone). Browse stops as soon as the
+  requested page is decided: the first `offset + limit + 1` admitted
+  results, or at `namespaces` the first namespaces with an admitted
+  capability (so namespaces carry no count). The response is exactly that
+  admitted prefix. Hidden entries change how much policy work is done,
+  never what is returned, so browse never reports
+  `AI_CAPABILITY_DISCOVERY_TOO_BROAD`. An unknown and a denied filter
+  return the same empty page.
+- The guarantee is on response content, not timing: browse does not take
+  constant time against an observer who can time it in process, since
+  policy work grows with the entries before the page. A host with an
+  expensive policy should override `authorize_discovery`.
 - Results carry no index or entry fingerprint. Each listed capability has an
-  opaque `candidateReference`, fresh for every browse, that only this run's
-  broker session resolves; describe takes it in place of
-  `candidateFingerprint`. Browse results are not shared through the
-  discovery cache.
+  opaque `candidateReference`, fresh for every browse, that describe takes
+  in place of `candidateFingerprint`. It resolves only in the broker session
+  that issued it and only for the same principal, AI session, run, attempt
+  and provider session, so a reused or cloned session cannot resolve it
+  under another run. Browse results are not shared through the discovery
+  cache.
 - The `operations` header has no operation list, so `limit` bounds every
   list the page returns.
 
@@ -607,21 +617,28 @@ argument. A continued page is not authorized by its handle:
 An unknown, altered, evicted or expired handle, or one presented with another
 `loadedReference` or session, is `selection_stale`. Handles expire with
 their loaded binding (the broker's loaded TTL, at most five minutes) and are
-expired from the expiry instant on. Retention and expiry are checked again
-after the policy checks, immediately before the page is dispatched. A
-session retains at most `AI_CAPABILITY_MAXIMUM_CONTINUATIONS` (32) handles,
-dropping the oldest. Every handle of one chain draws on a shared budget of
+expired from the expiry instant on. A redemption first reserves one execution
+of its chain's budget, then rechecks retention and expiry after the policy
+checks and once more at executor admission
+(`AiCapabilityDiscoveryBroker::continuation_admission`, called after host
+tool policy and the request context are built, immediately before the
+resolver); a refusal at either point returns the reservation and answers
+`selection_stale`. A session retains at most
+`AI_CAPABILITY_MAXIMUM_CONTINUATIONS` (32) handles, dropping the oldest. The
+chain's budget is created with the first page's execution and shared by
+every handle issued from it, however often that page is recorded: at most
 `AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES` (256) executions, the first page
-included: reusing a handle or redeeming handles concurrently spends the same
-budget, so 256 bounds the chain's total work, not only its depth. A spent
+included, so reuse and concurrent redemption spend the same budget and 256
+bounds the chain's total work, not only its depth. A spent
 chain issues no new handle and its handles are `selection_stale`. An end
 cursor longer than `AI_GRAPHQL_QUERY_MAXIMUM_CURSOR_BYTES` (1,024) ends the
 chain.
 
 The cursor is also kept out of diagnostics: the `Debug` output of
 `AiCapabilityBrokerSession`, `AiCapabilityExecution`,
-`AiGraphqlQueryPageInfo`, a compiled page (`AiCompiledGraphqlQuery`) and
-`ToolGraphqlRequest` (variable names only) redacts it. The host's
+`AiGraphqlQueryPageInfo`, a compiled page (`AiCompiledGraphqlQuery`),
+`ToolGraphqlRequest` (variable names only) and `ToolGraphqlResponse` (whose
+`data` still holds `pageInfo` until the runtime removes it) redacts it. The host's
 `GraphqlToolExecutor` necessarily receives it as the `after` variable of the
 continued request; a host transport must not log or forward request
 variables.
@@ -631,7 +648,8 @@ and are not continuable.
 
 A host driving the broker itself uses
 `AiCapabilityDiscoveryBroker::dispatch_browse`,
-`AiRuntime::execute_query_capability_page` (or
+`AiRuntime::execute_query_capability_page` with
+`AiCapabilityDiscoveryBroker::continuation_admission` as its final admission (or
 `AiGraphqlQueryCapability::compile_compact_page` and `take_page_info`) and
 `AiCapabilityDiscoveryBroker::record_continuation`; the coordinator does this
 for broker calls.

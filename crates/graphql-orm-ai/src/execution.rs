@@ -734,7 +734,10 @@ impl std::fmt::Debug for ToolGraphqlRequest {
 }
 
 /// Bounded normalized GraphQL result.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Its `Debug` output redacts `data`, which can carry resolver state such as
+/// a continued page's `pageInfo.endCursor` before the runtime removes it.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolGraphqlResponse {
     /// Projected JSON result.
     pub data: serde_json::Value,
@@ -742,6 +745,17 @@ pub struct ToolGraphqlResponse {
     pub error_codes: Vec<String>,
     /// Host application audit reference, when emitted.
     pub application_audit_ref: Option<String>,
+}
+
+impl std::fmt::Debug for ToolGraphqlResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolGraphqlResponse")
+            .field("data", &"<redacted>")
+            .field("error_codes", &self.error_codes)
+            .field("application_audit_ref", &self.application_audit_ref)
+            .finish()
+    }
 }
 
 /// Canonical host request-context factory shared with normal HTTP/WS paths.
@@ -877,14 +891,44 @@ impl AuthenticatedToolBridge {
         descriptor: &AiToolDescriptor,
         request: ToolGraphqlRequest,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        self.execute_generated_query_admitted(
+            principal_reference,
+            capability_id,
+            capability_fingerprint,
+            descriptor,
+            request,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::execute_generated_query`] with a final admission check that
+    /// runs after host tool policy and the request context are built,
+    /// immediately before the executor. A refusal fails before execution.
+    pub(crate) async fn execute_generated_query_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        final_admission: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let binding = AiRegisteredToolExecutionBinding::generated_query(
             capability_id,
             capability_fingerprint,
             descriptor,
             &request,
         )?;
-        self.execute_with_binding(principal_reference, descriptor, request, binding)
-            .await
+        self.execute_with_binding_and_effect_guard(
+            principal_reference,
+            descriptor,
+            request,
+            binding,
+            None,
+            final_admission,
+        )
+        .await
     }
 
     pub(crate) async fn execute_generated_mutation(
@@ -908,6 +952,7 @@ impl AuthenticatedToolBridge {
             request,
             binding,
             effect_guard,
+            None,
         )
         .await
     }
@@ -925,6 +970,7 @@ impl AuthenticatedToolBridge {
             request,
             binding,
             None,
+            None,
         )
         .await
     }
@@ -936,6 +982,7 @@ impl AuthenticatedToolBridge {
         request: ToolGraphqlRequest,
         binding: AiRegisteredToolExecutionBinding,
         effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
+        final_admission: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
@@ -977,6 +1024,16 @@ impl AuthenticatedToolBridge {
             .map_err(|error| {
                 crate::execution_rejection::before_executor_error(&binding, &request, error)
             })?;
+        // The last check before the executor, after every awaited admission
+        // step: a caller-held condition (such as a continuation handle's
+        // retention and expiry) must still hold now.
+        if final_admission.is_some_and(|admit| !admit()) {
+            return Err(crate::execution_rejection::before_executor_error(
+                &binding,
+                &request,
+                ToolExecutionError::Authorization,
+            ));
+        }
         let expected_request = request.clone();
         let response = match &effect_guard {
             Some(guard) => {

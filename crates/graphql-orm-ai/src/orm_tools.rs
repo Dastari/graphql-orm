@@ -2009,7 +2009,8 @@ impl OrmAiApplicationToolCallService {
         let capability_id = execution.capability_id().clone();
         let capability_fingerprint = execution.capability_fingerprint().to_owned();
         let (result, continuation) = if paged {
-            let (result, page_info) = tokio::time::timeout(
+            let admission = broker.continuation_admission(session, &execution);
+            let executed = tokio::time::timeout(
                 self.limits.maximum_execution_time.unsigned_abs(),
                 Box::pin(self.runtime.execute_query_capability_page(
                     lease.principal_reference(),
@@ -2018,10 +2019,19 @@ impl OrmAiApplicationToolCallService {
                     execution.plan().clone(),
                     execution.continuation_cursor(),
                     invocation,
+                    Some(&admission),
                 )),
             )
             .await
-            .unwrap_or(Err(AiError::ToolExecutionFailed))?;
+            .unwrap_or(Err(AiError::ToolExecutionFailed));
+            // A continuation that expired or was evicted while the page was
+            // being admitted never executed: it is a stale selection.
+            if execution.continuation_refused() {
+                return Err(
+                    AiError::InvalidInput(crate::AI_CAPABILITY_SELECTION_STALE.to_owned()).into(),
+                );
+            }
+            let (result, page_info) = executed?;
             let continuation = broker
                 .record_continuation(session, &execution, &page_info)
                 .map_or(serde_json::Value::Null, |continuation| {

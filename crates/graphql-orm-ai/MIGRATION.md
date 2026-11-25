@@ -127,12 +127,17 @@ or data migration is needed.
 4. **Policy.** Browse sends each listed entry and its grouped roots to
    `authorize_discovery`, like discover. At `level: namespaces` that batch
    is the whole index set. A host with an expensive policy should override
-   `authorize_discovery`. Over a `with_maximum_discovery_authorizations`
-   bound, browse returns the empty page it returns for an unknown filter
-   rather than an error, so size the bound for your largest namespace.
+   `authorize_discovery`. Browse decides policy in batches of at most 256
+   decisions (or a lower `with_maximum_discovery_authorizations`) and stops
+   once the page is decided; it never returns an error for broad listings,
+   and `namespaces` entries carry no count.
 5. **Continuation budget and logging.** All handles of one chain share a
-   budget of 256 executions, reuse included. `ToolGraphqlRequest`'s `Debug`
-   output now lists variable names only, and the `Debug` output of the
+   budget of 256 executions, reuse included. A host that drives the broker
+   itself passes `continuation_admission` as the final admission of
+   `execute_query_capability_page` and answers `continuation_refused`
+   executions as stale. `ToolGraphqlRequest`'s `Debug` output now lists
+   variable names only, `ToolGraphqlResponse` redacts `data`, and the
+   `Debug` output of the
    broker session, executions, page info and compiled pages redacts
    cursors. A host executor receives a continued page's cursor in the
    request variables: do not log or forward them.

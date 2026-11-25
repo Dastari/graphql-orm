@@ -33,13 +33,17 @@ supersedes: []
   `AiCapabilityBrokerSession::continuation_count`,
   `AiRuntime::execute_query_capability_page`,
   `AiToolCatalog::query_capability_supports_continuation` and
-  `compile_query_capability_page`. Browse answers an over-bound, denied or
-  unknown filter with the same empty page, carries opaque
-  `candidateReference`s (accepted by describe) instead of fingerprints, and
-  never lists more than `limit` items. All handles of a chain share one
-  256-execution budget. Cursors are redacted from the `Debug` output of the
-  broker session, executions, page info, compiled pages and
-  `ToolGraphqlRequest` (variable names only). Fixed-broker discover and
+  `compile_query_capability_page`. Browse decides policy in bounded batches
+  until the page is decided, so its response is the admitted prefix whatever
+  hidden entries match; a denied and an unknown filter give the same empty
+  page. It carries run-fenced opaque `candidateReference`s (accepted by
+  describe) instead of fingerprints, and never lists more than `limit`
+  items. All handles issued from one first page share one 256-execution
+  budget, reserved before and returned on refusal, and a continued page is
+  admitted again immediately before the executor
+  (`continuation_admission`). Cursors are redacted from the `Debug` output
+  of the broker session, executions, page info, compiled pages,
+  `ToolGraphqlRequest` (variable names only) and `ToolGraphqlResponse`. Fixed-broker discover and
   describe results use version 3 disclosure contracts; client-deferred
   discovery is unchanged. The model-context benchmark reports browse result
   sizes. [Migration](MIGRATION.md#capability-broker-version-3-551)

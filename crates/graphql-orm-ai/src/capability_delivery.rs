@@ -63,6 +63,12 @@ pub const AI_CAPABILITY_CLIENT_DEFERRED_DISCOVERY_VERSION: u16 = 2;
 /// Largest page of one `browse` call, and its default.
 pub const AI_CAPABILITY_BROWSE_PAGE_MAXIMUM: u16 = 32;
 
+/// Most policy decisions one browse sends to
+/// [`AiCapabilityAuthorityPolicy::authorize_discovery`] in a single batch.
+/// A host's [`AiCapabilityDiscoveryBroker::with_maximum_discovery_authorizations`]
+/// lowers it. An entity with more grouped roots is decided alone.
+pub const AI_CAPABILITY_BROWSE_POLICY_BATCH: usize = 256;
+
 /// Largest `browse` offset: the most entries an index set can hold, so every
 /// `nextOffset` a browse returns is an accepted offset.
 pub const AI_CAPABILITY_BROWSE_MAXIMUM_OFFSET: u32 = 1_048_576;
@@ -1378,7 +1384,7 @@ impl AiCapabilityDiscoveryBroker {
             indexes.ranked_matches(query)?
         };
         ranked.retain(|candidate| admit(candidate.entry()));
-        let kept = Box::pin(self.admit_matches(&principal, run, &ranked, per_root)).await?;
+        let kept = Box::pin(self.admit_matches(&principal, run, &ranked, per_root, true)).await?;
         // Rank again on each entity's own metadata and its admitted roots,
         // so a denied root's text decides neither whether nor where its
         // entity appears. Per-root ranks depend on the root alone already.
@@ -1413,6 +1419,7 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         ranked: &[AiCapabilityRankedMatch<'a>],
         per_root: bool,
+        bounded: bool,
     ) -> Result<Vec<(AiCapabilityRankedMatch<'a>, BTreeSet<AiToolId>)>, AiError> {
         // One policy batch decides every match together with the entries it
         // depends on: an entity entry's grouped roots follow it, and in
@@ -1444,9 +1451,10 @@ impl AiCapabilityDiscoveryBroker {
             }
             slots.push((at, roots, entity_at));
         }
-        if self
-            .maximum_discovery_authorizations
-            .is_some_and(|maximum| batch.len() > maximum)
+        if bounded
+            && self
+                .maximum_discovery_authorizations
+                .is_some_and(|maximum| batch.len() > maximum)
         {
             return Err(AiError::InvalidInput(
                 AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
@@ -1994,8 +2002,9 @@ struct BrokerSessionState {
     searches: VecDeque<AiCapabilityIndexSetSearchResult>,
     loaded: VecDeque<(String, AiLoadedCapabilityBinding)>,
     continuations: VecDeque<(String, BrokerContinuation)>,
-    /// Opaque browse references: reference, capability and entry fingerprint.
-    browse_references: VecDeque<(String, AiToolId, String)>,
+    /// Opaque browse references: reference, capability, entry fingerprint
+    /// and the fence of the principal and run that received it.
+    browse_references: VecDeque<(String, AiToolId, String, String)>,
     deferred_installation_pending: bool,
     amplification: AiCapabilityBrokerAmplification,
 }
@@ -2221,7 +2230,7 @@ impl AiCapabilityBrokerSession {
     fn record_browse(
         &self,
         result: Option<AiCapabilityIndexSetSearchResult>,
-        references: Vec<(String, AiToolId, String)>,
+        references: Vec<(String, AiToolId, String, String)>,
     ) {
         let mut state = self.state();
         state.amplification.browse_calls = state.amplification.browse_calls.saturating_add(1);
@@ -2239,15 +2248,22 @@ impl AiCapabilityBrokerSession {
         }
     }
 
-    /// Entry fingerprint behind one opaque browse reference this run holds
-    /// for `capability_id`.
-    fn browse_reference(&self, capability_id: &AiToolId, reference: &str) -> Option<String> {
+    /// Entry fingerprint behind one opaque browse reference that this
+    /// session issued for `capability_id` under exactly `fence`.
+    fn browse_reference(
+        &self,
+        capability_id: &AiToolId,
+        reference: &str,
+        fence: &str,
+    ) -> Option<String> {
         self.state()
             .browse_references
             .iter()
             .rev()
-            .find(|(candidate, id, _)| candidate == reference && id == capability_id)
-            .map(|(_, _, fingerprint)| fingerprint.clone())
+            .find(|(candidate, id, _, issued)| {
+                candidate == reference && id == capability_id && issued == fence
+            })
+            .map(|(_, _, fingerprint, _)| fingerprint.clone())
     }
 
     fn record_continuation(&self, handle: String, continuation: BrokerContinuation) {
@@ -2432,6 +2448,25 @@ fn browse_candidate_value(
     value
 }
 
+/// Fence of one browse reference: the principal reference and the run,
+/// attempt and provider session it was issued to. A reference presented
+/// under any other binding, through a reused or cloned session, resolves
+/// nothing.
+fn browse_reference_fence(
+    principal_reference: &PrincipalReference,
+    run: &AiCapabilityRunBinding,
+) -> String {
+    hash_json(&json!({
+        "version": 1,
+        "principal": principal_reference_fingerprint(principal_reference),
+        "session": run.session_id,
+        "run": run.run_id,
+        "attempt": run.attempt_id,
+        "provider": run.provider_kind,
+        "providerSession": run.provider_session_fingerprint,
+    }))
+}
+
 fn valid_browse_name(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
@@ -2496,6 +2531,27 @@ impl ContinuationChain {
             )
             .is_ok()
     }
+
+    /// Returns one reserved execution that never reached the executor.
+    fn release(&self) {
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |used| used.checked_sub(1),
+        );
+    }
+}
+
+/// Server-held state of one continued page an execution carries: the
+/// cursor, its page number, the handle and its expiry, and whether the
+/// execution's reserved budget was returned on refusal.
+#[derive(Clone)]
+struct ContinuedPage {
+    cursor: String,
+    page: u16,
+    handle: String,
+    expires_at: OffsetDateTime,
+    released: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn valid_graphql_name(value: &str) -> bool {
@@ -2894,8 +2950,11 @@ pub struct AiCapabilityExecution {
     plan: serde_json::Value,
     operation_name: String,
     loaded_expires_at: OffsetDateTime,
-    /// Server-held cursor, page number and chain of a continued page.
-    continued: Option<(String, u16, ContinuationChain)>,
+    /// Budget of the continuation chain this execution belongs to, created
+    /// with the first page; `None` for a reviewed static tool.
+    chain: Option<ContinuationChain>,
+    /// Server-held state of a continued page.
+    continued: Option<ContinuedPage>,
 }
 
 impl std::fmt::Debug for AiCapabilityExecution {
@@ -2914,7 +2973,7 @@ impl std::fmt::Debug for AiCapabilityExecution {
                 &self
                     .continued
                     .as_ref()
-                    .map(|(_, page, _)| (REDACTED_CURSOR, page)),
+                    .map(|continued| (REDACTED_CURSOR, continued.page)),
             )
             .finish()
     }
@@ -3004,12 +3063,24 @@ impl AiCapabilityExecution {
     pub fn continuation_cursor(&self) -> Option<&str> {
         self.continued
             .as_ref()
-            .map(|(cursor, _, _)| cursor.as_str())
+            .map(|continued| continued.cursor.as_str())
+    }
+
+    /// Whether [`AiCapabilityDiscoveryBroker::continuation_admission`]
+    /// refused this continued page before it reached the executor.
+    pub fn continuation_refused(&self) -> bool {
+        self.continued.as_ref().is_some_and(|continued| {
+            continued
+                .released
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
     }
 
     /// One-based page number of this execution in its continuation chain.
     pub fn page_number(&self) -> u16 {
-        self.continued.as_ref().map_or(1, |(_, page, _)| *page)
+        self.continued
+            .as_ref()
+            .map_or(1, |continued| continued.page)
     }
 }
 
@@ -3366,22 +3437,61 @@ impl AiCapabilityDiscoveryBroker {
                 }
             }
         });
-        // Over the policy work bound, browse answers exactly as for a filter
-        // that matches nothing: an error here would depend on entries the
-        // principal may not see.
-        let batch = listed
-            .iter()
-            .map(|candidate| 1 + candidate.entry().operations.len())
-            .sum::<usize>();
-        if self
-            .maximum_discovery_authorizations
-            .is_some_and(|maximum| batch > maximum)
-        {
-            session.record_browse(None, Vec::new());
-            return Ok(empty_browse_page(parsed.level));
-        }
-        let kept = Box::pin(self.admit_matches(&principal, run, &listed, false)).await?;
+        // Policy decides the listed entries in order, in batches of at most
+        // `batch_size` decisions, and stops once the requested page is
+        // decided: the first `offset + limit + 1` admitted results. What is
+        // returned is therefore exactly the admitted prefix, whatever hidden
+        // entries the listing holds. Hidden entries change only how much
+        // policy work is done, never the response.
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let wanted = start.saturating_add(usize::from(limit)).saturating_add(1);
+        let batch_size = self
+            .maximum_discovery_authorizations
+            .unwrap_or(AI_CAPABILITY_BROWSE_POLICY_BATCH)
+            .clamp(1, AI_CAPABILITY_BROWSE_POLICY_BATCH);
+        let mut kept = Vec::new();
+        let mut found_namespaces = BTreeSet::<&str>::new();
+        let mut position = 0;
+        loop {
+            let decided = match parsed.level {
+                BrowseLevel::Namespaces => found_namespaces.len() >= wanted,
+                BrowseLevel::Capabilities => kept.len() >= wanted,
+                // Two admitted entities of one name are ambiguous.
+                BrowseLevel::Operations => kept.len() >= 2,
+            };
+            if decided || position >= listed.len() {
+                break;
+            }
+            let mut chunk = Vec::new();
+            let mut decisions = 0_usize;
+            while let Some(candidate) = listed.get(position) {
+                // A namespace already listed needs no further decisions.
+                if parsed.level == BrowseLevel::Namespaces
+                    && found_namespaces.contains(candidate.entry().namespace.as_str())
+                {
+                    position += 1;
+                    continue;
+                }
+                let size = 1 + candidate.entry().operations.len();
+                if !chunk.is_empty() && decisions + size > batch_size {
+                    break;
+                }
+                chunk.push(*candidate);
+                decisions += size;
+                position += 1;
+            }
+            if chunk.is_empty() {
+                break;
+            }
+            for admitted in
+                Box::pin(self.admit_matches(&principal, run, &chunk, false, false)).await?
+            {
+                if parsed.level == BrowseLevel::Namespaces {
+                    found_namespaces.insert(admitted.0.entry().namespace.as_str());
+                }
+                kept.push(admitted);
+            }
+        }
         let page = |total: usize| {
             let end = start.saturating_add(usize::from(limit)).min(total);
             let next = (end < total).then_some(end);
@@ -3392,7 +3502,9 @@ impl AiCapabilityDiscoveryBroker {
             .as_object_mut()
             .ok_or_else(|| AiError::InvalidConfiguration("browse result is invalid".to_owned()))?;
         // Listed capabilities carry an opaque per-run reference in place of
-        // their entry fingerprint; describe resolves it server-side.
+        // their entry fingerprint; describe resolves it server-side, only
+        // for the same principal and run.
+        let fence = browse_reference_fence(principal_reference, run);
         let mut references = Vec::new();
         let mut reference_for = |candidate: &crate::AiCapabilitySearchCandidate| {
             let reference = hash_json(&json!({
@@ -3404,28 +3516,24 @@ impl AiCapabilityDiscoveryBroker {
                 reference.clone(),
                 candidate.id.clone(),
                 candidate.entry_fingerprint.clone(),
+                fence.clone(),
             ));
             reference
         };
         let mut retained = Vec::new();
         match parsed.level {
             BrowseLevel::Namespaces => {
-                let mut namespaces = BTreeMap::<&str, usize>::new();
-                for (candidate, _) in &kept {
-                    *namespaces
-                        .entry(candidate.entry().namespace.as_str())
-                        .or_default() += 1;
-                }
-                let namespaces = namespaces.into_iter().collect::<Vec<_>>();
+                // Listed in namespace order: each namespace with at least one
+                // admitted capability, without a count, which would need
+                // every entry decided.
+                let namespaces = found_namespaces.into_iter().collect::<Vec<_>>();
                 let (range, next) = page(namespaces.len());
                 object.insert("nextOffset".to_owned(), json!(next));
                 object.insert(
                     "namespaces".to_owned(),
                     namespaces[range]
                         .iter()
-                        .map(
-                            |(namespace, count)| json!({"namespace": namespace, "capabilities": count}),
-                        )
+                        .map(|namespace| json!({"namespace": namespace}))
                         .collect(),
                 );
             }
@@ -3592,7 +3700,11 @@ impl AiCapabilityDiscoveryBroker {
         {
             (Some(fingerprint), None) if crate::valid_sha256(&fingerprint) => fingerprint,
             (None, Some(reference)) if crate::valid_sha256(&reference) => session
-                .browse_reference(&capability_id, &reference)
+                .browse_reference(
+                    &capability_id,
+                    &reference,
+                    &browse_reference_fence(principal_reference, run),
+                )
                 .ok_or_else(stale_selection)?,
             _ => return Err(malformed_broker_arguments()),
         };
@@ -3783,10 +3895,9 @@ impl AiCapabilityDiscoveryBroker {
         }
         let page = execution.page_number().checked_add(1)?;
         let now = self.clock.now();
-        let chain = execution
-            .continued
-            .as_ref()
-            .map_or_else(ContinuationChain::first_page, |(_, _, chain)| chain.clone());
+        // Every handle issued from one first-page execution, however often
+        // it is recorded, shares that execution's chain.
+        let chain = execution.chain.clone()?;
         if page > AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES
             || chain.exhausted()
             || now >= execution.loaded_expires_at
@@ -3987,6 +4098,7 @@ impl AiCapabilityDiscoveryBroker {
                 plan: plan_arguments,
                 operation_name: target.operation_name,
                 loaded_expires_at: loaded.expires_at,
+                chain: None,
                 continued: None,
             });
         }
@@ -4014,6 +4126,7 @@ impl AiCapabilityDiscoveryBroker {
             plan: serde_json::Value::Object(plan),
             operation_name: target.operation_name,
             loaded_expires_at: loaded.expires_at,
+            chain: Some(ContinuationChain::first_page()),
             continued: None,
         })
     }
@@ -4066,26 +4179,39 @@ impl AiCapabilityDiscoveryBroker {
         {
             return Err(invalid_operation());
         }
-        let operation = (loaded.capability_kind == AiCapabilityKind::GeneratedEntity)
-            .then_some(continuation.operation_name.as_str());
-        let target = self
-            .authorize_loaded_operation(principal_reference, run, loaded, operation)
-            .await?;
-        if target.capability_id != continuation.capability_id
-            || target.capability_fingerprint != continuation.capability_fingerprint
-            || target.capability_kind != AiCapabilityKind::GeneratedQuery
-        {
-            return Err(stale_capability());
-        }
-        // The policy checks awaited: the handle must still be retained and
-        // unexpired now, immediately before dispatch, and the chain must
-        // still have budget. Every handle of a chain draws on one budget.
-        if session.continuation(handle).is_none()
-            || self.clock.now() >= continuation.expires_at
-            || !continuation.chain.reserve()
-        {
+        // Reserve the execution first, so concurrent redemptions of one
+        // chain cannot overspend it, and return it on any refusal below.
+        // Every handle of a chain draws on one budget.
+        if !continuation.chain.reserve() {
             return Err(stale_selection());
         }
+        let checked = async {
+            let operation = (loaded.capability_kind == AiCapabilityKind::GeneratedEntity)
+                .then_some(continuation.operation_name.as_str());
+            let target = self
+                .authorize_loaded_operation(principal_reference, run, loaded, operation)
+                .await?;
+            if target.capability_id != continuation.capability_id
+                || target.capability_fingerprint != continuation.capability_fingerprint
+                || target.capability_kind != AiCapabilityKind::GeneratedQuery
+            {
+                return Err(stale_capability());
+            }
+            // The policy checks awaited: the handle must still be retained
+            // and unexpired now.
+            if !self.continuation_retained(session, handle, continuation.expires_at) {
+                return Err(stale_selection());
+            }
+            Ok(target)
+        }
+        .await;
+        let target = match checked {
+            Ok(target) => target,
+            Err(error) => {
+                continuation.chain.release();
+                return Err(error);
+            }
+        };
         session.record_execute();
         Ok(AiCapabilityExecution {
             capability_id: target.capability_id,
@@ -4095,8 +4221,56 @@ impl AiCapabilityDiscoveryBroker {
             plan: continuation.plan,
             operation_name: target.operation_name,
             loaded_expires_at: loaded.expires_at,
-            continued: Some((continuation.cursor, continuation.page, continuation.chain)),
+            chain: Some(continuation.chain),
+            continued: Some(ContinuedPage {
+                cursor: continuation.cursor,
+                page: continuation.page,
+                handle: handle.to_owned(),
+                expires_at: continuation.expires_at,
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
         })
+    }
+
+    fn continuation_retained(
+        &self,
+        session: &AiCapabilityBrokerSession,
+        handle: &str,
+        expires_at: OffsetDateTime,
+    ) -> bool {
+        session.continuation(handle).is_some() && self.clock.now() < expires_at
+    }
+
+    /// Final admission of one execution, for the executor to call after
+    /// host tool policy and the request context are built, immediately
+    /// before the resolver runs.
+    ///
+    /// A first page is always admitted. A continued page is admitted only
+    /// while its handle is still retained by `session` and unexpired; on
+    /// refusal its reserved chain execution is returned and
+    /// [`AiCapabilityExecution::continuation_refused`] reports it, so the
+    /// caller answers with [`AI_CAPABILITY_SELECTION_STALE`].
+    pub fn continuation_admission<'a>(
+        &'a self,
+        session: &'a AiCapabilityBrokerSession,
+        execution: &'a AiCapabilityExecution,
+    ) -> impl Fn() -> bool + Send + Sync + 'a {
+        move || {
+            let Some(continued) = &execution.continued else {
+                return true;
+            };
+            if self.continuation_retained(session, &continued.handle, continued.expires_at) {
+                return true;
+            }
+            if !continued
+                .released
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                && let Some(chain) = &execution.chain
+            {
+                chain.release();
+            }
+            false
+        }
     }
 }
 
@@ -8149,7 +8323,9 @@ mod tests {
         assert!(namespaces.get("indexFingerprint").is_none(), "{namespaces}");
         let listed = namespaces["namespaces"].as_array().expect("namespaces");
         assert_eq!(listed.len(), 1, "{namespaces}");
-        assert_eq!(listed[0]["capabilities"], 1);
+        // A namespace is listed without a count, which would need every
+        // entry decided.
+        assert_eq!(listed[0].as_object().map(|object| object.len()), Some(1));
         let namespace = listed[0]["namespace"]
             .as_str()
             .expect("namespace")
@@ -8341,7 +8517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browse_over_its_policy_bound_answers_as_for_an_unknown_filter() {
+    async fn browse_over_a_small_policy_batch_still_answers_and_denied_matches_unknown() {
         let mut fixture = EntityBrokerFixture::new();
         let namespace = fixture
             .browse(json!({"level": "namespaces"}))
@@ -8358,47 +8534,192 @@ mod tests {
             .await
             .expect("deep offset");
         assert_eq!(deep["capabilities"], json!([]));
+        let without_references = |mut page: serde_json::Value| {
+            for path in ["/capability", "/capabilities/0"] {
+                if let Some(object) = page.pointer_mut(path).and_then(|v| v.as_object_mut()) {
+                    object.remove("candidateReference");
+                }
+            }
+            page
+        };
+        let unbounded = without_references(
+            fixture
+                .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+                .await
+                .expect("unbounded"),
+        );
+        // The entity and its two roots are three decisions: a smaller
+        // policy batch decides them alone, with the same response.
         fixture.broker = fixture
             .broker
             .clone()
             .with_maximum_discovery_authorizations(2)
             .expect("bound");
-        // The entity and its two roots are three policy decisions: over the
-        // bound, every level answers exactly as for a filter that matches
-        // nothing, never with an error that hidden entries would decide.
+        let bounded = without_references(
+            fixture
+                .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+                .await
+                .expect("bounded"),
+        );
+        assert_eq!(bounded, unbounded);
+        // A denied entity answers exactly as an unknown one.
+        fixture.deny("GeneratedRecord");
+        fixture.deny("RecordBySubject");
         for level in ["capabilities", "operations"] {
-            let over = fixture
+            let denied = fixture
                 .browse(json!({"level": level, "namespace": namespace, "entity": "Record"}))
                 .await
-                .expect("over the bound");
+                .expect("denied");
             let unknown = fixture
                 .browse(json!({"level": level, "namespace": namespace, "entity": "Unknown"}))
                 .await
                 .expect("unknown");
-            assert_eq!(over, unknown, "{level}");
+            assert_eq!(denied, unknown, "{level}");
         }
-        let over = fixture
+    }
+
+    /// Browses a 40-tool catalogue in which only every seventh tool is
+    /// permitted, under one policy batch bound.
+    async fn browse_mixed_catalogue(
+        bound: Option<u32>,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let index = large_static_index(40);
+        let fingerprints = index
+            .entries()
+            .map(|entry| entry.capability_fingerprint.clone())
+            .collect::<Vec<_>>();
+        let permitted = index
+            .entries()
+            .enumerate()
+            .filter(|(position, _)| position % 7 == 6)
+            .map(|(_, entry)| entry.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let principal = principal();
+        let reference = principal.reference();
+        let mut broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            Arc::new(CurrentIndex(RwLock::new(index))),
+            Arc::new(PermittedSet::new(permitted.iter().map(String::as_str))),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        if let Some(bound) = bound {
+            broker = broker
+                .with_maximum_discovery_authorizations(bound)
+                .expect("bound");
+        }
+        let mut page = broker
+            .dispatch_browse(
+                &reference,
+                &run_binding(),
+                &brokering(&fingerprints),
+                &arguments,
+            )
+            .await
+            .expect("browse");
+        for candidate in page["capabilities"].as_array_mut().into_iter().flatten() {
+            candidate
+                .as_object_mut()
+                .expect("candidate")
+                .remove("candidateReference");
+        }
+        page
+    }
+
+    #[tokio::test]
+    async fn hidden_matches_never_change_what_browse_returns() {
+        let namespaces = browse_mixed_catalogue(None, json!({"level": "namespaces"})).await;
+        let namespace = namespaces["namespaces"][0]["namespace"].clone();
+        let mut pages = Vec::new();
+        for offset in [0, 2, 4] {
+            let arguments = json!({
+                "level": "capabilities",
+                "namespace": namespace,
+                "offset": offset,
+                "limit": 2,
+            });
+            let unbounded = browse_mixed_catalogue(None, arguments.clone()).await;
+            // However many hidden tools a policy batch can hold, the page
+            // is the same admitted prefix with the same nextOffset.
+            for bound in [1, 3, 64] {
+                assert_eq!(
+                    browse_mixed_catalogue(Some(bound), arguments.clone()).await,
+                    unbounded,
+                    "offset {offset}, bound {bound}"
+                );
+            }
+            pages.push(unbounded);
+        }
+        let ids = pages
+            .iter()
+            .flat_map(|page| page["capabilities"].as_array().cloned().unwrap_or_default())
+            .map(|candidate| candidate["capabilityId"].as_str().expect("id").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [6, 13, 20, 27, 34]
+                .map(|position| format!("catalogue.record_{position:04}"))
+                .to_vec()
+        );
+        assert_eq!(pages[0]["nextOffset"], 2);
+        assert_eq!(pages[1]["nextOffset"], 4);
+        assert_eq!(pages[2]["nextOffset"], serde_json::Value::Null);
+        for bound in [1, 3] {
+            assert_eq!(
+                browse_mixed_catalogue(Some(bound), json!({"level": "namespaces"})).await,
+                namespaces
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_references_resolve_only_for_the_issuing_run() {
+        let fixture = EntityBrokerFixture::new();
+        let namespace = fixture
             .browse(json!({"level": "namespaces"}))
             .await
-            .expect("namespaces over the bound");
-        assert_eq!(over["namespaces"], json!([]));
-        // Denied entries answer the same way under the bound.
-        fixture.deny("GeneratedRecord");
-        fixture.deny("RecordBySubject");
-        fixture.broker = fixture
+            .expect("namespaces")["namespaces"][0]["namespace"]
+            .clone();
+        let candidate = fixture
+            .browse(json!({"level": "capabilities", "namespace": namespace}))
+            .await
+            .expect("capabilities")["capabilities"][0]
+            .clone();
+        let arguments = json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateReference": candidate["candidateReference"],
+        });
+        // The same (cloned) session under another run or attempt resolves
+        // nothing.
+        let mut other_run = fixture.run.clone();
+        other_run.run_id = AiRunId::new();
+        let mut other_attempt = fixture.run.clone();
+        other_attempt.attempt_id = Uuid::new_v4();
+        for run in [other_run, other_attempt] {
+            let error = fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &run,
+                    &fixture.session.clone(),
+                    &arguments,
+                )
+                .await
+                .expect_err("another run");
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        }
+        fixture
             .broker
-            .clone()
-            .with_maximum_discovery_authorizations(3)
-            .expect("bound");
-        let denied = fixture
-            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Record"}))
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &arguments,
+            )
             .await
-            .expect("denied");
-        let unknown = fixture
-            .browse(json!({"level": "operations", "namespace": namespace, "entity": "Unknown"}))
-            .await
-            .expect("unknown");
-        assert_eq!(denied, unknown);
+            .expect("issuing run");
     }
 
     /// Describes the entity and authorizes one first page of `operation`.
@@ -8793,5 +9114,110 @@ mod tests {
             assert!(!debug.contains(cursor), "{debug}");
         }
         assert!(format!("{continued:?}").contains("redacted"));
+    }
+
+    #[tokio::test]
+    async fn executor_admission_refuses_an_evicted_or_expired_page_and_returns_its_budget() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        // A first page is always admitted.
+        assert!(fixture
+            .broker
+            .continuation_admission(&fixture.session, &first)(
+        ));
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let arguments = json!({
+            "loadedReference": described.loaded_reference(),
+            "continuation": continuation.handle(),
+        });
+        let admitted = fixture
+            .execute(arguments.clone())
+            .await
+            .expect("authorized");
+        assert!(fixture
+            .broker
+            .continuation_admission(&fixture.session, &admitted)(
+        ));
+        assert!(!admitted.continuation_refused());
+
+        // Evicted after authorization: refused at admission, once.
+        let evicting = fixture
+            .execute(arguments.clone())
+            .await
+            .expect("authorized");
+        let chain_used = |execution: &AiCapabilityExecution| {
+            execution
+                .chain
+                .as_ref()
+                .expect("chain")
+                .0
+                .load(Ordering::SeqCst)
+        };
+        let before = chain_used(&evicting);
+        for page in 0..AI_CAPABILITY_MAXIMUM_CONTINUATIONS {
+            fixture
+                .broker
+                .record_continuation(&fixture.session, &first, &more(&format!("evict-{page}")))
+                .expect("continuation");
+        }
+        let admission = fixture
+            .broker
+            .continuation_admission(&fixture.session, &evicting);
+        assert!(!admission());
+        assert!(!admission());
+        assert!(evicting.continuation_refused());
+        // The refused execution's reservation was returned, exactly once.
+        assert_eq!(chain_used(&evicting), before - 1);
+
+        // Expired after authorization: refused at admission too.
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-2"))
+            .expect("continuation");
+        let expiring = fixture
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("authorized");
+        fixture.clock.advance_seconds(30);
+        assert!(!fixture
+            .broker
+            .continuation_admission(&fixture.session, &expiring)(
+        ));
+        assert!(expiring.continuation_refused());
+    }
+
+    #[tokio::test]
+    async fn recording_one_first_page_twice_shares_one_chain_budget() {
+        let fixture = EntityBrokerFixture::new();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let handles = (0..2)
+            .map(|page| {
+                fixture
+                    .broker
+                    .record_continuation(&fixture.session, &first, &more(&format!("cursor-{page}")))
+                    .expect("continuation")
+            })
+            .collect::<Vec<_>>();
+        let mut redeemed = 0;
+        'redeem: loop {
+            for handle in &handles {
+                let execute = json!({
+                    "loadedReference": described.loaded_reference(),
+                    "continuation": handle.handle(),
+                });
+                if fixture.execute(execute).await.is_err() {
+                    break 'redeem;
+                }
+                redeemed += 1;
+            }
+        }
+        assert_eq!(redeemed, AI_CAPABILITY_MAXIMUM_CONTINUATION_PAGES - 1);
     }
 }

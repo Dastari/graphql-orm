@@ -696,6 +696,12 @@ impl AiRuntime {
     /// position, and the resolver applies its authorization and row policy
     /// to every page.
     ///
+    /// `final_admission`, when given, runs after host tool policy and the
+    /// request context are built, immediately before the executor; a
+    /// refusal fails the call before execution. The broker passes
+    /// [`crate::AiCapabilityDiscoveryBroker::continuation_admission`] so a
+    /// continuation that expired or was evicted meanwhile never executes.
+    ///
     /// # Errors
     ///
     /// Fails closed as [`Self::execute_query_capability`] does, for a root
@@ -708,6 +714,7 @@ impl AiRuntime {
         plan: serde_json::Value,
         after: Option<&str>,
         invocation: GraphqlInvocationContext,
+        final_admission: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> Result<(AiToolExecutionResult, crate::AiGraphqlQueryPageInfo), AiError> {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
@@ -747,12 +754,13 @@ impl AiRuntime {
         };
         let (mut response, authorization) = self
             .tool_bridge
-            .execute_generated_query(
+            .execute_generated_query_admitted(
                 principal_reference,
                 capability_id,
                 capability_fingerprint,
                 &descriptor,
                 request,
+                final_admission,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;

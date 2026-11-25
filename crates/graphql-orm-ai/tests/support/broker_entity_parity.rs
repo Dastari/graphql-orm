@@ -584,12 +584,19 @@ pub async fn keyset_continuation_round_trip(database: Database) {
             .await;
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let mut data = response.data.into_json().expect("data");
+        let raw_response = ToolGraphqlResponse {
+            data: data.clone(),
+            error_codes: Vec::new(),
+            application_audit_ref: None,
+        };
         let page_info = compiled
             .take_page_info(&mut data)
             .expect("page info")
             .expect("a page reports its page info");
         if let Some(cursor) = page_info.end_cursor.as_deref() {
+            assert!(raw_response.data.to_string().contains(cursor));
             assert!(!format!("{page_info:?}").contains(cursor));
+            assert!(!format!("{raw_response:?}").contains(cursor));
         }
         // What remains is exactly the disclosed shape: no cursor.
         assert!(!data.to_string().contains("pageInfo"), "{data}");
