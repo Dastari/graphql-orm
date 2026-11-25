@@ -88,7 +88,10 @@ Use `..` in destructuring patterns. SQL Server plans now distinguish an
 index with `INCLUDE` columns from a plain declaration. Expect new mismatch
 reports and, on managed tables, destructive replacement steps. To keep
 a covering index in the target, declare its included columns with
-`IndexDef::with_included_columns` or set `IndexModel::included_columns`.
+`IndexDef::with_included_columns` or set `IndexModel::included_columns`. Entity derives cannot
+declare included columns yet: if an administrator added `INCLUDE` columns to an
+index that a derived entity also declares, either patch the `SchemaModel`
+before planning or accept the destructive replacement.
 
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 
