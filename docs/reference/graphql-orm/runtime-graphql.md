@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-24
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -101,13 +101,6 @@ coordinate. This covers collection roots, `node`, generated and link mutations,
 `RuntimeHostField` roots and live `…Changed` subscriptions. A host-owned
 `subscription_root` keeps its own guards.
 
-Not yet covered ([#902](https://github.com/Dastari/graphql-orm/issues/902)):
-runtime `node(id:)` checks only `Query.node`, and runtime child layers do not
-check the target collection's query roots. Generated Federation `_entities`
-checks only the entity's get-by-id root. Until that is fixed, require
-`Query.node`, which covers every runtime collection, or enforce step-up inside
-`RuntimeReadAuthority`, which sees each layer.
-
 Query and mutation operations are checked before request preparation. The
 request guard expands the operation's root selection, including aliases,
 named and inline fragments and evaluated `@skip`/`@include`, and evaluates
@@ -120,8 +113,16 @@ error code and shape. Other roots in the same operation run as before. Each
 root's resolver then checks again, as defence in depth. Live subscriptions
 are checked by their resolver before registration.
 
-The evaluator therefore runs twice for a query or mutation root, and a root
-runs only if both evaluations admit it:
+The planner also checks the target collection's query roots for a resolved
+`node(NodeId: …)` and each relation layer. A requirement on the collection's
+configured list root applies to these reads, including relation filters and
+relations in mutation or live subscription payloads. A refusal stops the
+affected root before any database read, existence check, count or host read
+authorization. Unregistered query coordinates pass. A live subscription checks
+its target layers before registration.
+
+The evaluator runs twice for a query or mutation's own root coordinate, and
+the root runs only if both evaluations admit it:
 
 - A refusal from the pre-pass stands even if the resolver's check would admit
   the root.
@@ -135,9 +136,9 @@ An evaluator must decide from its `AssuranceCheck` without side effects.
 Install `AssuranceEnforcement` and every evaluator input in schema data
 (`composer.data`), request data or session data. The pre-pass runs in an
 extension hook and sees only those. Data another extension passes to
-`NextExecute::run_with_data` is visible to the resolver's check alone. A root
-whose enforcement arrives that way is still refused by its resolver, but only
-after request preparation has read.
+`NextExecute::run_with_data` is visible only to the resolver's own coordinate
+check, which runs after request preparation. Target query requirements need
+to be available to the pre-pass.
 
 Register the roots before building the registry, so hosts can require or
 exempt them:

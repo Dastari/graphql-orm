@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,13 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## Unreleased - ORM/macros 0.219.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
 
 ## Unreleased - ORM/macros 0.218.0
 

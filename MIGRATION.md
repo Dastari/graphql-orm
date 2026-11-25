@@ -3,12 +3,23 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.218.0 to 0.219.0: Indirect query assurance
+
+**Action needed.** If you require assurance on a runtime collection query or
+a generated entity query, handle `STEP_UP_REQUIRED` on indirect reads of the
+same data. Runtime node lookups and relation layers, including mutation payload
+relations, now check the target collection's query requirements before database
+access. Generated Federation `_entities` checks every enabled query root for the
+entity, in addition to its existing single-read and `_entities` checks.
+Complete step-up before retrying a refused request. Hosts without query assurance
+can upgrade without changing their queries or policies.
 
 ## 0.217.0 to 0.218.0: server-only relation join keys
 
@@ -34,11 +45,8 @@ If a relation field in a mutation result needs step-up, refresh it with a
 separate query since the mutation may already have committed. Upgrade ORM
 and macros together.
 
-The runtime GraphQL composer is not covered yet: runtime `node(id:)` checks
-only `Query.node`, runtime child layers do not check the target collection's
-roots, and generated `_entities` checks only get-by-id. Require `Query.node`
-or enforce step-up in `RuntimeReadAuthority` meanwhile
-([#902](https://github.com/Dastari/graphql-orm/issues/902)).
+Runtime `node`, runtime child layers and generated `_entities` are covered from
+0.219.0; see [Indirect query assurance](#02180-to-02190-indirect-query-assurance).
 
 ## Operation catalogue 0.15.0
 

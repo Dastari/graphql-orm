@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-24
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -131,10 +131,12 @@ preserves existing schemas.
 Enforcement keys on exact root coordinates. A resolver that runs below a
 root passes the applicable coordinates to `enforce_operation_assurance`.
 Generated Federation entity resolvers, emitted for an entity's
-`federation_key`, run below `_entities`: they enforce the entity's get-by-id
-query root and any classification registered for `_entities`. A handwritten
-`#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
-dependent deletes use their own delete root.
+`federation_key` or `node_id`, run below `_entities`. After resolver auth and
+single-read scopes, they enforce the entity's get-by-id coordinate, every
+enabled generated query root for the entity, and any classification registered
+for `_entities`. All required policies must pass before a database lookup.
+A handwritten `#[graphql(entity)]` resolver gets no assurance check from the
+ORM. Generated dependent deletes use their own delete root.
 
 ## Generated Relation Traversal
 
@@ -160,14 +162,14 @@ or resolver callback. The resolver repeats the check as defence in depth and
 returns the pre-pass refusal. Subscriptions are checked before registration. `RuntimeGraphqlComposer::register_assurance_operations` adds
 module roots as `runtime` origin operations and host fields as `custom`
 operations. Coordinates the builder already holds keep their registration.
-See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
 
-Not yet covered ([#902](https://github.com/Dastari/graphql-orm/issues/902)):
-runtime `node(id:)` checks only `Query.node`, runtime child layers do not check
-the target collection's query roots, and generated Federation `_entities`
-checks only the entity's get-by-id root. Until that is fixed, require
-`Query.node` (it covers every runtime collection) or enforce step-up inside
-`RuntimeReadAuthority`, which sees each layer.
+The planner also enforces the target collection's query roots for a resolved
+`node` lookup and for each relation layer. These checks use the configured
+query names, and a requirement on any one of them applies to the indirect read.
+This includes relation filters and relations selected in mutation and live
+subscription payloads. The check precedes database admission and host read
+authorization for the affected root. Unregistered query coordinates pass.
+See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
 
 ## Authoritative Server Enforcement
 
