@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.164.0
+
+- SQL Server run candidate reads use the ORM's generated exact string filters
+  to seek on the run-state indexes (#867). SQL text changes for all opted-in
+  exact string comparisons. See the [migration guidance](MIGRATION.md#01630-to-01640)
+  for plan guides, Query Store forced plans, and live column drift.
+
 ## Unreleased - 0.163.0
 
 - **No action (#816).** Existing skill versions that exceed the schema depth

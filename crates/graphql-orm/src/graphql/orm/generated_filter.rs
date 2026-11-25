@@ -100,24 +100,59 @@ pub fn __gom_render_exact_mssql_string_filter(
     conditions: &mut Vec<String>,
     values: &mut Vec<SqlValue>,
 ) {
-    let mut equal = |value: &String| {
+    render_exact_mssql_string_filter(f, backend, column, conditions, values, false);
+}
+
+/// Add seek predicates to exact filters on a declared SQL Server BIN2 Unicode column.
+#[doc(hidden)]
+pub fn __gom_render_bin2_mssql_string_filter(
+    f: &StringFilter,
+    backend: DatabaseBackend,
+    column: &str,
+    conditions: &mut Vec<String>,
+    values: &mut Vec<SqlValue>,
+) {
+    render_exact_mssql_string_filter(f, backend, column, conditions, values, true);
+}
+
+fn render_exact_mssql_string_filter(
+    f: &StringFilter,
+    backend: DatabaseBackend,
+    column: &str,
+    conditions: &mut Vec<String>,
+    values: &mut Vec<SqlValue>,
+    seek: bool,
+) {
+    let mut equal = |value: &String, seek: bool| {
         let value_bind = backend.placeholder(values.len() + 1);
-        let length_bind = backend.placeholder(values.len() + 2);
-        values.extend([
-            SqlValue::String(value.clone()),
-            SqlValue::String(value.clone()),
-        ]);
-        // SQL Server pads operands before equality, including under BIN2.
-        // The separate length predicate distinguishes trailing spaces.
+        // Keep both the residual and the bare seek bind as SqlValue::String
+        // (NVARCHAR), even if the live column has drifted to VARCHAR.
+        values.push(SqlValue::String(value.clone()));
+        let unicode_column = format!("CONVERT(nvarchar(max), {column})");
+        if seek {
+            // SQL Server pads operands for equality even under BIN2. A
+            // non-space suffix makes trailing spaces significant. MAX keeps
+            // the suffix from being truncated at the 4,000-code-unit limit.
+            // CASE keeps a NULL column UNKNOWN under NOT even when the session
+            // treats NULL as an empty string in concatenation. Binds are non-NULL.
+            return format!(
+                "((CASE WHEN {column} IS NOT NULL THEN {unicode_column} + N'.' END) COLLATE Latin1_General_100_BIN2 = CONVERT(nvarchar(max), {value_bind}) + N'.')"
+            );
+        }
+        let length_bind = backend.placeholder(values.len() + 1);
+        values.push(SqlValue::String(value.clone()));
+        // The explicit collation on the Unicode bind wins the comparison.
+        // This lets SQL Server promote VARCHAR using the column's code page
+        // before comparing. DATALENGTH needs an explicit Unicode conversion.
         format!(
-            "({column} COLLATE Latin1_General_100_BIN2 = {value_bind} AND DATALENGTH({column}) = DATALENGTH({length_bind}))"
+            "({column} = {value_bind} COLLATE Latin1_General_100_BIN2 AND DATALENGTH({unicode_column}) = DATALENGTH({length_bind}))"
         )
     };
     if let Some(value) = &f.eq {
-        conditions.push(equal(value));
+        conditions.push(equal(value, seek));
     }
     if let Some(value) = &f.ne {
-        conditions.push(format!("NOT {}", equal(value)));
+        conditions.push(format!("NOT {}", equal(value, false)));
     }
     for (list, negated) in [(&f.in_list, false), (&f.not_in, true)] {
         if let Some(list) = list {
@@ -126,16 +161,28 @@ pub fn __gom_render_exact_mssql_string_filter(
                     conditions.push("1 = 0".to_owned());
                 }
             } else {
-                let comparisons = list.iter().map(&mut equal).collect::<Vec<_>>().join(" OR ");
+                let comparisons = list
+                    .iter()
+                    .map(|value| equal(value, seek && !negated))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
                 let not = if negated { "NOT " } else { "" };
                 conditions.push(format!("{not}({comparisons})"));
             }
         }
     }
     let mut remaining = f.clone();
-    remaining.eq = None;
+    // The bare Unicode column's implicit collation wins over the parameter's
+    // coercible-default collation. The residual BIN2 comparison enforces
+    // exactness. With a NULL column, both comparisons stay UNKNOWN, including
+    // under NOT.
+    if !seek {
+        remaining.eq = None;
+        remaining.in_list = None;
+    } else if remaining.in_list.as_ref().is_some_and(Vec::is_empty) {
+        remaining.in_list = None; // The exact branch already emitted 1 = 0.
+    }
     remaining.ne = None;
-    remaining.in_list = None;
     remaining.not_in = None;
     __gom_render_string_filter(&remaining, backend, column, "", conditions, values);
 }

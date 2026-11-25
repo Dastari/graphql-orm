@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.223.0 lets SQL Server seek on BIN2 Unicode key columns when using
+generated exact string filters (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
 Version 0.222.0 lets a generated upsert bind a private conflict key from the
 verified request, carry a typed transient input for its transform and hooks,
 and acknowledge a retry without writing.

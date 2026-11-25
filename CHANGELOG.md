@@ -14,6 +14,18 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.223.0
+
+- **Fixed (#867).** Generated exact SQL Server equality and membership filters
+  include a seek predicate for Unicode key columns declared with BIN2 collation.
+  SQL text changes for all opted-in exact comparisons, including non-BIN2
+  columns, `ne` and `not_in`, and the AI crate's opted-in entities. Review
+  SQL Server plan guides and Query Store forced plans that match by statement
+  text. The exactness check always uses Unicode. On a live `VARCHAR` column
+  declared as Unicode, exact filters and read policies now accept true matches
+  that the old byte-length check rejected and reject padded false matches.
+  [Migration](MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
 ## Unreleased - ORM/macros 0.222.0
 
 - **Added (#908).** A generated GraphQL upsert can take a private conflict key

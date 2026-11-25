@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.223.0 selects the ORM's seek-capable exact string filter renderer for
+declared SQL Server BIN2 Unicode key columns (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
 Version 0.222.0 adds the `upsert_bound_key`, `transient_input` and
 `upsert_acknowledge` entity options.
 See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).

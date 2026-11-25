@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.164.0 uses the ORM's exact string filters to seek on SQL Server run-state
+indexes (#867). See the [migration guide](MIGRATION.md#01630-to-01640).
+
 AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
 provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.
 Editing a reported profile requires correcting its URL. See the
