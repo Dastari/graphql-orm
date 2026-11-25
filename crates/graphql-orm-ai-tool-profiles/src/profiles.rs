@@ -1334,11 +1334,12 @@ impl FinishedSchema {
                             }
                         }
                         if !field.node.selection_set.node.items.is_empty() {
-                            walk(
-                                schema,
-                                named_type(&schema_field.ty)?,
-                                &field.node.selection_set.node,
-                            )?;
+                            // The innermost named type, through any list
+                            // and non-null wrappers.
+                            let inner = schema_field.ty.trim_matches(|c: char| {
+                                matches!(c, '[' | ']' | '!') || c.is_whitespace()
+                            });
+                            walk(schema, inner, &field.node.selection_set.node)?;
                         }
                     }
                     Selection::InlineFragment(fragment) => {
@@ -2197,6 +2198,36 @@ mod transient_admission_tests {
         type Mutation { changeRecord(value: String! @transientInput): Record! }
         type Record { id: ID! }
     "#;
+
+    /// The document walk follows list and non-null wrappers and finds a
+    /// transient argument at any depth.
+    #[test]
+    fn transient_argument_uses_are_found_at_any_depth() {
+        let schema = FinishedSchema::parse(
+            r#"
+            schema { query: Query }
+            type Query { records(filter: String @transientInput, page: Int): [Record!]! }
+            type Record { id: ID! children(proof: String @transientInput, page: Int): [Record!] }
+            "#,
+        )
+        .unwrap();
+        let check = |document: &str| {
+            schema.refuse_transient_argument_uses(AiGraphqlRootType::Query, document)
+        };
+        check("{ records(page: 1) { id __typename children(page: 2) { id children { id } } } }")
+            .unwrap();
+        for document in [
+            "{ records(filter: \"x\") { id } }",
+            "query($f: String) { records(filter: $f) { id } }",
+            "{ records(page: 1) { children(proof: \"x\") { id } } }",
+            "{ records { children { children(proof: \"x\") { id } } } }",
+            "{ records { ... on Record { children(proof: \"x\") { id } } } }",
+            "{ records { ...Fields } } fragment Fields on Record { id }",
+            "{ records { unknown } }",
+        ] {
+            assert!(check(document).is_err(), "{document}");
+        }
+    }
 
     /// A manifest is data. One written by a compiler that did not know the
     /// marker can map a transient argument, and can be sealed consistently
