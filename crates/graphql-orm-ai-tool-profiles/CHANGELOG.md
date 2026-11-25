@@ -10,6 +10,18 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.31.0
+
+- **No action (#817).** Add content-free endpoint validation reasons to the
+  shared AI error contract for provider profile saves and reports. [Migration](MIGRATION.md#0310-provider-endpoint-path-error)
+
+## Unreleased - 0.30.0
+
+- Validate filter roles and index generated-input ownership once per target
+  when compiling capability catalogues (#865). Capability fingerprints,
+  plan schemas and model-facing output stay byte-identical.
+  [Migration](MIGRATION.md#0300-capability-catalogue-compilation)
+
 ## Unreleased - 0.29.0
 
 - Generated keyset-list plans now accept the page limit injected by the

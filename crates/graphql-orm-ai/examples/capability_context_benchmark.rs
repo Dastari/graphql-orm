@@ -26,8 +26,13 @@
 //! 10 families, 60 entities). Each point runs in its own child process so
 //! its peak memory is its own; at 100 targets that is about 7.3 GiB, since
 //! compiled wide-entity roots take about 1.2 MiB each.
+//! `--compile-target <families>` and `--compile-federated <targets>` report
+//! the same startup timings without the broker calls.
 //! Byte sizes are deterministic; times compare only between runs of the
 //! same build profile on the same machine. Approximate tokens are bytes / 4.
+//! Run `--contract 2` on both revisions and compare stdout with `cmp` to
+//! check catalogue, definition and describe output bytes. The snapshot
+//! replaces the per-session loaded reference with a fixed value.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -479,14 +484,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     match arguments.as_slice() {
-        [flag, targets] if flag == "--point" => {
-            let point = runtime.block_on(measure_federated(targets.parse()?))?;
+        [flag, targets] if matches!(flag.as_str(), "--point" | "--compile-federated") => {
+            let point = runtime.block_on(measure_federated(
+                targets.parse()?,
+                flag == "--compile-federated",
+            ))?;
             println!("{point}");
             return Ok(());
         }
-        [flag, families] if flag == "--single-target" => {
-            let point = runtime.block_on(measure_single_target(families.parse()?))?;
+        [flag, families] if matches!(flag.as_str(), "--single-target" | "--compile-target") => {
+            let point = runtime.block_on(measure_single_target(
+                families.parse()?,
+                flag == "--compile-target",
+            ))?;
             println!("{point}");
+            return Ok(());
+        }
+        [flag, families] if flag == "--contract" => {
+            let snapshot = runtime.block_on(contract_snapshot(families.parse()?))?;
+            serde_json::to_writer(std::io::stdout().lock(), &snapshot)?;
             return Ok(());
         }
         _ => {}
@@ -1051,6 +1067,7 @@ async fn broker_round_trips(
     broker: &AiCapabilityDiscoveryBroker,
     families: &[String],
     catalog: &AiToolCatalog,
+    mut snapshot: Option<&mut Vec<Value>>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let reference = principal().reference();
     let run = run_binding();
@@ -1139,6 +1156,11 @@ async fn broker_round_trips(
         let model_result = production_describe(catalog, description.clone(), limits)?;
         describe_micros.push(elapsed_micros(started));
         describe_bytes.push(bytes(&model_result));
+        if let Some(snapshot) = snapshot.as_deref_mut() {
+            let mut model_result = model_result;
+            model_result["loadedReference"] = json!("0".repeat(64));
+            snapshot.push(model_result);
+        }
         // The same entity described again, as a later turn would.
         let started = Instant::now();
         let again = broker
@@ -1196,7 +1218,12 @@ async fn broker_round_trips(
                     .and_then(|request| production_type_page(catalog, &request, limits));
                 type_page_micros.push(elapsed_micros(started));
                 match page {
-                    Ok(page) => type_page_bytes.push(bytes(&page)),
+                    Ok(page) => {
+                        type_page_bytes.push(bytes(&page));
+                        if let Some(snapshot) = snapshot.as_deref_mut() {
+                            snapshot.push(page);
+                        }
+                    }
                     Err(AiError::InvalidInput(message)) if message == TYPE_PAGE_OVER_CEILING => {
                         pages_over_ceiling += 1;
                     }
@@ -1239,7 +1266,13 @@ async fn broker_round_trips(
     }))
 }
 
-async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::Error>> {
+async fn measure_federated(
+    targets: usize,
+    compile_only: bool,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    if targets == 0 {
+        return Err("the benchmark needs at least one target".into());
+    }
     let template = template().await?;
     let families = (0..targets)
         .map(|target| {
@@ -1321,6 +1354,19 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
         .indexes()
         .map(|index| index.entries().len())
         .sum::<usize>();
+    let mut startup = json!({
+        "firstTargetCompileMicroseconds": first_target_micros,
+        "remainingTargetsCompileMicroseconds": compile_micros,
+        "compileThreads": threads,
+        "indexSetCompileMicroseconds": set_compile_micros,
+    });
+    if compile_only {
+        return Ok(json!({
+            "targets": targets,
+            "roots": roots,
+            "startup": startup,
+        }));
+    }
     let eager_bytes = catalog
         .query_capabilities()
         .map(|capability| {
@@ -1339,6 +1385,7 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
         &broker(Arc::new(CachedSet(Arc::clone(&set))), None)?,
         &all_families,
         &catalog,
+        None,
     )
     .await?;
 
@@ -1366,6 +1413,7 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
     revised[0] = compile_target(&template, 0, &families[0], true, LARGE_INDEX_LIMITS)?.index;
     let revised_set = AiCapabilityIndexSet::compile_with_limits(revised, LARGE_SET_LIMITS)?;
 
+    startup["peakResidentKibibytes"] = json!(peak_resident_kibibytes());
     let mut report = json!({
         "targets": targets,
         "entities": targets * FAMILIES_PER_TARGET * 6,
@@ -1399,13 +1447,7 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
             "fixedBrokerBindingChanged": fixed_broker_binding(set.fingerprint())? != fixed_broker_binding(revised_set.fingerprint())?,
             "eagerBindingChanged": binding(AiCapabilityDeliveryMode::EagerExact, set.fingerprint())? != binding(AiCapabilityDeliveryMode::EagerExact, revised_set.fingerprint())?,
         },
-        "startup": {
-            "firstTargetCompileMicroseconds": first_target_micros,
-            "remainingTargetsCompileMicroseconds": compile_micros,
-            "compileThreads": threads,
-            "indexSetCompileMicroseconds": set_compile_micros,
-            "peakResidentKibibytes": peak_resident_kibibytes(),
-        },
+        "startup": startup,
     });
     if let (Some(report), Some(round_trips)) = (report.as_object_mut(), round_trips.as_object()) {
         report.extend(round_trips.clone());
@@ -1416,14 +1458,30 @@ async fn measure_federated(targets: usize) -> Result<Value, Box<dyn std::error::
 /// One large target supplied through the single-index path, compared with
 /// the same index supplied as a host-cached set. A first pass meets cold
 /// per-capability caches; both hosts are then measured warm.
-async fn measure_single_target(families: usize) -> Result<Value, Box<dyn std::error::Error>> {
+async fn measure_single_target(
+    families: usize,
+    compile_only: bool,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    if families == 0 {
+        return Err("the benchmark needs at least one family".into());
+    }
     let template = template().await?;
     let names = (0..families)
         .map(|family| family_name(0, family))
         .collect::<Vec<_>>();
     let started = Instant::now();
-    let target = compile_target(&template, 0, &names, false, LARGE_INDEX_LIMITS)?;
+    let target = compile_target(&template, 0, &names, false, LARGE_INDEX_LIMITS);
     let compile_micros = elapsed_micros(started);
+    if compile_only && target.is_err() {
+        eprintln!("target compilation failed after {compile_micros} microseconds");
+    }
+    let target = target?;
+    if compile_only {
+        return Ok(json!({
+            "roots": target.catalogue.capabilities().count(),
+            "targetCompileMicroseconds": compile_micros,
+        }));
+    }
     let mut catalog = AiToolCatalog::new();
     catalog.register_query_capability_catalog(&target.catalogue)?;
     let roots = catalog.query_capabilities().count();
@@ -1436,9 +1494,9 @@ async fn measure_single_target(families: usize) -> Result<Value, Box<dyn std::er
     // The first pass meets cold per-capability caches: its describe is each
     // capability's first. Both hosts are then measured on equally warm
     // caches, the single-index host first and the cached-set host second.
-    let cold_trips = broker_round_trips(&single, &names, &catalog).await?;
-    let single_trips = broker_round_trips(&single, &names, &catalog).await?;
-    let cached_trips = broker_round_trips(&cached, &names, &catalog).await?;
+    let cold_trips = broker_round_trips(&single, &names, &catalog, None).await?;
+    let single_trips = broker_round_trips(&single, &names, &catalog, None).await?;
+    let cached_trips = broker_round_trips(&cached, &names, &catalog, None).await?;
     let host = |trips: &Value| {
         json!({
             "discoverMicrosecondsP50": trips["discover"]["microsecondsP50"],
@@ -1460,6 +1518,52 @@ async fn measure_single_target(families: usize) -> Result<Value, Box<dyn std::er
         "describe": cold_trips["describe"],
         "describeType": cold_trips["describeType"],
         "peakResidentKibibytes": peak_resident_kibibytes(),
+    }))
+}
+
+/// Captures deterministic catalogue and model-facing bytes for paired builds.
+async fn contract_snapshot(families: usize) -> Result<Value, Box<dyn std::error::Error>> {
+    if families == 0 {
+        return Err("the contract snapshot needs at least one family".into());
+    }
+    let template = template().await?;
+    let names = (0..families)
+        .map(|family| family_name(0, family))
+        .collect::<Vec<_>>();
+    let target = compile_target(&template, 0, &names, false, LARGE_INDEX_LIMITS)?;
+    if !target.catalogue.diagnostics().is_empty()
+        || !target.catalogue.excluded_capabilities().is_empty()
+    {
+        return Err("the contract fixture must include every capability".into());
+    }
+    let mut catalog = AiToolCatalog::new();
+    catalog.register_query_capability_catalog(&target.catalogue)?;
+    let capabilities = catalog
+        .query_capabilities()
+        .map(|capability| {
+            let id = capability.id();
+            let definition =
+                catalog.query_capability_model_definition(id, capability_provider_alias(id))?;
+            Ok(json!({
+                "definition": definition,
+                "executionSchema": capability.argument_schema(),
+            }))
+        })
+        .collect::<Result<Vec<_>, AiError>>()?;
+    let mut describe_results = Vec::new();
+    let broker = broker(Arc::new(SingleIndex(Arc::clone(&target.index))), None)?;
+    let trips = broker_round_trips(&broker, &names, &catalog, Some(&mut describe_results)).await?;
+    if trips["describeType"]["errors"] != json!([])
+        || trips["describeType"]["pagesOverCeiling"] != json!(0)
+    {
+        return Err("contract fixture failed to render describe_type pages".into());
+    }
+    Ok(json!({
+        "catalogueFingerprint": target.catalogue.fingerprint(),
+        "index": &*target.index,
+        "brokerDefinitions": capability_broker_definitions(),
+        "capabilities": capabilities,
+        "describeResults": describe_results,
     }))
 }
 

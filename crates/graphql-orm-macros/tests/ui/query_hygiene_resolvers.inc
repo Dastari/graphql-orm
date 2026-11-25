@@ -536,6 +536,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -634,6 +643,15 @@ impl RecordQueries {
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             "record",
         )?;
+        for &__gom_query_root in Record::__GOM_QUERY_ROOT_FIELDS {
+            if __gom_query_root != "record" {
+                ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                    ctx,
+                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                    __gom_query_root,
+                )?;
+            }
+        }
         ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
             ctx,
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,

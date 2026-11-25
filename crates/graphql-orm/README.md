@@ -3,16 +3,48 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-Version 0.216.0 lets SQL Server seek on BIN2 Unicode key columns when using
+Version 0.222.0 lets SQL Server seek on BIN2 Unicode key columns when using
 generated exact string filters (#867).
-[Migration](../../MIGRATION.md#02120-to-02160-sql-server-exact-string-filter-seeks)
+[Migration](../../MIGRATION.md#02200-to-02220-sql-server-exact-string-filter-seeks)
+
+Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
+full backups. Call `Database::enable_canonical_change_journal_keys` as the
+schema owner and start a fresh incremental chain. The legacy encoding remains
+the default. See the [migration procedure](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
+Version 0.219.0 enforces target query assurance on indirect runtime GraphQL
+reads and generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
+
+Version 0.218.0 lets a composite relation join on a server-only partition key
+that stays off every generated GraphQL surface.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+Version 0.217.0 enforces required query assurance when traversing generated
+relations into the protected entity.
+See the [migration guide](../../MIGRATION.md#02160-to-02170-relation-target-assurance).
+
+Version 0.216.0 lets PostgreSQL choose the join for native search on
+generated `#[graphql_rls]` entities with a column-based default sort. Both
+RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
+
+Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
+column identifier parsing in ALTER COLUMN collation lookups.
+See [SQL Server parameter types](../../docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+Version 0.214.0 aligns the `auth-agql` bridge with published `agql-auth`
+`v0.27.0`. Hosts that pass Auth types must adopt the same Git tag.
+See the [migration guide](../../MIGRATION.md#02130-to-02140-agql-auth-v0270).
+
+Version 0.213.0 fixes races in compile UI and consumer fixture test setup
+(#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 
 Version 0.212.0 supports a scoped SQLite column drop in owned migrations
 with unrelated indexes and incoming foreign keys. See the

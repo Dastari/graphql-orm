@@ -131,11 +131,11 @@ AiCapabilityIndexSet::compile([Arc::new(index)])
 
 `cargo run --release -p graphql-orm-ai --example capability_context_benchmark
 -- 1 10 100` measures what the model receives as the catalogue grows. It
-stamps out one realistic generated family per target: a wide entity with
-forty public scalar fields and five to-many relationships, plus the five
-related entities, each with its five generated query roots (list, keyset
-and aggregate among them). That is 12 entities and 60 query roots per
-target. Each target gets its own query catalogue and index, and the
+stamps out two copies of a generated family per target. Each family has
+one wide entity with forty public scalar fields and five to-many
+relationships, plus the five related entities. Each entity has five
+generated query roots, including list, keyset and aggregate. That is 12
+entities and 60 query roots per target. Each target gets its own query catalogue and index, and the
 catalogues are registered in one `AiToolCatalog`. The example then drives
 the version 2 broker on a host that caches its index set, with the
 coordinator's own describe steps. For each described operation it builds and
@@ -188,12 +188,10 @@ Discover time follows the number of matches, not the catalogue as such. The
 benchmark's questions share words such as "records" with every entity, and
 host policy is applied to every match before the result ceiling (see
 [Discovery is not authority](#discovery-is-not-authority)). A host with an
-expensive policy should override `authorize_discovery`. Startup and memory
-are linear in the number of targets of a given shape: about 0.35 s and
-1.3 MiB per wide-entity root, counting the capabilities registered in the
-`AiToolCatalog`. Within one target, catalogue compile time
-still grows faster than linearly: 300 roots in one target took about 500 s.
-Size a very large single target from the startup benchmark above.
+expensive policy should override `authorize_discovery`. In those runs,
+peak memory grew by about 1.3 MiB per query root with the capabilities
+registered in the `AiToolCatalog`. For current startup measurements, see
+[Catalogue compilation benchmark](#catalogue-compilation-benchmark).
 
 A single-target host can supply its index through `AiCurrentCapabilityIndex`,
 and the crate then forms a one-member set on every broker call. Since AI tool
@@ -219,6 +217,50 @@ The benchmark also reports whether a keyset operation offers a
 continuation. It does not: the page argument is server-owned, so a model
 reads only the first page of a keyset or list root. Continuation cursors are
 planned for the next fingerprint-breaking release.
+
+### Catalogue compilation benchmark
+
+In tool profiles 0.29.0, a release profile of the 60-root target recorded
+11,402 filter-role validations in 22.46 s of query catalogue compilation.
+Those validations accounted for 21.65 s. At 300 roots, validation ran
+57,002 times and accounted for 527.06 of 532.95 s. Input schema rendering
+and admission both repeated the validation, which visits the target's
+filterable fields. Tool profiles 0.30.0 validates those roles at catalogue
+binding and reuses the result. The compiler also indexes the generated input
+owners it has to check.
+
+Use `capability_context_benchmark --compile-target 2`, `10`, or `20` on the
+release binary for 60, 300, or 600 roots in one target. The timer includes
+building the target fixture and compiling the query catalogue and index. Run
+`--compile-federated 1`, `10`, or `100` for the existing 60-root targets.
+The federated time is the first-target time plus the remaining targets'
+compile and registration time, with up to six workers. The harness records
+index-set assembly separately.
+
+Release build on an AMD Ryzen 9 9955HX with Rust 1.97.1. Before is tool
+profiles 0.29.0 at `2f2b6c9d7`. After is tool profiles 0.30.0. Each row is
+one wall-clock sample from the same harness and deployment limits.
+
+| Shape | Query roots | Before (s) | After (s) |
+| --- | ---: | ---: | ---: |
+| One target | 60 | 22.43 | 0.44 |
+| One target | 300 | 533.31 | 2.09 |
+| One target, time to rejection | 600 | 2,148.48 | 4.17 |
+| Federated, 1 target | 60 | 22.63 | 0.48 |
+| Federated, 10 targets | 600 | 69.56 | 1.68 |
+| Federated, 100 targets | 6,000 | 384.33 | 12.01 |
+
+The 600-root single-target baseline produced 17,060,832 bytes of execution schemas
+before hitting the existing 16 MiB total schema limit. Both versions
+compiled the root schemas and rejected the target at the same limit.
+The row records the time to that rejection.
+
+Run the same harness with `--contract 2` on each revision and compare stdout
+with `cmp`. The snapshot covers the 60 capability fingerprints and
+execution schemas, the catalogue fingerprint and serialized index, all
+provider definitions, and the sampled broker describe and type results. It
+uses a fixed, equal-length value for the opaque loaded reference, which
+depends on the broker session.
 
 ## Discovery is not authority
 

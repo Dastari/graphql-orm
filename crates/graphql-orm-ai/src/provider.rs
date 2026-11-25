@@ -2358,6 +2358,9 @@ pub enum ProviderError {
     /// Provider configuration is invalid.
     #[error("invalid provider configuration: {0}")]
     InvalidConfiguration(String),
+    /// The configured URL path does not satisfy this adapter's endpoint contract.
+    #[error("invalid provider endpoint path: {0}")]
+    InvalidEndpointPath(#[from] crate::AiProviderEndpointPathError),
     /// Request failed bounded provider-neutral validation.
     #[error("invalid provider request")]
     InvalidRequest,
@@ -2429,6 +2432,7 @@ impl ProviderError {
             #[cfg(feature = "provider-codex-app-server")]
             Self::CodexVersionRefused(_) => AiProviderFailureCategory::ProviderRejection,
             Self::InvalidConfiguration(_)
+            | Self::InvalidEndpointPath(_)
             | Self::InvalidRequest
             | Self::CredentialUnavailable
             | Self::EgressDenied

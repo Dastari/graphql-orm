@@ -10,12 +10,47 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.161.0
+## Unreleased - 0.164.0
 
 - SQL Server run candidate reads use the ORM's generated exact string filters
   to seek on the run-state indexes (#867). SQL text changes for all opted-in
-  exact string comparisons. See the [migration guidance](MIGRATION.md#01590-to-01610)
+  exact string comparisons. See the [migration guidance](MIGRATION.md#01630-to-01640)
   for plan guides, Query Store forced plans, and live column drift.
+
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
+## Unreleased - 0.162.0
+
+- Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).
+  The release benchmark can measure startup separately and export a byte
+  snapshot of the catalogue and model-facing output.
+  [Measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark)
+
+## Unreleased - 0.161.0
+
+- **Changed (#522).** The SQL Server expired-lease prefilter passes an empty
+  declared type to ORM 0.215.0's string-filter renderer. Behaviour is
+  unchanged.
+  [Migration](MIGRATION.md#01600-to-01610)
+
+## Unreleased - 0.160.0
+
+- **Action needed (#857).** Match the published `agql-auth` `v0.27.0` tag
+  when constructing principals, principal references and assurance policies for AI.
+  [Migration](MIGRATION.md#01590-to-01600)
 
 ## Unreleased - 0.159.0
 

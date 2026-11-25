@@ -284,7 +284,8 @@ const TRAVERSAL_READ_CATEGORIES: &[&str] = &[
 /// `single_read` for to-one traversal. When that category is not declared but
 /// another read category is, every declared read category's requirement
 /// applies. Scope templates bind root arguments that a traversal does not
-/// have, so they refuse it. `GraphQLEntity` and
+/// have, so they refuse it. After scopes, traversal checks assurance on
+/// every generated query root of the target. `GraphQLEntity` and
 /// `RepositoryEntity` emit this so every relation target carries it. A
 /// malformed declaration, which `GraphQLOperations` reports, refuses every
 /// traversal rather than adding a second diagnostic here.
@@ -321,6 +322,24 @@ pub(crate) fn relation_traversal_authorization_tokens(
         };
         let list_scope = scope("list");
         let single_scope = scope("single_read");
+        let assurance = (!crate::entity::has_repository_entity_attribute(&input.attrs)).then(|| {
+            quote! {
+                // GraphQLOperations provides the names of its enabled query
+                // roots. A target without that derive has no generated roots.
+                #[allow(dead_code)]
+                trait QueryRootsFallback {
+                    const __GOM_QUERY_ROOT_FIELDS: &'static [&'static str] = &[];
+                }
+                impl<T> QueryRootsFallback for T {}
+                for &field_name in Self::__GOM_QUERY_ROOT_FIELDS {
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                        ctx,
+                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        field_name,
+                    )?;
+                }
+            }
+        });
         Ok(quote! {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
             if multiple {
@@ -328,6 +347,7 @@ pub(crate) fn relation_traversal_authorization_tokens(
             } else {
                 #single_scope
             }
+            #assurance
             ::std::result::Result::Ok(())
         })
     })()
@@ -1053,6 +1073,27 @@ fn resolve_upsert_config(
     }
 }
 
+fn integer_bind_tokens(
+    backend: BackendKind,
+    field_type: &syn::Type,
+    meta: &FieldMetadata,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
+    let unsigned = type_path_last_ident(scalar_type).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "u8" | "u16" | "u32" | "u64" | "usize"
+        )
+    });
+    if backend == BackendKind::Mssql && unsigned {
+        let sql_type = meta.mssql_type.as_deref().unwrap_or("");
+        quote! { ::graphql_orm::graphql::orm::SqlValue::mssql_unsigned((#value) as u64, #sql_type) }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::Int((#value) as i64) }
+    }
+}
+
 fn push_create_input_sql_value_tokens(
     backend: BackendKind,
     struct_name: &syn::Ident,
@@ -1061,7 +1102,7 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if meta.decimal.is_some() {
+    let push = if meta.decimal.is_some() {
         let definition = decimal_definition_tokens(meta);
         if is_option_type(field_type) {
             quote! {
@@ -1171,9 +1212,10 @@ fn push_create_input_sql_value_tokens(
             )
         })
     {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { value });
         quote! {
             match #field_access {
-                ::std::option::Option::Some(value) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(value as i64)),
+                ::std::option::Option::Some(value) => bind_values.push(#integer_bind),
                 ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
             }
         }
@@ -1193,8 +1235,9 @@ fn push_create_input_sql_value_tokens(
             "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
         )
     }) {
+        let integer_bind = integer_bind_tokens(backend, field_type, meta, quote! { #field_access });
         quote! {
-            bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int((#field_access) as i64));
+            bind_values.push(#integer_bind);
         }
     } else if type_path_last_ident(field_type)
         .is_some_and(|ident| matches!(ident.to_string().as_str(), "f32" | "f64"))
@@ -1230,6 +1273,14 @@ fn push_create_input_sql_value_tokens(
         quote! {
             bind_values.push(#value_expr);
         }
+    };
+    match &meta.mssql_type {
+        Some(sql_type) => quote! {{
+            #push
+            let value = bind_values.pop().expect("one generated field bind");
+            bind_values.push(value.with_mssql_type(#sql_type));
+        }},
+        None => push,
     }
 }
 
@@ -3391,7 +3442,7 @@ fn generate_graphql_operations_unfiltered(
 
             // Generate bind value push based on field type
             // We push to bind_values vector to avoid lifetime issues with ::graphql_orm::sqlx::query
-            if meta.decimal.is_some() {
+            if meta.decimal.is_some() || meta.mssql_type.is_some() {
                 insert_binds_graphql.push(push_create_input_sql_value_tokens(
                     backend,
                     struct_name,
@@ -3500,9 +3551,10 @@ fn generate_graphql_operations_unfiltered(
                     )
                 })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { v });
                 let bind_tokens = quote! {
                     match input.#field_name {
-                        ::std::option::Option::Some(v) => bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64)),
+                        ::std::option::Option::Some(v) => bind_values.push(#integer_bind),
                         ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                     }
                 };
@@ -3526,8 +3578,10 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind =
+                    integer_bind_tokens(backend, field_type, &meta, quote! { input.#field_name });
                 let bind_tokens = quote! {
-                    bind_values.push(::graphql_orm::graphql::orm::SqlValue::Int(input.#field_name as i64));
+                    bind_values.push(#integer_bind);
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
                 insert_binds_repo.push(bind_tokens);
@@ -3592,6 +3646,8 @@ fn generate_graphql_operations_unfiltered(
         if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
+            let graphql_check_index = update_field_checks_graphql.len();
+            let repo_check_index = update_field_checks_repo.len();
             let is_already_optional = is_option_type(field_type);
             let update_type = quote! { ::std::option::Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
@@ -3950,12 +4006,13 @@ fn generate_graphql_operations_unfiltered(
                         )
                     })
             {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *v });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
                         match val {
-                            ::std::option::Option::Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Int((*v) as i64)),
+                            ::std::option::Option::Some(v) => values.push(#integer_bind),
                             ::std::option::Option::None => values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
                         }
                     }
@@ -4016,11 +4073,12 @@ fn generate_graphql_operations_unfiltered(
                     "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
                 )
             }) {
+                let integer_bind = integer_bind_tokens(backend, field_type, &meta, quote! { *val });
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int((*val) as i64));
+                        values.push(#integer_bind);
                     }
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
@@ -4060,6 +4118,24 @@ fn generate_graphql_operations_unfiltered(
                 };
                 update_field_checks_graphql.push(update_tokens.clone());
                 update_field_checks_repo.push(update_tokens);
+            }
+            if let Some(sql_type) = &meta.mssql_type {
+                for checks in [
+                    &mut update_field_checks_graphql[graphql_check_index..],
+                    &mut update_field_checks_repo[repo_check_index..],
+                ] {
+                    for check in checks {
+                        *check = quote! {{
+                            let bind_start = values.len();
+                            #check
+                            for value in &mut values[bind_start..] {
+                                *value = ::std::mem::replace(
+                                    value, ::graphql_orm::graphql::orm::SqlValue::Null
+                                ).with_mssql_type(#sql_type);
+                            }
+                        }};
+                    }
+                }
             }
         }
     }

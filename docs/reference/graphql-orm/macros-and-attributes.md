@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -409,7 +409,10 @@ changes the relation cardinality. `filter` opts an unconditional public collecti
 authorized target-Where alternatives in generated roots; see
 [authorized collection filters](entities-and-relations.md#authorized-collection-filters). `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
-Relations are not ordinary persisted fields.
+Relations are not ordinary persisted fields. `server_only_key(from = "...", to = "...")`
+marks one composite key pair whose columns stay off every generated GraphQL surface while
+the generated join still uses it; see
+[server-only partition keys](entities-and-relations.md#server-only-partition-keys).
 
 An unconditional readable relation can add a correlated count to its parent
 entity's generated order input:
@@ -1803,3 +1806,15 @@ bare names, retain their spelling across modules/crates, and compare
 `catalog().fingerprint()` before and after (via `graphql_orm_operation_catalog()`
 or your catalogue accessor). See the
 [migration guide](../../../MIGRATION.md#01860-to-01870-breaking-release).
+
+
+## SQL Server parameter types
+
+On a SQL Server entity, describe the physical type of a persisted field with
+`#[graphql_orm(mssql_type = "VARCHAR(32)")]` or
+`#[graphql_orm(mssql_type = "INT")]`. String fields accept VARCHAR and NVARCHAR
+with a valid length or MAX. Integer fields accept TINYINT, SMALLINT, INT and
+BIGINT. Nullable fields accept the same declarations. The declaration also
+overrides the column type in schema metadata and generated DDL even with
+typed binding disabled. The [SQL Server pool reference](mssql.md#typed-column-parameters)
+lists which operands use the declared type and which retain Unicode binding.
