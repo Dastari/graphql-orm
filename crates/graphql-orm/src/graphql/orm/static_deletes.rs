@@ -373,7 +373,7 @@ async fn postgres_dependency_reads_for_entities(
                        AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $10::pg_catalog.text
                        AND p.pronargs OPERATOR(pg_catalog.=) 0::pg_catalog.int2 AND p.prosecdef
                        AND p.proowner OPERATOR(pg_catalog.=) t.relowner
-                       AND p.prosrc OPERATOR(pg_catalog.=) $11::pg_catalog.text
+                       AND p.prosrc COLLATE pg_catalog.\"C\" OPERATOR(pg_catalog.=) ANY (ARRAY[$11, $12]::pg_catalog.text[])
                        AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[$6]::pg_catalog.text[]))",
     )
     .bind(&owned_tables)
@@ -387,6 +387,7 @@ async fn postgres_dependency_reads_for_entities(
     .bind(i16::try_from(super::rls::CHANGE_JOURNAL_TRIGGER_TYPE).unwrap_or(0))
     .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
     .bind(super::rls::CHANGE_JOURNAL_FUNCTION_BODY)
+    .bind(super::journal_key::recorder_body())
     .fetch_one(&mut *conn)
     .await?;
     if triggered {

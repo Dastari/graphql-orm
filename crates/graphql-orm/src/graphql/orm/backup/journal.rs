@@ -269,7 +269,7 @@ where
           AND tr.tgname OPERATOR(pg_catalog.=) ? AND NOT tr.tgisinternal AND tr.tgenabled OPERATOR(pg_catalog.=) 'O'
           AND tr.tgtype OPERATOR(pg_catalog.=) ? AND tr.tgqual IS NULL AND tr.tgnargs OPERATOR(pg_catalog.=) 7
           AND pn.nspname OPERATOR(pg_catalog.=) 'graphql_orm' AND p.proname OPERATOR(pg_catalog.=) ? AND p.pronargs OPERATOR(pg_catalog.=) 0
-          AND p.prosecdef AND p.prosrc OPERATOR(pg_catalog.=) ? AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[?]::pg_catalog.text[]
+          AND p.prosecdef AND p.prosrc COLLATE pg_catalog.\"C\" OPERATOR(pg_catalog.=) ANY (ARRAY[?, ?]::pg_catalog.text[]) AND p.proconfig OPERATOR(pg_catalog.=) ARRAY[?]::pg_catalog.text[]
           AND p.proowner OPERATOR(pg_catalog.=) t.relowner AND j.relowner OPERATOR(pg_catalog.=) p.proowner AND j.relkind OPERATOR(pg_catalog.=) 'r'
           AND pg_catalog.position(tr.tgargs, '\\x00'::pg_catalog.bytea) OPERATOR(pg_catalog.>) 1
           AND args.entry_arguments OPERATOR(pg_catalog.=) (pg_catalog.convert_to(tn.nspname::pg_catalog.text, 'UTF8') OPERATOR(pg_catalog.||) '\\x00'::pg_catalog.bytea
@@ -300,6 +300,7 @@ where
         SqlValue::Int(i64::from(orm::rls::CHANGE_JOURNAL_TRIGGER_TYPE)),
         SqlValue::String(orm::rls::CHANGE_JOURNAL_FUNCTION.to_string()),
         SqlValue::String(orm::rls::CHANGE_JOURNAL_FUNCTION_BODY.to_string()),
+        SqlValue::String(orm::journal_key::recorder_body()),
         SqlValue::String(orm::rls::CHANGE_JOURNAL_FUNCTION_CONFIG.to_string()),
         SqlValue::Bytes(expected_arguments),
         SqlValue::Bool(qualified),

@@ -20,6 +20,10 @@ physical column. A literal dot requires one delimited identifier, such as
 `db_column = "[event.code]"` on SQL Server. See the
 [migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
 
+Version 0.220.0 stays aligned with the ORM's opt-in canonical PostgreSQL
+journal keys. Existing macro call sites require no changes. See the
+[migration guide](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
 Version 0.219.0 enforces assurance on every enabled entity query root in
 generated Federation entity lookups.
 See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).

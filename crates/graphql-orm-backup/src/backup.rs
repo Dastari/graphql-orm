@@ -440,6 +440,7 @@ async fn create_incremental_backup_inner(
     let changes = database
         .export_incremental(request.parent_snapshot_id)
         .await?;
+    schema.ensure_canonical_identity_unchanged(database).await?;
     let object_refs = objects
         .objects_from_incremental_export(request.parent_snapshot_id, &changes)
         .await?;
@@ -576,6 +577,17 @@ async fn compact_chain_inner(
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
+    if !cfg!(feature = "canonical-journal-keys")
+        && chain.iter().any(|manifest| {
+            manifest
+                .graphql_orm_schema_hash
+                .starts_with(crate::database::CANONICAL_KEY_SCHEMA_PREFIX)
+        })
+    {
+        return Err(BackupError::UnsupportedOperation {
+            operation: "compacting a canonical PostgreSQL chain requires the canonical-journal-keys feature for exact float decoding".into(),
+        });
+    }
     let legacy_pins = match required_authenticator(repository)?.legacy_manifest_policy() {
         crate::LegacyManifestPolicy::TrustPinned(pins) => Some(pins),
         _ => None,
@@ -876,7 +888,17 @@ fn ensure_extends_parent(
     } else if parent.database_backend != schema.backend {
         Some("database backend")
     } else if parent.graphql_orm_schema_hash != schema.schema_hash {
-        Some("schema hash")
+        let detail = crate::database::canonical_key_storage_mismatch(
+            &parent.graphql_orm_schema_hash,
+            &schema.schema_hash,
+        )
+        .map_or_else(String::new, |error| format!("{error}; "));
+        return Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "{detail}incremental snapshot {} schema hash does not match parent {}; start a new full backup after a schema or change journal key encoding change",
+                request.snapshot_id, parent.snapshot_id
+            ),
+        });
     } else {
         None
     };
