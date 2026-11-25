@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.227.0 to 0.228.0: server-only relation join keys
+## 0.216.0 to 0.218.0: server-only relation join keys
 
 **No action.** Upgrade ORM and macros together. `server_only_key` is a new,
 opt-in relation option; existing relations, their checks and their SQL are
@@ -20,6 +20,33 @@ cannot be a server-only target until they list the column. Store server-only
 key members in canonical form on both sides (for example lower-case UUID text
 on SQLite): a target stored in another spelling matches no row.
 See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+## Operation catalogue 0.15.0
+
+**No action.** Generated relationships with a declared field policy export
+`subgraph_only` in the resolver catalogue. The resolver catalogue fingerprint
+changes for exports that previously referenced a target root for such a
+relationship. Consumers of older exports should defer authorization to the
+subgraph when `has_field_policy` is true. Rebind any pinned
+resolver-catalogue fingerprint.
+
+## 0.215.0 to 0.216.0: PostgreSQL RLS search
+
+**No action.** Upgrade ORM and macros together. Native search on generated
+PostgreSQL `#[graphql_rls]` entities with an unqualified, column-based
+default sort can use a document primary-key probe or a bulk join. Both RLS
+policies still apply. The change only affects ORM-generated queries, so hosts
+need no database migration, index rebuild, or policy update. PostgreSQL
+evaluates `@@` after the document policy, which prevents GIN from serving
+the search. With 200,000 documents the median selective page at 10%
+visibility went from 318 to 87 ms and its count from 276 to 79 ms. At full
+visibility the common page went from 370 to 353 ms and its count from 252
+to 238 ms. The full-visibility selective query still scanned documents and
+its page went from 233 to 256 ms. Broad partial visibility can also be
+slower. At 50% and 90% visibility the common page went from 280 to 418 ms
+and from 422 to 628 ms, respectively. The 90%-visible common count went
+from 300 to 546 ms. See the
+[measured plans and costs](docs/reference/graphql-orm/postgres.md#search-performance).
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 

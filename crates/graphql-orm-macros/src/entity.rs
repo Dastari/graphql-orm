@@ -4839,6 +4839,7 @@ fn generate_entity_tokens(
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
     let mut search_column_names: Vec<String> = Vec::new();
+    let mut search_base_columns = Vec::new();
     let mut projected_column_names = std::collections::HashSet::new();
     let sql_table = backend_render_identifier_path(backend, &table_name);
     let mut mssql_parameter_types = Vec::new();
@@ -5868,6 +5869,9 @@ fn generate_entity_tokens(
             .last()
             .unwrap_or(&db_col_sql);
         let qualified_db_col_sql = format!("{sql_table}.{column_part}");
+        if entity_meta.rls.is_some() {
+            search_base_columns.push(column_part.to_owned());
+        }
         projected_column_names
             .insert(relation_column_identity(backend, &db_col, true).to_ascii_lowercase());
         let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
@@ -6777,6 +6781,7 @@ fn generate_entity_tokens(
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const POSTGRES_SEARCH_BASE_COLUMNS: &'static [&'static str] = &[#(#search_base_columns),*];
                 const SEARCH_KEY_COLUMN: &'static str = #key_column;
                 const SEARCH_SCORE_COLUMN: &'static str = #score_column;
 

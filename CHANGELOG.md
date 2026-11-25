@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.228.0
+## Unreleased - ORM/macros 0.218.0
 
 - **Added (#898).** A readable composite relation can declare
   `server_only_key(from = "...", to = "...")` for a key pair whose target
@@ -32,6 +32,22 @@ for historical context.
   the database's match of the complete tuple, so they agree with the direct
   query for every type and collation.
   [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
 
 ## Unreleased - ORM/macros 0.215.0
 
