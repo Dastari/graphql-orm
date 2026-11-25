@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.221.0 and operation catalogue 0.16.0
+
+- **Added (#668).** Generated Changed subscriptions can opt in to an opaque
+  cursor and bounded, process-local replay. Replay checks current subscriber
+  authority and signals when a cursor requires a refetch.
+  [Migration](MIGRATION.md#02200-to-02210-generated-changed-replay)
+
 ## Unreleased - ORM/macros 0.220.0
 
 - PostgreSQL hosts can opt into canonical change-journal keys (#592). The

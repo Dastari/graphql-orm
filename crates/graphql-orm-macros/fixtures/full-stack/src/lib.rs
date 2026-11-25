@@ -103,6 +103,7 @@ pub struct Edition {
 
 schema_roots! {
     query_custom_ops: [],
+    client_metadata: true,
     entities: [User, Post, Edition],
 }
 

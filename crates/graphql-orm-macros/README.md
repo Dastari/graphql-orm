@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version 0.220.0 stays aligned with the ORM's opt-in canonical PostgreSQL
 journal keys. Existing macro call sites require no changes. See the
 [migration guide](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).

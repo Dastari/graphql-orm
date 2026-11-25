@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.18.0 to 0.19.0: Changed replay gateway coverage
+
+**No action.** The router forwards the optional resume argument and
+the subgraph's change, started and reset-required frames through the
+existing WebSocket transport.
+
 ## 0.17.0 to 0.18.0: agql-auth v0.27.0
 
 **Action needed** for hosts using the `auth-agql` feature. Move direct Auth

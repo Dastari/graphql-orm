@@ -35,7 +35,8 @@ const SDL: &str = r#"
     input SlotKeyInput { site: String! name: String! }
     enum SlotOrder { SITE NAME }
     interface SlotIdentity { site: String! name: String! }
-    type Subscription { tick: String! ended: String! }
+    type SlotChange { cursor: String started: Boolean! }
+    type Subscription { tick: String! ended: String! slotChanged(after: String): SlotChange! }
 "#;
 const RSA_PRIVATE_KEY: &str = include_str!("fixtures/test-rsa-private.pem");
 const TOKEN_ISSUER: &str = "https://binary-smoke.test";
@@ -249,6 +250,42 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let completed = websocket.next_json();
     assert_eq!(completed["id"], "revoked");
     assert_eq!(completed["type"], "complete");
+    for (cursor, id) in [("event-cursor", "resume"), ("stale-cursor", "reset")] {
+        websocket.send_json(&json!({
+            "id": id, "type": "subscribe",
+            "payload": {
+                "query": "subscription($after: String) { slotChanged(after: $after) { cursor started } }",
+                "variables": {"after": cursor}
+            }
+        }));
+        let frame = websocket.next_json();
+        assert_eq!(frame["id"], id, "{frame}");
+        assert_eq!(frame["type"], "next", "{frame}");
+        if id == "resume" {
+            assert_eq!(
+                frame["payload"]["data"]["slotChanged"],
+                json!({
+                    "cursor": "next-cursor", "started": false
+                })
+            );
+            let started = websocket.next_json();
+            assert_eq!(started["id"], id, "{started}");
+            assert_eq!(started["type"], "next", "{started}");
+            assert_eq!(
+                started["payload"]["data"]["slotChanged"],
+                json!({
+                    "cursor": null, "started": true
+                })
+            );
+        } else {
+            assert_eq!(frame["payload"]["data"], Value::Null);
+            assert_eq!(
+                frame["payload"]["errors"][0]["extensions"]["code"],
+                "SUBSCRIPTION_REPLAY_RESET"
+            );
+        }
+        assert_eq!(websocket.next_json(), json!({"id": id, "type": "complete"}));
+    }
     websocket.close();
 
     let signal = Command::new("kill")
@@ -474,6 +511,16 @@ fn descriptor_document(address: SocketAddr) -> Vec<u8> {
                 root_type: RootOperationType::Subscription,
                 field_name: "ended".to_owned(),
                 arguments: Vec::<ArgumentDescriptor>::new(),
+                authorization: AuthorizationRequirement::Authenticated,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Subscription,
+                field_name: "slotChanged".to_owned(),
+                arguments: vec![ArgumentDescriptor {
+                    name: "after".to_owned(),
+                    graphql_type: "String".to_owned(),
+                    required: false,
+                }],
                 authorization: AuthorizationRequirement::Authenticated,
             },
         ],
@@ -708,6 +755,47 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                                 false,
                             )?;
                         }
+                    }
+                    Some("subscribe")
+                        if message["payload"]["query"]
+                            .as_str()
+                            .is_some_and(|query| query.contains("slotChanged")) =>
+                    {
+                        let id = message["id"].clone();
+                        let payloads = match message["payload"]["variables"]["after"].as_str() {
+                            Some("event-cursor") => vec![
+                                json!({"data": {"slotChanged": {"cursor": "next-cursor", "started": false}}}),
+                                json!({"data": {"slotChanged": {"cursor": null, "started": true}}}),
+                            ],
+                            Some("stale-cursor") => vec![json!({
+                                "data": null,
+                                "errors": [{
+                                    "message": "subscription replay is unavailable",
+                                    "extensions": {"code": "SUBSCRIPTION_REPLAY_RESET"}
+                                }]
+                            })],
+                            other => {
+                                return Err(std::io::Error::other(format!(
+                                    "unexpected After: {other:?}"
+                                )));
+                            }
+                        };
+                        for payload in payloads {
+                            let next = json!({"id": id, "type": "next", "payload": payload});
+                            write_websocket_frame(
+                                &mut stream,
+                                0x1,
+                                &serde_json::to_vec(&next)?,
+                                false,
+                            )?;
+                        }
+                        let complete = json!({"id": id, "type": "complete"});
+                        write_websocket_frame(
+                            &mut stream,
+                            0x1,
+                            &serde_json::to_vec(&complete)?,
+                            false,
+                        )?;
                     }
                     Some("subscribe") => {
                         let id = message["id"].as_str().unwrap_or("smoke");

@@ -70,7 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.220.0; `graphql-orm-macros` 0.220.0; `graphql-orm-operation-catalog` 0.15.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.31.0; `graphql-orm-ai` 0.163.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.221.0**; **`graphql-orm-macros` 0.221.0**; **`graphql-orm-operation-catalog` 0.16.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.31.0; `graphql-orm-ai` 0.163.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.19.0**.
+
+- **No action** — ORM/macros 0.221.0 and operation catalogue 0.16.0 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02200-to-02210-generated-changed-replay)
 
 ### workspace-2026.11.25.2
 
