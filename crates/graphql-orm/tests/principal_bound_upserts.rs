@@ -1207,7 +1207,10 @@ async fn concurrent_upserts_serialise(base: &Database<Backend>) -> TestResult {
 /// Trusted transaction code can run the same hooks with its own transient
 /// input; a hook cannot grant itself one.
 async fn transaction_code_sets_its_own_transient_input(base: &Database<Backend>) -> TestResult {
-    struct Seen(Arc<Mutex<Vec<(MutationPhase, Option<i64>, bool)>>>);
+    /// Phase, the proof sequence the hook read, and whether its own
+    /// attempts to set, take and acknowledge were all refused.
+    type Observed = (MutationPhase, Option<i64>, bool);
+    struct Seen(Arc<Mutex<Vec<Observed>>>);
     impl MutationHook<Backend> for Seen {
         fn on_mutation<'a>(
             &'a self,
