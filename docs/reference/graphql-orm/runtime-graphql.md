@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -100,6 +100,13 @@ Every runtime root enforces an installed `AssuranceEnforcement` with its own
 coordinate. This covers collection roots, `node`, generated and link mutations,
 `RuntimeHostField` roots and live `…Changed` subscriptions. A host-owned
 `subscription_root` keeps its own guards.
+
+Not yet covered ([#902](https://github.com/Dastari/graphql-orm/issues/902)):
+runtime `node(id:)` checks only `Query.node`, and runtime child layers do not
+check the target collection's query roots. Generated Federation `_entities`
+checks only the entity's get-by-id root. Until that is fixed, require
+`Query.node`, which covers every runtime collection, or enforce step-up inside
+`RuntimeReadAuthority`, which sees each layer.
 
 Query and mutation operations are checked before request preparation. The
 request guard expands the operation's root selection, including aliases,

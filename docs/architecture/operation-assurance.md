@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -128,13 +128,25 @@ Generated query, mutation, and subscription resolvers call the same enforcement
 hook automatically. Without installed enforcement the call is a no-op, which
 preserves existing schemas.
 
-Enforcement keys on the exact root coordinate. A resolver that runs below
-another root passes its own coordinate to `enforce_operation_assurance`.
+Enforcement keys on exact root coordinates. A resolver that runs below a
+root passes the applicable coordinates to `enforce_operation_assurance`.
 Generated Federation entity resolvers, emitted for an entity's
 `federation_key`, run below `_entities`: they enforce the entity's get-by-id
 query root and any classification registered for `_entities`. A handwritten
 `#[graphql(entity)]` resolver gets no assurance check from the ORM. Generated
 dependent deletes use their own delete root.
+
+## Generated Relation Traversal
+
+Generated relation traversal checks every generated query coordinate of the
+target entity after its auth mode and operation scopes and before any target
+row read, existence check, or count. The coordinates cover list, get-by-id,
+keyset, scan, search, and aggregate wherever generated. A requirement on any
+one coordinate applies to all generated relation paths into that target,
+including nested fields and connections, related-row filters, relation-count
+ordering, search relation sources, and relation fields in mutation results.
+Unregistered and unclassified query coordinates carry no requirement.
+Generated Changed streams reject relation selections before registration.
 
 ## Runtime GraphQL Roots
 
@@ -149,6 +161,13 @@ returns the pre-pass refusal. Subscriptions are checked before registration. `Ru
 module roots as `runtime` origin operations and host fields as `custom`
 operations. Coordinates the builder already holds keep their registration.
 See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).
+
+Not yet covered ([#902](https://github.com/Dastari/graphql-orm/issues/902)):
+runtime `node(id:)` checks only `Query.node`, runtime child layers do not check
+the target collection's query roots, and generated Federation `_entities`
+checks only the entity's get-by-id root. Until that is fixed, require
+`Query.node` (it covers every runtime collection) or enforce step-up inside
+`RuntimeReadAuthority`, which sees each layer.
 
 ## Authoritative Server Enforcement
 

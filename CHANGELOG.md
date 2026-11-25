@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
 ## Unreleased - operation catalogue 0.15.0
 
 - **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
