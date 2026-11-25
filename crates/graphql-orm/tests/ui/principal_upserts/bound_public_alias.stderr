@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: upsert_bound_key field `machine_key` of `Snapshot` is not a server-only column; every field mapping its column must be #[graphql_orm(private)] with no filter, order, subscribe, search or input exposure, and #[graphql(skip)] when the entity derive does not generate its object; it cannot be a primary-key column; an entity certifies no column when its table or any column name is non-ASCII, longer than 63 bytes or starts with `__gom_`
+  --> tests/ui/principal_upserts/bound_public_alias.rs:18:25
+   |
+18 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^ evaluation of `_` failed here

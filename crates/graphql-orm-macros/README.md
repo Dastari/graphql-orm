@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.230.0 adds the `upsert_bound_key`, `transient_input` and
+`upsert_acknowledge` entity options.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
 Version 0.219.0 enforces assurance on every enabled entity query root in
 generated Federation entity lookups.
 See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).

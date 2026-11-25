@@ -34,6 +34,16 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) notify_on_updated: &'a TokenStream,
     pub(in crate::operations) mutation_output_release: &'a TokenStream,
     pub(in crate::operations) generates_public_upsert: bool,
+    /// Resolves each principal-bound key from the request context (#908).
+    pub(in crate::operations) principal_key_resolution: &'a TokenStream,
+    /// Writes the resolved keys into `input`.
+    pub(in crate::operations) principal_key_assignment: &'a TokenStream,
+    /// The typed transient argument, with its trailing comma.
+    pub(in crate::operations) transient_argument: &'a TokenStream,
+    /// Stores the transient argument on the mutation transaction.
+    pub(in crate::operations) transient_store: &'a TokenStream,
+    /// Whether the `Before` hook may acknowledge without writing.
+    pub(in crate::operations) acknowledge: bool,
 }
 
 pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
@@ -70,7 +80,42 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         notify_on_updated,
         mutation_output_release,
         generates_public_upsert,
+        principal_key_resolution,
+        principal_key_assignment,
+        transient_argument,
+        transient_store,
+        acknowledge,
     } = input;
+    // An acknowledging `Before` hook answers with the locked existing row:
+    // no statement, no `After` hook, no `Changed` event and no notification.
+    let (acknowledge_arm, acknowledge_finish) = if acknowledge {
+        (
+            quote! {
+                let __gom_acknowledgement = current_entity
+                    .is_some()
+                    .then(|| hook_ctx.__arm_write_acknowledgement());
+            },
+            quote! {
+                let __gom_acknowledged = match __gom_acknowledgement {
+                    ::std::option::Option::Some(scope) => hook_ctx.__finish_write_acknowledgement(scope),
+                    ::std::option::Option::None => false,
+                };
+                __gom_before_hook?;
+                if let (true, ::std::option::Option::Some(existing)) = (__gom_acknowledged, current_entity.as_ref()) {
+                    let existing = ::std::clone::Clone::clone(existing);
+                    hook_ctx
+                        .commit_and_emit_tracked(::std::option::Option::Some(&__gom_outcome))
+                        .await
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                    let mut result = #upsert_result_type::unchanged(existing);
+                    #mutation_output_release
+                    return ::std::result::Result::Ok(result);
+                }
+            },
+        )
+    } else {
+        (quote! {}, quote! { __gom_before_hook?; })
+    };
     if generates_public_upsert {
         quote! {
             #[doc = #upsert_operation_description]
@@ -79,6 +124,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
+                #transient_argument
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
                 // The root's error reports what its write did (opt-in).
                 let __gom_outcome = ::graphql_orm::graphql::errors::MutationOutcomeTracker::new();
@@ -90,6 +136,10 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     ctx,
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
                 )?;
+                // A principal-bound key is resolved from the verified request
+                // before the entity policy, the transaction and any read or
+                // write; a failed binding refuses the mutation.
+                #principal_key_resolution
                 let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
                 let pool = db.pool();
                 let auth_context = ctx
@@ -104,12 +154,14 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #create_input = input.into();
+                #principal_key_assignment
                 #create_client_supplied
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #transient_store
                 {
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                         ctx,
@@ -121,6 +173,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                         &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
+                // The input transform cannot replace a principal-bound key.
+                #principal_key_assignment
 
                 let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
                     .await
@@ -172,7 +226,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values)
                 };
 
-                hook_ctx.run_mutation_hook(
+                #acknowledge_arm
+                let __gom_before_hook = hook_ctx.run_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -185,7 +240,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                         before_state: before_state.clone(),
                         after_state: ::std::option::Option::None,
                     },
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback);
+                #acknowledge_finish
 
                 if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                     #struct_name::__gom_require_managed_version_headroom(current_entity)

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.230.0 lets a generated upsert bind a private conflict key from the
+verified request, carry a typed transient input for its transform and hooks,
+and acknowledge a retry without writing.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
 Version 0.219.0 enforces target query assurance on indirect runtime GraphQL
 reads and generated Federation entity lookups.
 See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).

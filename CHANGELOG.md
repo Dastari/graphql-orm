@@ -14,6 +14,32 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.230.0
+
+- **Added (#908).** A generated GraphQL upsert can take a private conflict key
+  from the verified request, carry a typed transient input, and let its hook
+  acknowledge a retry without writing. All three are opt-in entity options.
+  - `upsert_bound_key(field = "...", binding = "path::Type")`: the resolver
+    fills that conflict-key member from `PrincipalKeyBinding::bind` before the
+    conflict lookup, and again after the input transform. The column must be
+    `#[graphql_orm(private)]` with no other GraphQL surface, so no client input
+    can set or replace it. A failed binding refuses the mutation before any
+    policy, read or write. Every existing write authorization still applies.
+    Unsafe declarations are compile errors, including an entity that also
+    generates `create`.
+  - `transient_input(type = "...", on = "upsert")`: a typed argument that
+    `WriteInputContext::transient_input` and `MutationContext::transient_input`
+    expose to the input transform and both hook phases, inside the write
+    transaction. It is never stored, published in `Changed` events or the
+    change journal, or logged. Transaction code can set one with
+    `MutationContext::set_transient_input`.
+  - `upsert_acknowledge = true`: the `Before` hook may call
+    `MutationContext::acknowledge_without_write` on the update branch. The
+    upsert then writes nothing, publishes nothing and returns the existing row
+    with `action: null`.
+
+  [Migration](MIGRATION.md#02190-to-02300-principal-bound-upserts)
+
 ## Unreleased - ORM/macros 0.219.0
 
 - **Security fix (#902).** Runtime node lookups and relation layers enforce the

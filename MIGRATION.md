@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.219.0 to 0.230.0: principal-bound upserts
+
+**No action.** Upgrade ORM and macros together. `upsert_bound_key`,
+`transient_input` and `upsert_acknowledge` are new, opt-in entity options.
+Entities that declare none of them generate the same schema, SQL, hooks and
+operation fingerprints as before. An entity that declares one changes its own
+upsert's arguments and its operation `schema_signature`, so rebind a pinned
+fingerprint for that entity. An upsert result can have `success: true` with
+`action: null` only on an entity that declares `upsert_acknowledge`.
+See [principal-bound upserts](docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
 ## 0.218.0 to 0.219.0: Indirect query assurance
 
 **Action needed.** If you require assurance on a runtime collection query or

@@ -1073,6 +1073,94 @@ fn resolve_upsert_config(
     }
 }
 
+/// A principal-bound conflict-key member of the generated GraphQL upsert.
+struct ResolvedUpsertBoundKey {
+    field_name: syn::Ident,
+    binding: syn::Type,
+    db_column: String,
+}
+
+/// Resolve `upsert_bound_key` declarations against the upsert conflict key.
+///
+/// Each bound member must be a non-nullable, repository-writable column with
+/// no GraphQL surface. The per-column proof (aliases included) is the const
+/// assertion over the entity's `SERVER_ONLY_COLUMNS`; the checks here give
+/// the declaration its own diagnostics.
+fn resolve_upsert_bound_keys(
+    entity_meta: &crate::entity::EntityMetadata,
+    upsert_config: Option<&ResolvedUpsertConfig>,
+) -> syn::Result<Vec<ResolvedUpsertBoundKey>> {
+    let mut resolved: Vec<ResolvedUpsertBoundKey> = Vec::new();
+    for declared in &entity_meta.upsert_bound_keys {
+        let refuse = |reason: &str| {
+            syn::Error::new(
+                declared.span,
+                format!("upsert_bound_key field `{}` {reason}", declared.field),
+            )
+        };
+        let Some(config) = upsert_config else {
+            return Err(syn::Error::new(
+                declared.span,
+                "upsert_bound_key requires graphql_entity upsert = \"...\" naming the bound field",
+            ));
+        };
+        let field = config
+            .fields
+            .iter()
+            .find(|field| field.rust_name == declared.field)
+            .or_else(|| {
+                config
+                    .fields
+                    .iter()
+                    .find(|field| field.db_column == declared.field)
+            })
+            .ok_or_else(|| {
+                refuse("must name a member of the upsert conflict key: only the key the conflict lookup uses can be bound")
+            })?;
+        if resolved
+            .iter()
+            .any(|key| key.field_name == field.field_name)
+        {
+            return Err(refuse("is bound more than once"));
+        }
+        if !field.meta.is_private || !field.meta.graphql_server_only() {
+            return Err(refuse(
+                "must be #[graphql_orm(private)] with no filter, order, subscribe, search, input or primary-key exposure: a principal-bound key has no GraphQL surface",
+            ));
+        }
+        if is_option_type(&field.field_type) {
+            return Err(refuse(
+                "must not be nullable: a NULL key never conflicts, so every upsert would insert another row",
+            ));
+        }
+        if !field.meta.write
+            || field.meta.managed_version
+            || field
+                .meta
+                .timestamp_behavior(&field.rust_name)
+                .exclude_input
+        {
+            return Err(refuse(
+                "must be a repository-writable column: the resolver stores the bound value through the create input",
+            ));
+        }
+        if field.meta.transform_read.is_some()
+            || field.meta.is_json_field
+            || field.meta.spatial.is_some()
+        {
+            return Err(refuse(
+                "must be stored and read as bound: no read transform, json or spatial mapping",
+            ));
+        }
+        resolved.push(ResolvedUpsertBoundKey {
+            field_name: field.field_name.clone(),
+            binding: declared.binding.clone(),
+            db_column: field.db_column.clone(),
+        });
+    }
+    Ok(resolved)
+}
+
 fn integer_bind_tokens(
     backend: BackendKind,
     field_type: &syn::Type,
@@ -1401,6 +1489,23 @@ fn generated_resolver_schema_signature(
     }
     if let Some(shapes) = &entity_meta.mutation_shapes {
         signature.push_str(&format!("mutation_shapes={shapes:?}\n"));
+    }
+    // Only an entity declaring these records them, so every other
+    // fingerprint is unchanged (#908).
+    for key in &entity_meta.upsert_bound_keys {
+        signature.push_str(&format!("upsert_bound_key={:?}\n", key.field));
+    }
+    if let Some(transient) = &entity_meta.transient_input {
+        let ty = &transient.ty;
+        signature.push_str(&format!(
+            "transient_input={:?} name={:?} required={}\n",
+            quote!(#ty).to_string(),
+            transient.name,
+            transient.required
+        ));
+    }
+    if entity_meta.upsert_acknowledge.is_some() {
+        signature.push_str("upsert_acknowledge=true\n");
     }
     if entity_meta
         .mutations
@@ -2349,11 +2454,14 @@ fn generate_graphql_operations_unfiltered(
         backend,
         auto_generated_pk,
     )?;
+    let upsert_bound_keys = resolve_upsert_bound_keys(&entity_meta, upsert_config.as_ref())?;
     let graphql_upsert_enabled = upsert_config.as_ref().is_some_and(|config| {
-        config
-            .fields
-            .iter()
-            .all(|field| field.graphql_create_visible)
+        config.fields.iter().all(|field| {
+            field.graphql_create_visible
+                || upsert_bound_keys
+                    .iter()
+                    .any(|key| key.field_name == field.field_name)
+        })
     });
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_is_bytes = is_byte_vec_type(&pk_type_ty);
@@ -4691,6 +4799,51 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     }
+    // #908: a principal-bound key, a transient input and a hook
+    // acknowledgement belong to the generated GraphQL upsert. A generated
+    // create has no binding and would store the key type's default value.
+    {
+        let shape_selected = |shape: &str| {
+            entity_meta
+                .mutation_shapes
+                .as_ref()
+                .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+        };
+        let public_upsert =
+            mutations_disabled.is_none() && generates_public_upsert && shape_selected("upsert");
+        for (option, span) in [
+            (
+                "upsert_bound_key",
+                entity_meta.upsert_bound_keys.first().map(|key| key.span),
+            ),
+            (
+                "transient_input",
+                entity_meta.transient_input.as_ref().map(|input| input.span),
+            ),
+            ("upsert_acknowledge", entity_meta.upsert_acknowledge),
+        ] {
+            let Some(span) = span else {
+                continue;
+            };
+            if !public_upsert {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{option} requires the generated GraphQL upsert mutation: declare upsert = \"...\" over public or bound key fields, keep mutations enabled and select upsert in mutation_shapes"
+                    ),
+                ));
+            }
+        }
+        if let Some(key) = entity_meta.upsert_bound_keys.first()
+            && generates_public_create
+            && shape_selected("create")
+        {
+            return Err(syn::Error::new(
+                key.span,
+                "upsert_bound_key requires mutation_shapes without create: a generated create has no principal binding and would store the key type's default value",
+            ));
+        }
+    }
     // #851: a required ExpectedVersion and a conditional assurance selector
     // govern the single-row update only. Every other root that rewrites an
     // existing row would bypass them, so the entity must not generate one.
@@ -4889,6 +5042,12 @@ fn generate_graphql_operations_unfiltered(
 
                 pub fn err(msg: impl ::std::convert::Into<::std::string::String>) -> Self {
                     Self { success: false, error: ::std::option::Option::Some(msg.into()), action: ::std::option::Option::None, entity: ::std::option::Option::None }
+                }
+
+                /// An acknowledged request that wrote nothing: the existing
+                /// row, with no action.
+                pub fn unchanged(entity: #struct_name) -> Self {
+                    Self { success: true, error: ::std::option::Option::None, action: ::std::option::Option::None, entity: ::std::option::Option::Some(entity) }
                 }
             }
         }
@@ -5131,6 +5290,78 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! {}
     };
+    // #908: bound keys are resolved before the entity policy and the
+    // transaction, and written again after the input transform.
+    let bound_key_idents = (0..upsert_bound_keys.len())
+        .map(|index| quote::format_ident!("__gom_bound_key_{index}"))
+        .collect::<Vec<_>>();
+    let principal_key_resolution = upsert_bound_keys
+        .iter()
+        .zip(&bound_key_idents)
+        .map(|(key, ident)| {
+            let binding = &key.binding;
+            quote! {
+                let #ident = ::graphql_orm::graphql::orm::__bind_principal_key::<#binding>(ctx)?;
+            }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let principal_key_assignment = upsert_bound_keys
+        .iter()
+        .zip(&bound_key_idents)
+        .map(|(key, ident)| {
+            let field_name = &key.field_name;
+            quote! { input.#field_name = ::std::clone::Clone::clone(&#ident); }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let principal_key_assertions = upsert_bound_keys
+        .iter()
+        .map(|key| {
+            let identity = crate::entity::relation_column_identity(backend, &key.db_column, true);
+            let case_sensitive = backend == BackendKind::Postgres;
+            let message = format!(
+                "upsert_bound_key field `{}` of `{}` is not a server-only column; every field mapping its column must be #[graphql_orm(private)] with no filter, order, subscribe, search or input exposure, and #[graphql(skip)] when the entity derive does not generate its object; it cannot be a primary-key column; an entity certifies no column when its table or any column name is non-ASCII, longer than 63 bytes or starts with `__gom_`",
+                key.field_name, struct_name
+            );
+            quote! {
+                const _: () = assert!(
+                    ::graphql_orm::graphql::orm::generated_relation_column_is_server_only(
+                        <#struct_name as ::graphql_orm::graphql::orm::GeneratedRelationReadability>::SERVER_ONLY_COLUMNS,
+                        #identity,
+                        #case_sensitive,
+                    ),
+                    concat!(#message),
+                );
+            }
+        })
+        .collect::<proc_macro2::TokenStream>();
+    let (transient_argument, transient_store) = match &entity_meta.transient_input {
+        Some(transient) => {
+            let ty = &transient.ty;
+            let name = apply_graphql_case(&transient.name, argument_case);
+            let description =
+                "Transient input for this request; never stored or published".to_string();
+            if transient.required {
+                (
+                    quote! {
+                        #[graphql(name = #name, desc = #description)] __gom_transient: #ty,
+                    },
+                    quote! { hook_ctx.__set_transient_input::<#ty>(__gom_transient); },
+                )
+            } else {
+                (
+                    quote! {
+                        #[graphql(name = #name, desc = #description)] __gom_transient: ::std::option::Option<#ty>,
+                    },
+                    quote! {
+                        if let ::std::option::Option::Some(__gom_transient) = __gom_transient {
+                            hook_ctx.__set_transient_input::<#ty>(__gom_transient);
+                        }
+                    },
+                )
+            }
+        }
+        None => (quote! {}, quote! {}),
+    };
     let upsert_graphql_method = mutations::upsert::resolver(mutations::upsert::ResolverInput {
         upsert_operation_description: &upsert_operation_description,
         upsert_mutation_name: &upsert_mutation_name,
@@ -5164,6 +5395,11 @@ fn generate_graphql_operations_unfiltered(
         notify_on_updated: &notify_on_updated,
         mutation_output_release: &mutation_output_release,
         generates_public_upsert: mutations_disabled.is_none() && generates_public_upsert,
+        principal_key_resolution: &principal_key_resolution,
+        principal_key_assignment: &principal_key_assignment,
+        transient_argument: &transient_argument,
+        transient_store: &transient_store,
+        acknowledge: entity_meta.upsert_acknowledge.is_some(),
     });
 
     let upsert_repository_method = if upsert_config.is_some() {
@@ -8515,6 +8751,8 @@ fn generate_graphql_operations_unfiltered(
         #mutation_result_impl
 
         #upsert_result_definition
+
+        #principal_key_assertions
 
         #changed_event_object
 

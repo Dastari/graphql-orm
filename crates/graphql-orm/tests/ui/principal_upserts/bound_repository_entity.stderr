@@ -1,0 +1,5 @@
+error: upsert_bound_key requires a GraphQL entity; repository code supplies a private key in its create input
+  --> tests/ui/principal_upserts/bound_repository_entity.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

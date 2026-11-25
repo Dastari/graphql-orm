@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -440,8 +440,9 @@ Additional source audit: conditional update, compare-and-swap, and
 insert-if-absent each retain one transform call per attempt (including attempts
 that do not write). Composite-key helpers have no duplicate wrapper/helper call.
 
-A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
-[#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.
+A hook sees the event, not the mutation's arguments. A generated upsert can carry one typed
+[transient input](#transient-mutation-input) for its transform and hooks. Other generated mutations
+have none yet; [#221](https://github.com/Dastari/graphql-orm/issues/221) tracks them.
 
 ### Transaction extensions
 
@@ -540,6 +541,194 @@ decision and only on commit.
 
 Runtime collections use the separate `RuntimeMutationHook`; see
 [runtime mutations](runtime-mutations.md).
+
+## Principal-bound upserts
+
+Use these three opt-in options when exactly one current row belongs to each authenticated caller,
+and the caller must not choose which row that is. All three apply to the generated GraphQL upsert
+only. Repository and transaction writes are unchanged.
+
+```rust,ignore
+pub struct MachineIdentity;
+
+impl PrincipalKeyBinding for MachineIdentity {
+    type Key = String;
+
+    fn bind(ctx: &async_graphql::Context<'_>) -> async_graphql::Result<String> {
+        // Fails with UNAUTHENTICATED when the request has no verified subject.
+        Ok(ctx.auth_subject()?.id)
+    }
+}
+
+#[derive(async_graphql::InputObject)]
+pub struct SnapshotProof {
+    pub sequence: i64,
+    pub digest: String,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "status_snapshots",
+    plural = "StatusSnapshots",
+    upsert = "machine_key",
+    upsert_bound_key(field = "machine_key", binding = "MachineIdentity"),
+    transient_input(type = "SnapshotProof", on = "upsert", name = "proof"),
+    upsert_acknowledge = true,
+    mutation_shapes = "upsert"
+)]
+pub struct StatusSnapshot {
+    #[primary_key]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(private)]
+    #[unique]
+    pub machine_key: String,
+    pub sequence: i64,
+    pub digest: String,
+    pub payload: String,
+}
+```
+
+The schema gets `upsertStatusSnapshot(input: CreateStatusSnapshotInput!, proof: SnapshotProof!)`.
+`CreateStatusSnapshotInput` has no `machineKey` field.
+
+### Principal-bound conflict keys
+
+`upsert_bound_key(field = "...", binding = "path::Type")` names one member of the `upsert` conflict
+key and a type that implements `PrincipalKeyBinding`. Repeat it to bind several members; the other
+members stay ordinary public input fields.
+
+The generated resolver runs in this order:
+
+1. Generated input validation, resolver authentication, operation scopes and operation assurance.
+2. `PrincipalKeyBinding::bind`. An error refuses the mutation here. Nothing has been read or
+   written, and no policy, transform or hook has run.
+3. The entity write policy, then the transaction.
+4. `WriteInputTransform::before_upsert`. The bound key is already in the input, and the resolver
+   writes it again afterwards, so a transform cannot replace it.
+5. The locking conflict lookup by the bound key, then the row write policy on an existing row, the
+   field write policies, the `Before` hook, the write, the row write policy on the row as written,
+   the `After` hook and the commit, as for [every generated write](#hooks).
+
+Every write authorization of an ordinary generated upsert still applies: the resolver auth mode,
+`operation_authorization` scopes, operation assurance, entity, row and field write policies, the
+`AuthorizationMode`, and PostgreSQL RLS.
+
+Write `bind` so that it derives the key only from verified request data: the authenticated subject,
+or a value your own middleware attached to the request after verifying it. Never read it from an
+argument, a header the client controls or an unverified claim. Return an error when the request
+carries no such value. An `OrmPublicError` keeps its code and message; other errors follow the
+[hook error rules](#hooks). `bind` is synchronous and gets no database handle, so resolve anything
+it needs before the request executes.
+
+#### What stops a client from setting or replacing the key
+
+- **No input.** The key column must be `#[graphql_orm(private)]` with no other surface, so it is
+  absent from `Create<Entity>Input`, `Update<Entity>Input`, `WhereInput`, `OrderByInput`, the
+  object, `Changed` events, the semantic, resolver and client-metadata catalogues, and the operation
+  catalogue's fields, arguments and types. A request that names it fails schema validation. The
+  operation catalogue's host-side `schema_signature` records the field as private, as for every
+  private field.
+- **One value on both branches.** The resolver overwrites the field with the bound value before the
+  conflict lookup, so the insert branch stores it and the update branch can only match the caller's
+  own row. An upsert never updates its conflict columns.
+- **No other generated path.** The generated update and bulk update cannot write the column,
+  because their input does not contain it. A generated create has no binding, so declaring
+  `upsert_bound_key` on an entity that also generates `create` is a compile error: select the
+  mutations you want with `mutation_shapes`, without `create`.
+- **Aliases.** The check is per physical column. A second field that maps the same column with
+  `db_column` and exposes it is a compile error.
+
+These are also compile errors: a bound field that is not a member of the conflict key; a nullable
+field (a `NULL` key never conflicts); a primary-key, version, `write = false`, JSON, spatial or
+read-transformed field; a field bound twice; `upsert_bound_key` without `upsert`, on a
+`repository_entity`, or on an entity whose GraphQL upsert is not generated or not selected; and a
+binding whose `Key` is not the field's type.
+
+The guarantee covers generated GraphQL surfaces. These remain yours to review:
+
+- Repository and transaction code is trusted and sets the key itself through the Rust
+  `Create<Entity>Input` and `Update<Entity>Input`.
+- A generated update or delete addresses a row by primary key, not by the bound key. Restrict them
+  with a row write policy on the private column, or leave them out of `mutation_shapes`.
+- Handwritten resolvers, raw SQL and runtime GraphQL collections over the same table are outside
+  this check.
+
+### Transient mutation input
+
+`transient_input(type = "path::Type", on = "upsert")` adds one typed argument to the generated
+upsert. `type` is any `async_graphql::InputType`. `name` sets the argument name before the schema's
+argument case is applied (default `transient`). `required = false` makes the argument nullable.
+`on` is required and accepts `upsert` only.
+
+The resolver stores the value on the upsert's own transaction before the input transform runs:
+
+```rust,ignore
+// In WriteInputTransform::before_upsert_with_context:
+let proof = write_ctx.transient_input::<SnapshotProof>();
+
+// In MutationHook::on_mutation, in both phases:
+let proof = hook_ctx.transient_input::<SnapshotProof>();
+```
+
+- The transform sees it together with the input it shapes. The `Before` hook sees it together with
+  `event.before::<T>()`, the existing row read under the write lock, so that is where to compare a
+  proof with stored state.
+- It is not a column, so it is never stored. It is not part of `MutationEvent`, `Changed` events,
+  the change journal, `notify_with` or the mutation result. The ORM never logs it. It is dropped
+  with the transaction, before the commit, so deferred post-commit actions do not see it.
+- In catalogues it appears only as the upsert's argument and its input type.
+- It is kept apart from [transaction extensions](#transaction-extensions): `extension::<T>()` never
+  returns a request's transient input, and extensions still cannot be set by request input.
+
+Trusted code that owns a transaction can supply the same value, so one hook serves both paths:
+
+```rust,ignore
+db.transaction(TransactionMode::StateMachine, |tx| {
+    Box::pin(async move {
+        tx.set_transient_input(SnapshotProof { sequence, digest })?;
+        tx.upsert::<StatusSnapshot>(input).await?;
+        Ok(())
+    })
+})
+.await?;
+```
+
+`set_transient_input` and `take_transient_input` are refused with `CONFLICT` inside a mutation
+hook. A value set this way stays until it is taken or the transaction ends, and every write of that
+transaction sees it, including the nested writes a hook makes. `Entity::upsert(&db, input)` opens
+its own transaction and carries none, so a hook that requires one refuses that call.
+
+### Acknowledging a retry without writing
+
+With `upsert_acknowledge = true`, the `Before` hook of the generated GraphQL upsert may call
+`hook_ctx.acknowledge_without_write()` on the update branch:
+
+```rust,ignore
+let Some(current) = event.before::<StatusSnapshot>()? else { return Ok(()) };
+if proof.sequence < current.sequence {
+    return Err(OrmPublicError::with_message(OrmErrorCode::Conflict, "stale snapshot").into_graphql_error());
+}
+if proof.sequence == current.sequence && proof.digest == current.digest {
+    hook_ctx.acknowledge_without_write()?; // an idempotent retry
+}
+```
+
+The upsert then runs no statement, no `After` hook, no row post-image check, no `Changed` event, no
+change-journal entry and no `notify_with` call. It commits the transaction, which keeps anything the
+hook itself wrote, and returns `success: true`, `action: null` and the existing row, released
+through the read policy like any mutation result. A refusal from the hook rolls back as usual, and
+a request the hook neither refuses nor acknowledges is written and delivered as before.
+
+`acknowledge_without_write` is refused with `CONFLICT`, which fails the mutation, everywhere else:
+on the insert branch, in the `After` phase, in an input transform, in repository and transaction
+writes, in other mutations, on an entity without `upsert_acknowledge`, and in the nested writes a
+hook makes. `can_acknowledge_without_write()` tells a shared hook whether the call is allowed.
+
+Concurrent upserts for one key are ordered by the transaction: `BEGIN IMMEDIATE` on SQLite,
+`SERIALIZABLE` on PostgreSQL and SQL Server, with the lookup locking an existing row. A request that
+loses a race is refused by your hook against the row the winner wrote, or by the database as a
+retryable conflict. It never creates a second row.
 
 ## Search Document Maintenance
 

@@ -159,6 +159,10 @@ The same attribute gives the bulk `Where filter is required…` refusals of
 already carry a code. `errorCode` is null when `success` is true. A
 `success: false` from a single-row root means nothing was written. Upsert
 reports every failure as a top-level error, so its result has no `errorCode`.
+An upsert result with `success: true` and `action: null` is an
+[acknowledged retry](runtime-and-writes.md#acknowledging-a-retry-without-writing):
+nothing was written and the row is the existing one. Only an entity that
+declares `upsert_acknowledge` returns it.
 
 Without the attribute the single-row result types, the SDL and the bulk codes
 are unchanged. Rust code that builds a single-row result with a struct literal
