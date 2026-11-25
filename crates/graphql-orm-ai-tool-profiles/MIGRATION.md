@@ -16,7 +16,7 @@ supersedes: []
 capability compilation now fail with `InvalidConfiguration` when a tool
 document, argument plan or AI-classified operation uses an argument that the
 finished schema declares `@transientInput`. The ORM adds that directive only
-to the transient argument of a generated upsert that opts in (ORM 0.230.0), so
+to the transient argument of a generated upsert that opts in (ORM 0.222.0), so
 no existing schema has one. Manifests and fingerprints of existing profiles
 are unchanged.
 

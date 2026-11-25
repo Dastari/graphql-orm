@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.16.0 adds optional replay-window facts to client metadata for
+opted-in generated Changed streams.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version 0.14.0 uses Rust type provenance to resolve described root
 results during static schema composition (#883).
 [Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)

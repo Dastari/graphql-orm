@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.230.0
+## Unreleased - ORM/macros 0.222.0
 
 - **Added (#908).** A generated GraphQL upsert can take a private conflict key
   from the verified request, carry a typed transient input, and let its hook
@@ -51,7 +51,14 @@ for historical context.
     with `action: null`. A call made where it is not allowed also blocks the
     commit, so a hook that ignores the refusal cannot let the write through.
 
-  [Migration](MIGRATION.md#02200-to-02300-principal-bound-upserts)
+  [Migration](MIGRATION.md#02210-to-02220-principal-bound-upserts)
+
+## Unreleased - ORM/macros 0.221.0 and operation catalogue 0.16.0
+
+- **Added (#668).** Generated Changed subscriptions can opt in to an opaque
+  cursor and bounded, process-local replay. Replay checks current subscriber
+  authority and signals when a cursor requires a refetch.
+  [Migration](MIGRATION.md#02200-to-02210-generated-changed-replay)
 
 ## Unreleased - ORM/macros 0.220.0
 

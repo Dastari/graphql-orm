@@ -70,10 +70,11 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.220.0; `graphql-orm-macros` 0.220.0; `graphql-orm-operation-catalog` 0.15.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.31.0; `graphql-orm-ai` 0.163.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.222.0**; **`graphql-orm-macros` 0.222.0**; **`graphql-orm-operation-catalog` 0.16.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; **`graphql-orm-ai-tool-profiles` 0.32.0**; `graphql-orm-ai` 0.163.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.19.0**.
 
-- **No action** — ORM/macros 0.230.0 adds three opt-in options for generated upserts: a private conflict key bound from the verified request (`upsert_bound_key`), a typed, size-bounded transient input for the transform and hooks (`transient_input`), and a hook acknowledgement that answers a retry without writing (`upsert_acknowledge`) (#908). [Migration](../../MIGRATION.md#02200-to-02300-principal-bound-upserts)
+- **No action** — ORM/macros 0.222.0 adds three opt-in options for generated upserts: a private conflict key bound from the verified request (`upsert_bound_key`), a typed, size-bounded transient input for the transform and hooks (`transient_input`), and a hook acknowledgement that answers a retry without writing (`upsert_acknowledge`) (#908). [Migration](../../MIGRATION.md#02210-to-02220-principal-bound-upserts)
 - **No action** — AI tool profiles 0.32.0 refuses GraphQL tool profiles, loaded manifests and typed capabilities that would carry a transient mutation argument (`@transientInput`), so AI runs never retain one (#908). Validate loaded manifests against the owning SDL before registering them. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0320-transient-mutation-arguments)
+- **No action** — ORM/macros 0.221.0 and operation catalogue 0.16.0 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02200-to-02210-generated-changed-replay)
 
 ### workspace-2026.11.25.2
 

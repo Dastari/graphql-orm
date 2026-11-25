@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.19.0
+
+- **Test coverage (#668).** The WebSocket gateway smoke test exercises
+  forwarding an opaque resume cursor to a subgraph and passing back its
+  change, started and reset-required frames.
+
 ## Unreleased - 0.18.0
 
 - **Action needed (#857).** The `auth-agql` feature uses published
