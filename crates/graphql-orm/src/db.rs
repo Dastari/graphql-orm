@@ -16,6 +16,7 @@ pub mod mssql;
 #[derive(Default)]
 struct EventSenders {
     senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+    changed_replay: std::sync::Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
     /// Capacity of channels created from now on; zero means the default.
     capacity: std::sync::atomic::AtomicUsize,
 }
@@ -967,6 +968,22 @@ impl<B: OrmBackend> Database<B> {
     where
         T: Clone + Send + Sync + 'static,
     {
+        let mut streams = self
+            .event_senders
+            .changed_replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(stream) = streams
+            .get(&TypeId::of::<T>())
+            .and_then(|stream| {
+                stream
+                    .downcast_ref::<Arc<crate::graphql::subscriptions::replay::ChangedReplay<T>>>()
+            })
+            .filter(|stream| !stream.matches(&sender))
+        {
+            stream.retire();
+            streams.remove(&TypeId::of::<T>());
+        }
         let mut senders = match self.event_senders.senders.write() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -1011,6 +1028,35 @@ impl<B: OrmBackend> Database<B> {
             .get(&TypeId::of::<T>())
             .and_then(|sender| sender.downcast_ref::<tokio::sync::broadcast::Sender<T>>())
             .cloned()
+    }
+
+    pub(crate) fn changed_replay<T>(
+        &self,
+    ) -> (
+        Arc<crate::graphql::subscriptions::replay::ChangedReplay<T>>,
+        tokio::sync::broadcast::Sender<T>,
+    )
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        use crate::graphql::subscriptions::replay::ChangedReplay;
+        let mut streams = self
+            .event_senders
+            .changed_replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sender = self.ensure_event_sender::<T>();
+        if let Some(stream) = streams
+            .get(&TypeId::of::<T>())
+            .and_then(|stream| stream.downcast_ref::<Arc<ChangedReplay<T>>>())
+            .filter(|stream| stream.matches(&sender))
+        {
+            return (stream.clone(), sender);
+        }
+
+        let stream = ChangedReplay::new(&sender);
+        streams.insert(TypeId::of::<T>(), Box::new(stream.clone()));
+        (stream, sender)
     }
 
     pub fn emit_event<T>(&self, event: T)

@@ -2,7 +2,7 @@
   {
     "finding": "RUSTSEC-2023-0071:rsa:0.9.10",
     "review_by": "2026-12-23",
-    "reason": "Rechecked 2026-11-23: rsa 0.10.0 (Rust 1.87) is fixed, but pinned agql-auth, JWT 10/11, SMB SSPI/picky and lock-only SQLx MySQL 0.8.6 still require ^0.9. The router verifies public-key JWTs including via AccessTokenValidator, and the ORM consumes verified principals; only router tests and the fuzz harness sign with synthetic RSA keys. External agql-auth can issue RS256 tokens and sign RS256/PS256 client assertions, outside these runtime paths. SMB uses username/password NTLM with symmetric crypto. Host private-key decryption, key reuse or new private operations require a fresh review."
+    "reason": "Rechecked 2026-11-24: agql-auth 0.27.0 drops its direct rsa edge. JWT 11 RustCrypto, the ORM JWT 10 test dependency, SMB SSPI/picky and lock-only SQLx MySQL 0.8.6 still require ^0.9. The fix is in rsa 0.10.0. The router verifies public-key JWTs including via AccessTokenValidator, and the ORM consumes verified principals; only router tests and the fuzz harness sign with synthetic RSA keys. External agql-auth can issue RS256 tokens and sign RS256/PS256 client assertions, outside these runtime paths. SMB uses username/password NTLM with symmetric crypto. Host private-key decryption, key reuse or new private operations require a fresh review."
   },
   {
     "finding": "RUSTSEC-2023-0089:atomic-polyfill:1.0.3",
@@ -37,7 +37,7 @@
   {
     "finding": "RUSTSEC-2026-0387:crypto-bigint:0.5.5",
     "review_by": "2026-12-23",
-    "reason": "Rechecked 2026-11-23: pinned agql-auth 0.26.0/jsonwebtoken 10.4.0 and router jsonwebtoken 11.0.0 use p256/p384 0.13 and elliptic-curve 0.13.8, which requires crypto-bigint ^0.5. The fixed 0.7 line needs Rust 1.87 and crosses that range; jsonwebtoken 12 moves curves but cannot replace either current requirement. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. SMB also resolves the old curves via SSPI/picky, but the selected username/password NTLM path uses symmetric signing. S3 SigV4a is on 0.7.10. Existing owner acceptance excludes private EC operations."
+    "reason": "Rechecked 2026-11-24: agql-auth 0.27.0 and the router share jsonwebtoken 11.0.0 in the root lock. Their JWT 11 RustCrypto path and the ORM JWT 10 test dependency use p256/p384 0.13 and elliptic-curve 0.13.8, which requires crypto-bigint ^0.5. JWT 12 adopts the newer curves but crosses the current requirements. Router JWT verification uses public keys and workspace signing fixtures use RSA or HS256. SMB also resolves the old curves via SSPI/picky, but the selected username/password NTLM path uses symmetric signing. S3 SigV4a is on 0.7.10. Existing owner acceptance excludes private EC operations."
   },
   {
     "finding": "RUSTSEC-2026-0441:pin-utils:0.1.0",

@@ -51,7 +51,7 @@ whichever component refused. The rules:
 
 The ORM owns its constants: [`OrmErrorCode`](#codes),
 `graphql_orm::graphql::subscriptions::{SUBSCRIPTION_CONTINUITY_LOST,
-SUBSCRIPTION_SOURCE_CLOSED, SUBSCRIPTION_SELECTION_UNSUPPORTED}` and
+SUBSCRIPTION_SOURCE_CLOSED, SUBSCRIPTION_REPLAY_RESET, SUBSCRIPTION_SELECTION_UNSUPPORTED}` and
 `graphql_orm::graphql::errors::MutationOutcome`. The router keeps its own
 literals and depends on no ORM package. The constants are not in
 `graphql-orm-router-protocol` because that crate holds descriptor data, and
@@ -67,6 +67,7 @@ mapping between the two:
 | `SUBSCRIPTION_CONTINUITY_LOST` | ORM, router | The stream ended and missed events. Subscribe again and refetch |
 | `NOT_FOUND`, `CONFLICT`, `CONSTRAINT_VIOLATION`, `CURSOR_INVALID`, `PAGE_LIMIT_EXCEEDED`, `INTERNAL_ERROR`, `AUTHORIZATION_MISCONFIGURED`, `STEP_UP_REQUIRED` | ORM | See [codes](#codes) |
 | `SUBSCRIPTION_SOURCE_CLOSED`, `SUBSCRIPTION_ADMISSION_REQUIRED`, `INPUT_VALIDATION_REQUIRED` | ORM | See [code case by surface](#code-case-by-surface) |
+| `SUBSCRIPTION_REPLAY_RESET` | ORM, opt-in | The cursor cannot resume a generated Changed stream. Subscribe again without a cursor, then refetch. |
 | `SUBSCRIPTION_SELECTION_UNSUPPORTED` | ORM, opt-in | The `Changed` selection can never be streamed (a relation, a computed field or an unavailable key). Subscribe with a smaller selection, for example keys only |
 | `SUBSCRIPTIONS_NOT_SUPPORTED` | router | A subscription was sent over HTTP, or the router has no subscription gateway. Subscribe over the router's `graphql-transport-ws` endpoint |
 | `MUTATION_NOT_ALLOWED_OVER_HTTP_GET` | router | A mutation was sent with HTTP `GET`. Send it with `POST` |
@@ -159,6 +160,10 @@ The same attribute gives the bulk `Where filter is required…` refusals of
 already carry a code. `errorCode` is null when `success` is true. A
 `success: false` from a single-row root means nothing was written. Upsert
 reports every failure as a top-level error, so its result has no `errorCode`.
+An upsert result with `success: true` and `action: null` is an
+[acknowledged retry](runtime-and-writes.md#acknowledging-a-retry-without-writing):
+nothing was written and the row is the existing one. Only an entity that
+declares `upsert_acknowledge` returns it.
 
 Without the attribute the single-row result types, the SDL and the bulk codes
 are unchanged. Rust code that builds a single-row result with a struct literal
@@ -340,7 +345,8 @@ A runtime page whose boundary row has order values too long for a cursor
 field, or raise `max_cursor_bytes` and the cursor protection limits.
 
 Runtime live streams deliberately share the generated exceptions:
-`SUBSCRIPTION_CONTINUITY_LOST` and `SUBSCRIPTION_SOURCE_CLOSED` stay uppercase.
+`SUBSCRIPTION_CONTINUITY_LOST`, `SUBSCRIPTION_SOURCE_CLOSED` and
+`SUBSCRIPTION_REPLAY_RESET` stay uppercase.
 Each is a `next` frame carrying `errors[].extensions.code`, followed by `complete`,
 with no sequence, identifier or dropped count. The host can explicitly signal
 missed batches, restart, restore or schema revisions. See the

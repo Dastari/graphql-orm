@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.19.0 adds WebSocket regression coverage for subgraph Changed replay
+arguments, cursor and started frames, and the reset-required error.
+
+Version 0.18.0 uses published `agql-auth` `v0.27.0` for the optional
+`auth-agql` feature. Hosts that pass Auth types must adopt the same Git tag.
+See the [migration guide](MIGRATION.md#0170-to-0180-agql-auth-v0270).
+
 Version 0.17.0 (**breaking release**) enforces the composed `@authenticated`
 and `@requiresScopes` directives on every selected field, not only root
 fields, before any downstream request: nested object fields, interface and

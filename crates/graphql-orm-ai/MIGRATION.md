@@ -10,6 +10,84 @@ supersedes: []
 
 # Migration Guide
 
+## 0.164.0 to 0.165.0
+
+**No action** for the AI schema or stored data. The legacy approval-index
+upgrade still admits the original plain index and refuses a filtered index.
+If you prepared a migration plan against an existing SQLite or PostgreSQL
+database, follow the [ORM migration guidance](../../MIGRATION.md#02230-to-02240-opaque-partial-index-predicates)
+and replan against the live database.
+
+## 0.163.0 to 0.164.0
+
+The ORM now supplies the seek predicate for SQL Server run-state filters
+(#867). The SQL text changes for all opted-in exact comparisons. Review plan
+guides and Query Store forced plans for those queries. **Action needed** if a
+live column has drifted. Check the live column types, especially for
+`VARCHAR` columns declared as `NVARCHAR`, and review the affected read
+policies. See the [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks).
+This update requires no additional schema or data migration. Hosts still
+running a pre-0.158.0 schema should follow the upgrade below to install the
+run candidate indexes.
+
+## 0.162.0 to 0.163.0 skill schemas and provider endpoints
+
+**Action needed** when host code matches `ProviderError::InvalidConfiguration`
+from adapter construction, or when `provider_profile_endpoint_issues` lists
+profiles. No schema or data migration.
+
+- **Skill schemas (#816).** Stored published versions outside the depth or
+  regular-expression bounds remain readable and usable through normal skill
+  resolution. `AiResolvedSkill::has_legacy_schema` marks those versions as
+  legacy. Operators with `AiSkillAction::ManageSkill` in the exact scope can
+  call `OrmAiSkillCatalogService::legacy_skill_schemas` to audit each skill's
+  published history, including superseded versions. It returns only version IDs and
+  SHA-256 digests of the canonical stored schema envelopes. To replace a
+  legacy version, publish a new version with schemas that satisfy the limits
+  of 32 JSON nesting levels and 256 UTF-8 bytes per regular expression.
+- **Provider endpoints (#817).** Profile creates and edits require a root
+  URL for Ollama and a non-root path of at most 2,048 bytes for OpenAI-compatible
+  Responses and Chat Completions. The limit applies to the normalized URL
+  path. Native profile endpoints remain deployment-fixed. A deployment
+  override for Anthropic uses the exact-endpoint path contract at adapter
+  initialization. Existing profiles still load. Use
+  `OrmAiConfigurationService::provider_profile_endpoint_issues` with
+  provider-profile read authority to list profile IDs and content-free
+  reasons for a scope, including missing or malformed stored endpoints.
+  Listed profiles already failed adapter initialization before this release.
+  Adapter path failures now return `ProviderError::InvalidEndpointPath`
+  instead of `InvalidConfiguration`. Any edit to a grandfathered profile,
+  including a display-name-only edit, fails until its URL is corrected.
+  Profile saves that fail the path contract return
+  `AiError::InvalidProviderEndpointPath` (`AI_INVALID_PROVIDER_ENDPOINT_PATH`
+  in GraphQL).
+
+## 0.161.0 to 0.162.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, provider definitions, describe output
+and existing bindings stay unchanged. No AI schema module or data migration
+is needed.
+
+## 0.160.0 to 0.161.0
+
+**No action.** AI 0.161.0 uses ORM 0.215.0. The change adapts one SQL Server
+internal call to the ORM's string-filter renderer and has no AI schema, data or
+public API migration. See the
+[workspace migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers).
+
+## 0.159.0 to 0.160.0
+
+**Action needed.** Move direct Auth dependencies to the published `v0.27.0`
+Git tag in the same upgrade and refresh the host lockfile. AI's principal and
+assurance APIs use types from that source. `RecentMfaPolicy` struct literals
+must now set `required_amr` and `required_context`. Auth denies accepted MFA
+with no recorded method. AI continues to refuse delegated credentials for
+durable work and rehydrates current authority at execution checkpoints.
+
+AI 0.160.0 uses ORM 0.214.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
+for Auth store and token changes.
+
 ## 0.158.0 to 0.159.0
 
 **No action.** Resolved reference delivery to Codex app-server requires a

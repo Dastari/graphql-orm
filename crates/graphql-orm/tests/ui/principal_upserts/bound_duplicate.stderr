@@ -1,0 +1,5 @@
+error: upsert_bound_key may bind each conflict-key field only once
+  --> tests/ui/principal_upserts/bound_duplicate.rs:25:5
+   |
+25 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

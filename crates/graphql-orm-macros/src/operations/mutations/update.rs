@@ -48,6 +48,8 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) mutation_output_release: &'a TokenStream,
     pub(in crate::operations) update_many_operation_description: &'a str,
     pub(in crate::operations) update_many_mutation_name: &'a str,
+    /// Clears principal-bound columns from the input after the transform.
+    pub(in crate::operations) principal_key_update_reset: &'a TokenStream,
     pub(in crate::operations) update_many_requires_scopes: &'a TokenStream,
     pub(in crate::operations) where_arg_name: &'a str,
     pub(in crate::operations) where_arg_description: &'a str,
@@ -104,6 +106,7 @@ pub(in crate::operations) fn update(
         mutation_output_release,
         update_many_operation_description,
         update_many_mutation_name,
+        principal_key_update_reset,
         update_many_requires_scopes,
         where_arg_name,
         where_arg_description,
@@ -268,6 +271,7 @@ pub(in crate::operations) fn update(
                         &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
+                #principal_key_update_reset
 
                 #after_transform
 

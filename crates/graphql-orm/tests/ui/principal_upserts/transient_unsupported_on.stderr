@@ -1,0 +1,5 @@
+error: transient_input supports on = "upsert" only; other generated mutations do not carry a transient input yet
+  --> tests/ui/principal_upserts/transient_unsupported_on.rs:25:42
+   |
+25 |     transient_input(type = "Proof", on = "update"),
+   |                                          ^^^^^^^^

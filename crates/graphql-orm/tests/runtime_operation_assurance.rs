@@ -119,8 +119,15 @@ fn definition() -> RuntimeSchema {
     event.fields = vec![
         field("event.id", "id", RuntimeValueKind::String),
         field("event.label", "label", RuntimeValueKind::String),
+        field("event.post", "postId", RuntimeValueKind::Integer),
         version,
     ];
+    let mut event_post = comment.relations[0].clone();
+    event_post.id = RelationId::new("event.post").unwrap();
+    event_post.key_pairs[0].source = fid("event.post");
+    event_post.enforce_foreign_key = false;
+    event_post.on_delete = None;
+    event.relations.push(event_post);
     event.node_identity = Some(RuntimeNodeIdentity {
         version_field: fid("event.rowVersion"),
     });
@@ -352,7 +359,7 @@ impl Fixture {
             "INSERT INTO ra_post (id, label) VALUES (1, 'first')",
             "INSERT INTO ra_tag (id, label) VALUES (10, 'red')",
             "INSERT INTO ra_comment (id, label, postid) VALUES (100, 'note', 1)",
-            "INSERT INTO ra_event (id, label) VALUES ('e1', 'opened')",
+            "INSERT INTO ra_event (id, label, postid) VALUES ('e1', 'opened', 1)",
         ] {
             Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
         }
@@ -378,6 +385,7 @@ impl Fixture {
             self.schema().clone(),
             RuntimeGraphqlOptions::default()
                 .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_relation_filters()
                 .with_live_source(self.live.clone(), RuntimeLiveProfile::NativeRls)
                 .with_mutations({
                     let mut options = RuntimeGraphqlMutationOptions::default();
@@ -993,6 +1001,105 @@ async fn denied_query_roots_and_node_reach_neither_database_nor_read_authority()
     assert_eq!(response["data"]["lookup"]["NodeId"], id.trim_matches('"'));
     assert_eq!(reads, ["post", "tag", "event"]);
     assert!(acquired > 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn indirect_runtime_reads_enforce_the_target_query_assurance() {
+    let f = Fixture::new().await;
+    let evaluator = StepUp::default();
+    let composer = f.composer();
+    let mut builder = OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy());
+    composer
+        .register_assurance_operations(&mut builder)
+        .unwrap();
+    for root in ["events", "posts"] {
+        builder
+            .require(GraphqlOperationKind::Query, root, POLICY)
+            .unwrap();
+    }
+    let api = composer
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(evaluator.clone()),
+        ))
+        .finish()
+        .unwrap();
+    let legacy = f
+        .composer()
+        .data(AssuranceEnforcement::new(
+            Arc::new(
+                OperationAssuranceRegistryBuilder::new(AssuranceSchemaConfig::legacy())
+                    .build()
+                    .unwrap(),
+            ),
+            Arc::new(StepUp::default()),
+        ))
+        .finish()
+        .unwrap();
+    let id = graphql_orm::graphql::federation::encode_node_id("Event", vec!["e1".into()]);
+    let node = format!(
+        r#"{{ lookup: node(NodeId: "{}") {{ ... on Event {{ label }} }} }}"#,
+        id.0
+    );
+    const CHILD: &str = "{ comments { edges { node { ...CommentPost } } } } fragment CommentPost on Comment { related: post { label } }";
+    const COUNT: &str =
+        r#"{ comments(where: {post: {is: {label: {eq: "first"}}}}) { totalCount } }"#;
+    const UPDATE: &str = r#"mutation($schema: String!) {
+        updateComment(expectedSchema: $schema, key: {id: "100"}, input: {label: "updated"}) {
+            record { label post { label } }
+        }
+    }"#;
+    for (query, expected) in [
+        (node.as_str(), json!({"lookup": {"label": "opened"}})),
+        (
+            CHILD,
+            json!({"comments": {"edges": [{"node": {"related": {"label": "first"}}}]}}),
+        ),
+        (COUNT, json!({"comments": {"totalCount": "1"}})),
+        (
+            UPDATE,
+            json!({"updateComment": {"record": {"label": "updated", "post": {"label": "first"}}}}),
+        ),
+    ] {
+        evaluator.satisfied.store(false, Ordering::SeqCst);
+        let (response, reads, acquired) = f.observe(&api, query).await;
+        assert_eq!(step_up_errors(&response), 1, "{response}");
+        assert!(reads.is_empty(), "{reads:?}");
+        assert_eq!(acquired, 0, "{query}");
+
+        evaluator.satisfied.store(true, Ordering::SeqCst);
+        for schema in [&api, &legacy] {
+            let (response, reads, acquired) = f.observe(schema, query).await;
+            assert!(response.get("errors").is_none(), "{response}");
+            assert_eq!(response["data"], expected);
+            assert!(!reads.is_empty());
+            assert!(acquired > 0);
+        }
+    }
+    const LIVE: &str =
+        r#"subscription { eventChanged(keys: ["e1"]) { event { post { label } } } }"#;
+    evaluator.satisfied.store(false, Ordering::SeqCst);
+    let before = f.acquisitions.load(Ordering::SeqCst);
+    let mut stream = api.execute_stream(f.request(LIVE)).boxed();
+    let refusal = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        step_up_code(&serde_json::to_value(refusal).unwrap()),
+        Some("STEP_UP_REQUIRED")
+    );
+    assert_eq!(f.acquisitions.load(Ordering::SeqCst), before);
+    assert_eq!(f.live.opened.load(Ordering::SeqCst), 0);
+    drop(stream);
+
+    evaluator.satisfied.store(true, Ordering::SeqCst);
+    let mut stream = api.execute_stream(f.request(LIVE)).boxed();
+    let pending = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
+    assert!(pending.is_err(), "unexpected frame: {pending:?}");
+    assert_eq!(f.live.opened.load(Ordering::SeqCst), 1);
+    drop(stream);
     f.finish().await;
 }
 
