@@ -508,9 +508,12 @@ Acceptance gates:
 ## Current checkpoint
 
 The Phase 1 internal engine migration is complete. The ORM uses `time` 0.3
-for canonicalization, calendar arithmetic, and SQL Server codecs. The workspace
-lockfile resolves `time` to 0.3.53. PostgreSQL keeps SQLx's chrono codecs, and
-the compatibility layer preserves chrono payloads and accepted legacy spellings.
+for canonicalization, calendar arithmetic, and SQL Server codecs. String
+decoding for SQL Server `date`, `datetime2`, and `datetimeoffset` uses chrono
+when the stored or local year falls outside ±9999.
+The workspace lockfile resolves `time` to 0.3.53. PostgreSQL keeps SQLx's chrono
+codecs, and the compatibility layer preserves chrono payloads and accepted
+legacy spellings.
 The `humantime` exception now identifies its dependency path.
 
 The maintainer approved the separate host features and explicit

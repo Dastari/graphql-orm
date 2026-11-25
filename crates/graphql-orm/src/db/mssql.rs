@@ -1640,6 +1640,25 @@ impl MssqlScalar for String {
     }
 }
 
+// TDS counts days from 0001-01-01. The last day of year 9999 fits without
+// time's large-dates feature.
+const LAST_TDS_DAY_IN_TIME_RANGE: u32 = 3_652_058;
+
+fn datetimeoffset_fits_time(value: tiberius::time::DateTimeOffset) -> bool {
+    let utc = value.datetime2();
+    let day = utc.date().days();
+    if day != LAST_TDS_DAY_IN_TIME_RANGE {
+        return day < LAST_TDS_DAY_IN_TIME_RANGE;
+    }
+
+    // TDS dates start at year 1 and the offset is less than a day, so only
+    // an eastward shift from the last UTC day can overflow the local date.
+    const SECONDS_PER_DAY: u64 = 86_400;
+    let clock = utc.time();
+    let utc_second = (clock.increments() / 10_u64.pow(u32::from(clock.scale()))) % SECONDS_PER_DAY;
+    utc_second as i64 + i64::from(value.offset()) * 60 < SECONDS_PER_DAY as i64
+}
+
 fn decode_string_column(value: &ColumnData<'static>) -> tiberius::Result<Option<String>> {
     use tiberius::FromSql;
 
@@ -1650,12 +1669,31 @@ fn decode_string_column(value: &ColumnData<'static>) -> tiberius::Result<Option<
             .map(legacy_datetime)
             .transpose()?
             .map(|value| temporal::mssql_rfc3339(value.assume_utc())),
+        // Tiberius's time codecs panic if the date or its offset-adjusted
+        // local date falls outside the supported range.
+        ColumnData::DateTime2(Some(raw)) if raw.date().days() > LAST_TDS_DAY_IN_TIME_RANGE => {
+            chrono::NaiveDateTime::from_sql(value)?.map(naive_utc_rfc3339)
+        }
         ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
             PrimitiveDateTime::from_sql(value)?
                 .map(|value| temporal::mssql_rfc3339(value.assume_utc()))
         }
-        ColumnData::DateTimeOffset(_) => {
-            OffsetDateTime::from_sql(value)?.map(temporal::mssql_rfc3339)
+        ColumnData::DateTimeOffset(None) => None,
+        ColumnData::DateTimeOffset(Some(raw)) => {
+            if !(-1439..=1439).contains(&raw.offset()) {
+                return Err(incompatible_column(
+                    "SQL Server datetimeoffset offset is outside the supported range",
+                ));
+            }
+            if datetimeoffset_fits_time(*raw) {
+                OffsetDateTime::from_sql(value)?.map(temporal::mssql_rfc3339)
+            } else {
+                chrono::DateTime::<chrono::FixedOffset>::from_sql(value)?
+                    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            }
+        }
+        ColumnData::Date(Some(raw)) if raw.days() > LAST_TDS_DAY_IN_TIME_RANGE => {
+            chrono::NaiveDate::from_sql(value)?.map(|value| value.to_string())
         }
         ColumnData::Date(_) => Date::from_sql(value)?.map(temporal::display_date),
         ColumnData::Time(_) => Time::from_sql(value)?.map(temporal::clock_text),
@@ -1893,6 +1931,24 @@ fn legacy_datetime(value: tiberius::time::DateTime) -> tiberius::Result<Primitiv
             time::Duration::days(i64::from(value.days())) + time::Duration::milliseconds(millis),
         )
         .ok_or_else(|| incompatible_column("SQL Server datetime is outside the supported range"))
+}
+
+/// Format an offset-free chrono fallback as UTC, with the legacy datetime
+/// rounding for 1/300-second ticks.
+fn naive_utc_rfc3339(value: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+
+    let nanos = value.nanosecond();
+    let value = if nanos.is_multiple_of(100) {
+        value
+    } else {
+        value
+            .with_nanosecond((nanos + 500_000) / 1_000_000 * 1_000_000)
+            .unwrap_or(value)
+    };
+    value
+        .and_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 /// Convert a TDS numeric to `Decimal`, refusing values it cannot represent.
@@ -3033,10 +3089,12 @@ mod tests {
         use tiberius::time as tds;
 
         let date = tds::Date::new(3_652_058);
+        let next_day = tds::Date::new(3_652_059);
         let time = tds::Time::new(863_999_999_999, 7);
         let datetime2 = tds::DateTime2::new(tds::Date::new(0), tds::Time::new(123_456_700, 7));
         for column in [
             ColumnData::Date(Some(date)),
+            ColumnData::Date(Some(next_day)),
             ColumnData::Date(Some(tds::Date::new(0))),
             ColumnData::Date(None),
             ColumnData::Time(Some(time)),
@@ -3046,9 +3104,18 @@ mod tests {
             ColumnData::SmallDateTime(Some(tds::SmallDateTime::new(65_535, 1439))),
             ColumnData::SmallDateTime(None),
             ColumnData::DateTime2(Some(tds::DateTime2::new(date, time))),
+            ColumnData::DateTime2(Some(tds::DateTime2::new(next_day, time))),
             ColumnData::DateTime2(None),
             ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, -30))),
             ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, 840))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(
+                tds::DateTime2::new(date, time),
+                840,
+            ))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(
+                tds::DateTime2::new(next_day, tds::Time::new(0, 7)),
+                -840,
+            ))),
             ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, 0))),
             ColumnData::DateTimeOffset(None),
             ColumnData::DateTime(None),

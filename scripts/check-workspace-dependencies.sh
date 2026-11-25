@@ -277,16 +277,15 @@ if ! cargo tree \
 fi
 
 # SQLx's PostgreSQL macros prefer time over chrono when both are enabled.
-postgres_sqlx_features=$(cargo tree \
+orm_sqlx_features=$(cargo tree \
   --manifest-path "${repository_root}/Cargo.toml" \
   -p graphql-orm \
-  --no-default-features \
-  --features postgres \
+  --features postgres,mssql \
   --edges features \
   --invert sqlx \
   --locked)
-if grep -q 'sqlx feature "time"' <<<"${postgres_sqlx_features}"; then
-  echo "workspace-dependencies: graphql-orm postgres changes SQLx temporal macro types by enabling sqlx/time" >&2
+if grep -q 'sqlx feature "time"' <<<"${orm_sqlx_features}"; then
+  echo "workspace-dependencies: graphql-orm changes PostgreSQL macro types by enabling sqlx/time" >&2
   exit 1
 fi
 
