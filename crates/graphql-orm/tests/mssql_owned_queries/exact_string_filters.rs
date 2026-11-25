@@ -444,7 +444,7 @@ fn fixture_scope() -> ExactFilterRowWhereInput {
 }
 
 async fn filter_ids(db: &Database<MssqlBackend>, filter: &ExactFilterRowWhereInput) -> Vec<i32> {
-    let mut ids = EntityQuery::<ExactFilterRow>::new()
+    let mut ids = EntityQuery::<ExactFilterRow, MssqlBackend>::new()
         .filter(&fixture_scope())
         .filter(filter)
         .fetch_all(db)
@@ -458,7 +458,7 @@ async fn filter_ids(db: &Database<MssqlBackend>, filter: &ExactFilterRowWhereInp
 }
 
 async fn policy_ids(db: &Database<MssqlBackend>, policy: &ReadPredicate) -> Vec<i32> {
-    let mut ids = EntityQuery::<ExactFilterRow>::new()
+    let mut ids = EntityQuery::<ExactFilterRow, MssqlBackend>::new()
         .filter(&fixture_scope())
         .with_read_visibility(&ReadVisibility::Complete(policy.clone()))
         .unwrap()
