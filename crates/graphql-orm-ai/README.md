@@ -17,12 +17,9 @@ with a freshness bound. Review process retention before enabling it.
 [Entity reference delivery](docs/entity-references.md#adapters-for-a-local-process) ·
 [Codex host migration](MIGRATION.md#breaking-release-unreleased)
 
-The same release moves the fixed capability broker to version 3: a `browse`
-operation lists capabilities by namespace, capability and operation after
-host policy, and generated keyset roots return server-held continuation
-handles. Fixed-broker sessions rebind once.
-[Broker version 3](docs/capability-discovery-and-execution.md#broker-version-3-browsing-and-continuation-handles) ·
-[migration](MIGRATION.md#capability-broker-version-3-551)
+SQL Server hosts with a customized covering legacy approval index must review
+its replacement before applying the upgrade.
+[Approval index migration](MIGRATION.md#sql-server-covering-approval-lookup-index)
 
 AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
 provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.

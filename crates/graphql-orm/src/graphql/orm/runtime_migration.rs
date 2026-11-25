@@ -910,10 +910,10 @@ impl OwnedSchemaModel {
                             .as_ref()
                             .is_some_and(|value| value.len() > limits.max_default_bytes)
                     })
-                    || table
-                        .indexes
-                        .iter()
-                        .any(|index| index.columns.len() > limits.max_key_members)
+                    || table.indexes.iter().any(|index| {
+                        index.columns.len() > limits.max_key_members
+                            || index.included_columns.len() > limits.max_fields
+                    })
                     || table
                         .composite_unique_indexes
                         .iter()

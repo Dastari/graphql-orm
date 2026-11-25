@@ -60,6 +60,16 @@ or per-column order:
 the order, and a direction mismatch plans an explicit drop/recreate rather
 than being silently adopted.
 
+## SQL Server covering indexes
+
+SQL Server row-store introspection records `INCLUDE` columns separately
+from key columns. An index with included columns differs from a plain
+index with the same name and keys. Declare the covering definition in a
+physical target with `IndexDef::new(name, keys).with_included_columns(columns)`.
+In an owned model, set `IndexModel::included_columns` to the corresponding
+column names. The included columns contribute to drift and schema hashes.
+Replacing an index on a managed table produces a destructive drop step.
+
 ## Portable conditional indexes
 
 ```rust

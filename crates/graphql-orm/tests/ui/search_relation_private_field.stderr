@@ -1,0 +1,17 @@
+error[E0080]: evaluation panicked: search_relation field `label` of `UiLabel` is not GraphQL-readable; remove it from fields, make it readable, or add #[graphql_orm(allow_search_document)] to the target field
+  --> tests/ui/search_relation_private_field.rs:29:5
+   |
+29 |     labels: Vec<UiLabel>,
+   |     ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: search_relation field `hidden` of `UiLabel` is not GraphQL-readable; remove it from fields, make it readable, or add #[graphql_orm(allow_search_document)] to the target field
+  --> tests/ui/search_relation_private_field.rs:29:5
+   |
+29 |     labels: Vec<UiLabel>,
+   |     ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: search_relation field `input` of `UiLabel` is not GraphQL-readable; remove it from fields, make it readable, or add #[graphql_orm(allow_search_document)] to the target field
+  --> tests/ui/search_relation_private_field.rs:29:5
+   |
+29 |     labels: Vec<UiLabel>,
+   |     ^^^^^^ evaluation of `_` failed here

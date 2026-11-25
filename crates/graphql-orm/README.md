@@ -10,9 +10,18 @@ supersedes: []
 
 # `graphql-orm`
 
+SQL Server index introspection and migration plans distinguish covering
+indexes from their plain-key equivalents.
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
 In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
 fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+
+Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
+full backups. Call `Database::enable_canonical_change_journal_keys` as the
+schema owner and start a fresh incremental chain. The legacy encoding remains
+the default. See the [migration procedure](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
 
 Version 0.219.0 enforces target query assurance on indirect runtime GraphQL
 reads and generated Federation entity lookups.

@@ -2229,6 +2229,7 @@ pub(crate) struct FieldMetadata {
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
     pub(crate) skip_input: bool,
     pub(crate) is_private: bool,
+    pub(crate) allow_search_document: bool,
     pub(crate) sensitive: bool,
     pub(crate) is_date_field: bool,
     pub(crate) is_boolean_field: bool,
@@ -2423,6 +2424,7 @@ impl Default for FieldMetadata {
             skip_db: false,
             skip_input: false,
             is_private: false,
+            allow_search_document: false,
             sensitive: false,
             is_date_field: false,
             is_boolean_field: false,
@@ -2868,6 +2870,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.order = false;
                             meta.subscribe = false;
                             meta.skip_input = true;
+                        } else if nested.path.is_ident("allow_search_document") {
+                            meta.allow_search_document = true;
                         } else if nested.path.is_ident("propagate_change_action") {
                             return Err(nested.error("propagate_change_action belongs inside #[relation(...)]"));
                         } else if nested.path.is_ident("sensitive") {
@@ -3803,6 +3807,7 @@ impl FieldMetadata {
             && !(self.sortable && self.order)
             && !self.subscribe
             && self.search.is_none()
+            && !self.allow_search_document
             && self.search_json.is_empty()
             && !self.is_version
     }
@@ -4889,6 +4894,7 @@ fn generate_entity_tokens(
     let mut managed_version_api_name: Option<String> = None;
     let mut repository_field_policy_defs = Vec::new();
     let mut persisted_field_rust_names = Vec::new();
+    let mut search_document_field_names = Vec::new();
     let mut search_relation_field_checks = Vec::new();
     let mut search_relation_traversal_checks = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
@@ -5274,22 +5280,36 @@ fn generate_entity_tokens(
                         }
                     });
                     // The target is another derive's output: check each copied
-                    // field against its persisted field names at compile time.
+                    // field against its persisted names and search eligibility.
                     for search_field in &search_fields {
                         let message = format!(
                             "search_relation field `{}` is not a persisted field of `{}`",
                             search_field.value(),
                             target_type,
                         );
+                        let unreadable = format!(
+                            "search_relation field `{}` of `{}` is not GraphQL-readable; remove it from fields, make it readable, or add #[graphql_orm(allow_search_document)] to the target field",
+                            search_field.value(),
+                            target_type,
+                        );
                         search_relation_field_checks.push(
                             ::quote::quote_spanned! {search_field.span()=>
-                                const _: () = ::std::assert!(
-                                    ::graphql_orm::graphql::orm::generated_field_names_contain(
-                                        #search_target::__GOM_PERSISTED_FIELD_NAMES,
-                                        #search_field,
-                                    ),
-                                    #message,
-                                );
+                                const _: () = {
+                                    ::std::assert!(
+                                        ::graphql_orm::graphql::orm::generated_field_names_contain(
+                                            #search_target::__GOM_PERSISTED_FIELD_NAMES,
+                                            #search_field,
+                                        ),
+                                        #message,
+                                    );
+                                    ::std::assert!(
+                                        ::graphql_orm::graphql::orm::generated_field_names_contain(
+                                            #search_target::__GOM_SEARCH_DOCUMENT_FIELD_NAMES,
+                                            #search_field,
+                                        ),
+                                        #unreadable,
+                                    );
+                                };
                             },
                         );
                     }
@@ -5770,6 +5790,9 @@ fn generate_entity_tokens(
                 .unwrap_or_else(|| quote! { None });
             let sensitive = field_meta.sensitive;
             persisted_field_rust_names.push(rust_name.clone());
+            if field_meta.graphql_readable() || field_meta.allow_search_document {
+                search_document_field_names.push(rust_name.clone());
+            }
             repository_field_policy_defs.push(quote! {
                 ::graphql_orm::graphql::orm::RepositoryFieldPolicyDef {
                     rust_name: #rust_name,
@@ -7171,6 +7194,10 @@ fn generate_entity_tokens(
             #[doc(hidden)]
             pub const __GOM_PERSISTED_FIELD_NAMES: &'static [&'static str] =
                 &[#(#persisted_field_rust_names),*];
+            /// Persisted Rust fields eligible for generated relation search documents.
+            #[doc(hidden)]
+            pub const __GOM_SEARCH_DOCUMENT_FIELD_NAMES: &'static [&'static str] =
+                &[#(#search_document_field_names),*];
         }
     };
     let parameter_types_impl = (!mssql_parameter_types.is_empty()).then(|| {

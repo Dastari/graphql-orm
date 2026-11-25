@@ -560,20 +560,15 @@ async fn legacy_webhook_primary_key_upgrade_requires_live_empty_evidence() -> gr
             column.name = name.into();
             table.columns.push(column);
         }
-        table.indexes.push(IndexDef {
-            name: "receipt_lookup",
-            columns: &[
+        table.indexes.push(IndexDef::new(
+            "receipt_lookup",
+            &[
                 "provider_kind",
                 "provider_profile_id",
                 "provider_response_id",
                 "state",
             ],
-            column_directions: &[],
-            is_unique: false,
-            method: IndexMethod::Default,
-            is_spatial: false,
-            predicate: None,
-        });
+        ));
         let plan = db.schema().plan_migration(
             "upgrade-placeholder",
             "composite receipt identity",

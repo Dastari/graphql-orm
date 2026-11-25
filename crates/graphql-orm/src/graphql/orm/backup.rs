@@ -213,7 +213,15 @@ impl ChangeExportTimedOut {
 }
 
 /// A consistent backup read transaction on a SQLite or PostgreSQL database.
-pub struct BackupSnapshot(SnapshotTransaction);
+pub struct BackupSnapshot(SnapshotTransaction, Option<i64>);
+
+impl BackupSnapshot {
+    /// The sequence reserved for canonical key cutover, if one is visible
+    /// in this snapshot. This is a lower bound on the snapshot's checkpoint.
+    pub fn canonical_change_journal_start_sequence(&self) -> Option<i64> {
+        self.1
+    }
+}
 
 enum SnapshotTransaction {
     #[cfg(feature = "sqlite")]
@@ -722,6 +730,7 @@ struct ImportRowOrder<'a> {
 fn import_row_order<'a>(
     entity: &'a EntityBackupDescriptor,
     rows: &'a [BackupRow],
+    canonical_keys: bool,
 ) -> crate::Result<ImportRowOrder<'a>> {
     // Self-references order rows by a single-column key; a composite-key table has none.
     let single_key = entity.primary_key_columns.is_empty();
@@ -746,8 +755,23 @@ fn import_row_order<'a>(
     let row_indexes = rows
         .iter()
         .enumerate()
-        .map(|(index, row)| (row.primary_key.as_str(), index))
-        .collect::<BTreeMap<_, _>>();
+        .map(|(index, row)| {
+            // Foreign keys are typed values. Canonical identities encode
+            // physical key bytes, so use the key value for dependency lookup.
+            let key = if canonical_keys {
+                let value = row.values.get(&entity.primary_key_column).ok_or_else(|| {
+                    sqlx::Error::Protocol(format!(
+                        "backup row {} for table {} is missing primary key column {}",
+                        row.primary_key, entity.table_name, entity.primary_key_column
+                    ))
+                })?;
+                std::borrow::Cow::Owned(value.primary_key_string())
+            } else {
+                std::borrow::Cow::Borrowed(row.primary_key.as_str())
+            };
+            Ok((key, index))
+        })
+        .collect::<crate::Result<BTreeMap<_, _>>>()?;
     let mut children = vec![Vec::new(); rows.len()];
     let mut indegrees = vec![0_usize; rows.len()];
 
@@ -1144,7 +1168,7 @@ mod tests {
             }],
         };
 
-        let order = import_row_order(&entity, &rows).expect("rows should order");
+        let order = import_row_order(&entity, &rows, false).expect("rows should order");
 
         assert!(order.deferred.is_empty());
         assert_eq!(order.ordered[0].primary_key, parent_id.to_string());
@@ -1192,7 +1216,8 @@ mod tests {
             }],
         };
 
-        let order = import_row_order(&entity, &rows).expect("cycles defer instead of failing");
+        let order =
+            import_row_order(&entity, &rows, false).expect("cycles defer instead of failing");
         let keys = |rows: &[&BackupRow]| {
             rows.iter()
                 .map(|row| row.primary_key.clone())

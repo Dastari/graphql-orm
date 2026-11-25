@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [index-introspection|unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
+  index-introspection|unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -26,7 +26,7 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 run_backup_postgres() {
-  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,graphql-orm/change-journal \
+  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,canonical-journal-keys,graphql-orm/change-journal \
     --test orm_016_postgres_conformance -- --include-ignored --test-threads=1
 }
 
@@ -265,6 +265,12 @@ run_read_predicate() {
 }
 
 case "${lane}" in
+  index-introspection)
+    cargo test -p graphql-orm --locked --no-default-features --features mssql \
+      --test mssql_restore_marker include_index_differs_from_plain_index -- --ignored --test-threads=1
+    cargo test -p graphql-orm --locked --no-default-features --features postgres \
+      --test conditional_indexes -- --include-ignored --test-threads=1
+    ;;
   unique-index-preflight)
     for backend in sqlite postgres; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \

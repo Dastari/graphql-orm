@@ -4753,6 +4753,7 @@ impl IndexDirection {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct IndexDef {
     pub name: &'static str,
     pub columns: &'static [&'static str],
@@ -4762,6 +4763,8 @@ pub struct IndexDef {
     /// columns. Non-empty metadata must contain exactly one direction per
     /// column.
     pub column_directions: &'static [IndexDirection],
+    /// SQL Server covering columns, stored separately from the ordered key.
+    pub included_columns: &'static [&'static str],
     pub is_unique: bool,
     pub method: IndexMethod,
     pub is_spatial: bool,
@@ -4788,6 +4791,7 @@ impl IndexDef {
             name,
             columns,
             column_directions: &[],
+            included_columns: &[],
             is_unique: false,
             method: IndexMethod::Default,
             is_spatial: false,
@@ -4806,6 +4810,15 @@ impl IndexDef {
     /// [`Self::columns`].
     pub const fn with_directions(mut self, column_directions: &'static [IndexDirection]) -> Self {
         self.column_directions = column_directions;
+        self
+    }
+
+    /// Add SQL Server covering columns to an ordinary index.
+    pub const fn with_included_columns(
+        mut self,
+        included_columns: &'static [&'static str],
+    ) -> Self {
+        self.included_columns = included_columns;
         self
     }
 
@@ -4837,6 +4850,7 @@ impl IndexDef {
             name,
             columns,
             column_directions: &[],
+            included_columns: &[],
             is_unique: false,
             method: IndexMethod::Gist,
             is_spatial: true,
