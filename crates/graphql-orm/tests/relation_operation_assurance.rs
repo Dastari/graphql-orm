@@ -276,12 +276,13 @@ async fn each_target_query_root_protects_relation_reads() {
             );
         }
 
+        // Generated `_entities` enforces every enabled query root of the entity.
         let response = schema.execute(ENTITIES).await;
-        if root == "assuranceEntry" {
-            assert_error_code(&response, ENTITIES, "STEP_UP_REQUIRED");
-        } else {
-            assert_read(response, ENTITIES, "needleword");
-        }
+        assert_error_code(
+            &response,
+            &format!("{root}: {ENTITIES}"),
+            "STEP_UP_REQUIRED",
+        );
         assert_read(
             schema.execute(Request::new(ENTITIES).data(SteppedUp)).await,
             ENTITIES,

@@ -3,12 +3,16 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.219.0 enforces assurance on every enabled entity query root in
+generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
 
 Version 0.218.0 adds the `server_only_key(from, to)` relation option.
 See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
