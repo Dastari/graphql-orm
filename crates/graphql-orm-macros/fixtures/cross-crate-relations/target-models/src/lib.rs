@@ -46,6 +46,57 @@ pub struct Endpoint {
     pub name: String,
 }
 
+/// A relation target whose partition column is server-only (#898). Each
+/// negative feature adds a public alias of the same physical column, spelled
+/// differently, which withdraws the column's server-only certification.
+#[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "cross_partitioned_endpoints",
+        plural = "PartitionedEndpoints"
+    )
+)]
+pub struct PartitionedEndpoint {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(private)]
+    pub partition_id: String,
+    #[cfg(feature = "server-only-public-alias")]
+    #[graphql_orm(db_column = "partition_id")]
+    pub partition_alias: String,
+    // The same column spelled with an explicit identifier delimiter.
+    #[cfg(feature = "server-only-qualified-alias")]
+    #[cfg_attr(not(feature = "mssql"), graphql_orm(db_column = "\"partition_id\""))]
+    #[cfg_attr(feature = "mssql", graphql_orm(db_column = "[partition_id]"))]
+    pub qualified_alias: String,
+    // The same column through a bare name that PostgreSQL case-folds and the
+    // other backends compare without case.
+    #[cfg(feature = "server-only-folded-alias")]
+    #[graphql_orm(db_column = "PARTITION_ID")]
+    pub folded_alias: String,
+    pub label: String,
+}
+
 impl<B: OrmBackend> graphql_orm::graphql::loaders::BatchLoadEntity<B> for Endpoint
 where
     Endpoint: FromSqlRow<B>,

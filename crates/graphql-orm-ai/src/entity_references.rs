@@ -351,7 +351,6 @@ impl AiEntityReferenceRegistry {
         self.kinds.contains(kind)
     }
 
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     /// Checks shape, kinds, count and uniqueness before anything is resolved.
     ///
     /// The checks depend only on the submitted values and the static
@@ -515,7 +514,6 @@ impl std::fmt::Debug for AiEntityReferenceOutcome {
     }
 }
 
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 impl AiEntityReferenceOutcome {
     /// The notice a submission reports for this outcome, if any.
     pub(crate) const fn notice_code(&self) -> Option<AiEntityReferenceNoticeCode> {
@@ -531,7 +529,6 @@ impl AiEntityReferenceOutcome {
 ///
 /// Resolved data is deliberately absent. Storing it would keep disclosing
 /// what the sender could read at submission after that access is revoked.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn stored_handle_content(reference: &AiEntityReferenceInput) -> Value {
     json!({"reference": {"kind": reference.kind, "id": reference.id}})
 }
@@ -540,7 +537,6 @@ pub(crate) fn stored_handle_content(reference: &AiEntityReferenceInput) -> Value
 ///
 /// Only the kind and identifier are taken. Any other member of the stored
 /// value is ignored, so nothing but a handle can leave a stored block.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn stored_handle(content: &Value) -> Option<AiEntityReferenceInput> {
     let reference = content.get("reference")?.as_object()?;
     Some(AiEntityReferenceInput {
@@ -573,7 +569,6 @@ impl std::fmt::Debug for AiEntityReferenceUse {
 
 impl AiEntityReferenceUse {
     /// A reference that produced no data.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) const fn unavailable(reference: AiEntityReferenceInput) -> Self {
         Self {
             reference,
@@ -637,7 +632,6 @@ fn handle_model_block(reference: &AiEntityReferenceInput, reserved_bytes: u64) -
 
 /// A handle that reserves nothing, for a deployment without a registry. It
 /// can only ever be sent as the unavailable marker.
-#[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
 pub(crate) fn unreserved_handle_block(reference: &AiEntityReferenceInput) -> ModelInputBlock {
     handle_model_block(reference, 0)
 }
@@ -676,14 +670,16 @@ fn anonymous_unavailable_wire_envelope() -> Value {
 }
 
 /// Whether a JSON input value is an entity-reference envelope.
-pub(crate) fn is_envelope(value: &Value) -> bool {
+pub(crate) fn is_entity_reference_envelope(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some(AI_ENTITY_REFERENCE_MODEL_BLOCK_TYPE)
 }
 
-/// Replaces a reference envelope with its canonical unavailable form.
-pub(crate) fn unavailable_reference_json(value: &Value) -> Value {
-    stored_handle(value).map_or_else(anonymous_unavailable_wire_envelope, |reference| {
-        unavailable_wire_envelope(&reference)
+/// Canonical marker for a reference envelope, regardless of its current payload.
+pub(crate) fn entity_reference_unavailable_marker(value: &Value) -> Option<Value> {
+    is_entity_reference_envelope(value).then(|| {
+        stored_handle(value).map_or_else(anonymous_unavailable_wire_envelope, |reference| {
+            unavailable_wire_envelope(&reference)
+        })
     })
 }
 
@@ -705,7 +701,7 @@ pub(crate) fn redact_model_blocks(blocks: &mut [ModelInputBlock]) {
         let ModelInputBlock::Json { value } = block else {
             continue;
         };
-        if !is_envelope(value) {
+        if !is_entity_reference_envelope(value) {
             continue;
         }
         *block = match stored_handle(value) {
@@ -750,7 +746,7 @@ fn envelope_values<'a>(
         .flatten()
         .chain(input)
         .filter_map(|block| match block {
-            ModelInputBlock::Json { value } if is_envelope(value) => Some(value),
+            ModelInputBlock::Json { value } if is_entity_reference_envelope(value) => Some(value),
             _ => None,
         })
 }
@@ -880,7 +876,7 @@ impl ModelDispatchReferences {
     /// The returned value must be used for this one transport write. Do not
     /// clone it into anything that is stored, logged or retried.
     pub fn wire_json<'a>(&'a self, value: &'a Value) -> &'a Value {
-        if !is_envelope(value) {
+        if !is_entity_reference_envelope(value) {
             return value;
         }
         stored_handle(value)
@@ -982,7 +978,6 @@ impl ModelDispatchRequest {
     /// its kind is not registered, the hook returns nothing or fails, it lies
     /// beyond the cap, or its data does not fit the limits or the bytes its
     /// block reserved in the sealed egress estimate.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     pub(crate) async fn resolve(
         registry: Option<&AiEntityReferenceRegistry>,
         principal: &AuthPrincipal,
@@ -1089,15 +1084,14 @@ impl ModelDispatchRequest {
     /// the one write that delivers the turn, where it passes each marker
     /// block through [`ModelDispatchReferences::wire_json`], which accepts a
     /// marker as well as a handle.
-    #[cfg_attr(not(feature = "provider-grok-acp"), allow(dead_code))]
     pub(crate) fn into_unavailable_parts(self) -> (ModelRequest, ModelDispatchReferences) {
         let mut request = self.request;
         let mark = |blocks: &mut [ModelInputBlock]| {
             for block in blocks {
                 if let ModelInputBlock::Json { value } = block
-                    && is_envelope(value)
+                    && let Some(marker) = entity_reference_unavailable_marker(value)
                 {
-                    *value = unavailable_reference_json(value);
+                    *value = marker;
                 }
             }
         };
@@ -1216,7 +1210,6 @@ pub struct AiMessageEntityReferenceInput {
 }
 
 /// Most blocks one user message can hold: its text plus every reference.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) const MAXIMUM_USER_MESSAGE_BLOCKS: i64 = MAXIMUM_ENTITY_REFERENCES as i64 + 1;
 
 /// Returns the text block of a stored user message.
@@ -1224,7 +1217,6 @@ pub(crate) const MAXIMUM_USER_MESSAGE_BLOCKS: i64 = MAXIMUM_ENTITY_REFERENCES as
 /// A user message is exactly one `text` block at index 0, followed only by
 /// entity-reference blocks at indices `1..block_count`. Anything else is
 /// malformed and yields `None`, so callers keep failing closed.
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub(crate) fn user_message_text_block(
     blocks: &[crate::persistence::AiMessageBlockRecord],
     block_count: i64,

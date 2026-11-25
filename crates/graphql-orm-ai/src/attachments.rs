@@ -100,7 +100,6 @@ pub struct AiAttachmentUploadTicket {
 }
 
 impl AiAttachmentUploadTicket {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(attachment: AiAttachmentView, token: SecretString, expires_at: i64) -> Self {
         Self {
             attachment,
@@ -461,7 +460,6 @@ pub struct AiProviderFileDeletionRequest {
 }
 
 impl AiProviderFileDeletionRequest {
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn new(
         artifact_id: Uuid,
         attachment_id: Uuid,
@@ -482,7 +480,6 @@ impl AiProviderFileDeletionRequest {
         }
     }
 
-    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_cleanup_evidence(
         mut self,
         previous: bool,
@@ -797,6 +794,7 @@ pub trait AiProviderAttachmentResolver: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiAttachmentQueryRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")
@@ -823,6 +821,7 @@ impl AiAttachmentQueryRoot {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiAttachmentMutationRoot;
 
+#[graphql_orm::graphql_orm_root_fields]
 #[cfg_attr(
     graphql_case_pascal,
     Object(rename_fields = "PascalCase", rename_args = "PascalCase")

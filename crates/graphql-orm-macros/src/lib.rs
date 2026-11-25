@@ -249,10 +249,27 @@ pub fn graphql_policy_object(args: TokenStream, input: TokenStream) -> TokenStre
 /// exclusive `sqlite`, `postgres`, and `mssql` features while depending on a
 /// `graphql-orm` instance whose features may be unified with other workspace
 /// consumers. The attribute accepts the same arguments as `graphql_entity`
-/// except `backend`, which it supplies itself.
+/// except `backend`, which it supplies itself. Put options exclusive to SQL
+/// Server in an optional `mssql(...)` argument.
 pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) -> TokenStream {
-    let args = proc_macro2::TokenStream::from(args);
+    let options = parse_macro_input!(args with syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated);
     let input = parse_macro_input!(input as syn::ItemStruct);
+    let mut shared = Vec::new();
+    let mut mssql_options = None;
+    for option in options {
+        match option {
+            syn::Meta::List(list) if list.path.is_ident("mssql") && mssql_options.is_none() => {
+                mssql_options = Some(list.tokens);
+            }
+            option if option.path().is_ident("mssql") => {
+                return syn::Error::new_spanned(option, "expected a single mssql(...) argument")
+                    .to_compile_error()
+                    .into();
+            }
+            option => shared.push(option),
+        }
+    }
+    let args = quote::quote! { #(#shared,)* };
     let mut sqlite = input.clone();
     sqlite.attrs.push(syn::parse_quote!(
         #[graphql_entity(backend = "sqlite", #args)]
@@ -263,7 +280,7 @@ pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) ->
     ));
     let mut mssql = input;
     mssql.attrs.push(syn::parse_quote!(
-        #[graphql_entity(backend = "mssql", #args)]
+        #[graphql_entity(backend = "mssql", #args #mssql_options)]
     ));
     quote::quote! {
         #[cfg(feature = "sqlite")]
@@ -558,6 +575,37 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         quote! {}
     };
 
+    // The generated wrapper is mounted above whatever the options are, so the
+    // resolver-mount witness is unconditional. It proves mounting only; the
+    // exposure witness above keeps its stricter eligibility. A relation that a
+    // `SimpleObject` getter of the same name may shadow is left out; an
+    // entity whose derive records no such relations shadows none.
+    let output_witness = quote! {
+        #output_witness
+        impl #self_ty {
+            #[doc(hidden)]
+            pub fn __gom_mounted_relation_fields() -> &'static [&'static str] {
+                #[allow(dead_code)]
+                trait ShadowFallback {
+                    fn __gom_shadowed_relation_fields() -> &'static [&'static str] {
+                        &[]
+                    }
+                }
+                impl<T> ShadowFallback for T {}
+                static MOUNTED: ::std::sync::OnceLock<::std::vec::Vec<&'static str>> =
+                    ::std::sync::OnceLock::new();
+                MOUNTED.get_or_init(|| {
+                    let shadowed = Self::__gom_shadowed_relation_fields();
+                    Self::__gom_generated_relation_fields()
+                        .iter()
+                        .copied()
+                        .filter(|field| !shadowed.contains(field))
+                        .collect()
+                })
+            }
+        }
+    };
+
     let attribute = if args.is_empty() {
         quote::quote! { #[::graphql_orm::async_graphql::ComplexObject] }
     } else {
@@ -675,7 +723,10 @@ pub fn derive_graphql_operations(input: TokenStream) -> TokenStream {
     // "add GraphQLOperations" error from the entity derive.
     let witness = federation::federation_key_witness_impl(&input.attrs, &input.ident)
         .unwrap_or_else(|_| quote! {});
-    match operations::generate_graphql_operations(&input).and_then(schema_export::process) {
+    match operations::generate_graphql_operations(&input)
+        .and_then(schema_export::process)
+        .and_then(operations::standard_paths::use_standard_paths)
+    {
         Ok(tokens) => TokenStream::from(quote! { #witness #tokens }),
         Err(err) => {
             let error = err.to_compile_error();

@@ -188,10 +188,10 @@ class SupplyChainTests(unittest.TestCase):
                 arguments = line.split()
                 selected.update(value for option, value in zip(arguments, arguments[1:]) if option == "--test")
         for target in (
-            "authorized_pagination_postgres", "bounded_mutation_sentinels",
+            "postgres_owned_contracts", "bounded_mutation_sentinels",
             "bulk_refusals", "delete_propagation", "denied_relations",
-            "host_integer_key", "host_primary_keys", "postgres_constraint_index_idempotency",
-            "repository_only_postgres", "runtime_records_postgres", "runtime_relations_postgres",
+            "host_integer_key", "host_primary_keys",
+            "postgres_runtime_repository",
             "single_row_refusals",
         ):
             with self.subTest(target=target):

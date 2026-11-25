@@ -307,8 +307,8 @@ same SQL visibility contract; residual callbacks still require implementation.
 A closure predicate admits a row based on every row reachable from it through
 a self-referencing key: merge chains, parent hierarchies, alias chains. It is
 evaluated in SQL, per row, by a recursive CTE on SQLite and PostgreSQL and by
-an unrolled breadth-first search on SQL Server. The cost follows the rows a
-walk reaches, not the size of the table, and no closure is collected in Rust.
+an unrolled breadth-first search on SQL Server. Each walk follows the pointers
+reachable from its starting row.
 
 ```rust
 // Some row in the chain (the row itself included) matches `p`.
@@ -328,7 +328,9 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   every row with an equal key, so a non-unique key fans out exactly as
   `related` does for one hop. Use a unique key, normally the primary key.
   The walk follows references: every non-NULL pointer is expected to name a
-  row.
+  row. Swapping the key pair to walk descendants leaves each leaf with an
+  unmatched pointer, which makes the walk incomplete. Such a walk cannot
+  admit under `related_closure_all` or a negated `related_closure`.
 - **Three-valued result.** `Any` (from `related_closure`) is TRUE when some
   reached row has `P` TRUE, FALSE when the walk is complete and every reached
   row has `P` FALSE, and UNKNOWN otherwise. `All` (from `related_closure_all`)
@@ -355,8 +357,10 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   hops on every backend. `related_closure_within` accepts 1 to
   `READ_PREDICATE_CLOSURE_MAX_DEPTH` (1,024), or 1 to
   `READ_PREDICATE_CLOSURE_MSSQL_MAX_DEPTH` (64) on SQL Server, and refuses
-  anything else with `AUTHORIZATION_MISCONFIGURED`. Each evaluated row costs
-  at most `max_depth` times the rows its walk can reach. Hitting the bound makes the walk
+  anything else with `AUTHORIZATION_MISCONFIGURED`. The depth bound does not
+  limit fan-out. Each hop can visit every matching row before deduplicating
+  pointers. A count over N rows sharing a non-unique key can process on the
+  order of N² × `max_depth` matches. Hitting the bound makes the walk
   incomplete. `All` then fails closed. `Any` is TRUE only if it found a
   matching row within the bound, and otherwise UNKNOWN, so neither the
   existential form nor its negation admits the row.
@@ -373,10 +377,23 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   negate it.
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
-  search and subscription delivery re-reads. `P`'s bind values appear four
-  times, in order. Nested closures get distinct names. It is never evaluated
-  in memory, and never for the whole table. MySQL and other backends are
-  refused with `AUTHORIZATION_MISCONFIGURED`.
+  search and subscription delivery re-reads. SQLite renders every closure,
+  single-level and nested, in the original form: the recursive tuple carries
+  the target's truth, so pointers that compare equal under the pointer
+  column's collation (for example `NOCASE` or `RTRIM`) but carry different
+  truths are all followed, even where the key column distinguishes them
+  (#876). SQL
+  Server can project the governed and reached rows into one target
+  expression for a standalone closure. PostgreSQL keeps the traversal join
+  and can encode scalar truth at each site with a single target expression.
+  On PostgreSQL and SQL Server, when a root closure directly wraps another
+  closure over built-in column comparisons and NULL tests, it can use the
+  inner walk's nullable verdict as its target. SQL Server can share that
+  verdict across the governed and reached rows; PostgreSQL uses it once at
+  each site. Other compositions use separate TRUE and FALSE tests. Each form
+  admits the same rows. Every test keeps the target's bind order. Nested closures get distinct names. The database
+  evaluates the closure per row. Unsupported backends are refused with
+  `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
   so the walk is unrolled into a breadth-first search, with no schema objects
@@ -387,8 +404,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     `OUTER APPLY` that looks up the rows named by the pointers first reached
     at hop `k - 1`, grouped by pointer.
   - **Evaluating `P`.** Each pointer below the bound is followed once more,
-    to evaluate `P` over the rows it names. The row's own `P` is evaluated
-    last.
+    to evaluate `P` over the rows it names. The governed row contributes its
+    own truth and does not count as a key match.
   - **Same semantics.** Both forms reach the same pointers, depths and rows,
     so they admit the same rows. A parity test checks this case for case on
     all three backends, and the owned SQL Server lane runs the full closure
@@ -399,9 +416,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     default, so the shorthand constructors behave identically on every
     backend. The composition limits below cap the whole policy below the
     nesting that failed.
-  - **Cost.** Each level is deduplicated, so the work per row is bounded by
-    `max_depth` times the distinct pointers reached, whatever the fan-out of
-    a non-unique key. Each hop is a correlated lookup on the key columns. Each
+  - **Cost.** Each level deduplicates the pointers after the join. Each hop
+    is a correlated lookup on the key columns. Each
     hop's `OUTER APPLY` carries `TOP (2147483647)`, which limits nothing.
     Without it, plan compilation time grew superlinearly with the bound when
     the key has no index (about 80 s at 64 hops in the owned lane). With it,
@@ -415,9 +431,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     and no table scan per hop. The owned-lane performance test asserts this
     shape.
 
-- **Composition limits.** Relations, negations and closures inline their
-  target: a closure four times. A closure inside a
-  closure also evaluates the inner walk for every row the outer walk
+- **Composition limits.** Relations, negations and closures embed their
+  targets. A closure inside a closure evaluates the inner walk for every row the outer walk
   reaches. Unbounded composition could therefore render a statement of many
   megabytes, nest past what the server parses, or recurse deeply enough to
   overflow a thread stack while rendering. Every predicate is therefore
@@ -441,8 +456,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 5 |
   | Terms of a generated `orderBy` list (`MAX_ORDER_BY_TERMS`), refused as `INVALID_INPUT` | one request | all | 16 |
 
-  Closures are counted as rendered, so a closure inside a closure counts its
-  inner closure four times, once per inlined copy. A generated statement
+  Composition budgets count every occurrence in the original rendering,
+  including both TRUE and FALSE tests at each evaluation site. A generated statement
   holds at most its entity's own policy plus its relation filters and count
   orderings: 2 MiB of policy SQL, and 192 weighted relations on SQLite and
   PostgreSQL or 14 on SQL Server.
@@ -514,8 +529,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     of the rendered table path plus one byte more than an unqualified name
     would. For a long list of values on one column, use `from_filter` with
     an `in_list`, which writes the qualifier once.
-  - **Why these values.** On the owned servers, each extra closure level
-    multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
+  - **Why these values.** In the original renderer's owned-server probes,
+    each extra closure level multiplied the cost: at 64 hops on SQL Server, 0.16 s for one level,
     1.1 s for two and 8 s for three, while four levels exhausted server
     memory. PostgreSQL followed the same curve: 3.7 s at two levels, 21 s at
     three and 172 s at four. Until the breaking release a `not_related`
@@ -523,19 +538,21 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     150 s and nine 542 s. It now inlines its target once and nests one `CASE`
     for every two levels, so the `CASE` limit stops it at twenty levels (nine
     on SQL Server, at the relation total).
-  - **What fits on SQL Server.** A closure at the default 64 hops uses 67
-    subquery levels and counts as one relation; each `related` or
-    `not_related` around it adds two subquery levels and one relation. That
-    leaves room for four relations around it. A closure inside a closure
-    counts as five relations, leaving room for one. A relation chain alone
-    may be nine deep, and a relation filter or count ordering may add five
-    relations to a statement. On SQLite and PostgreSQL, a relation chain may be 32
-    deep, a closure counts as 16 relations plus its own three subqueries, and
-    the 256-level expression limit applies around them.
+  - **What fits on SQL Server.** Each `related` or `not_related` around a
+    closure adds two subquery levels and one relation. At the default bound,
+    the standalone projection uses 66 subquery levels. The original
+    composition rendering uses 67 levels for one closure and leaves room for
+    four relations around it. A directly nested closure counts as five
+    relations and leaves room for one surrounding relation. Putting a
+    relation between two closures uses 73 levels and exhausts the
+    nine-relation budget. A relation chain alone may be nine deep, and a
+    relation filter or count ordering may add five relations to a statement.
+    On SQLite and PostgreSQL, a closure counts as 16 relations, plus its
+    three `EXISTS` subqueries, and a relation chain may be 32 deep.
   - **Cost guidance.** Keep closures to one level where you can. Index the key
-    columns. Prefer a shorter `related_closure_within` bound when chains are
-    known to be shallow: the work per row is at most the bound times the rows
-    the walk reaches, and on SQL Server the plan grows with the bound.
+    columns and prefer unique keys to limit fan-out. Use a shorter
+    `related_closure_within` bound when chains are known to be shallow. The
+    SQL Server plan grows with the bound.
 
 ### Exact offsets remain compatible
 

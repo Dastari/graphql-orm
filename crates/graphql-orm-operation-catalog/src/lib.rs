@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+mod rfc8785;
 mod semantic;
 
+pub use rfc8785::*;
 pub use semantic::*;
 
 /// Stable identifier for the resolver-operation fingerprint algorithm.
@@ -466,13 +468,60 @@ impl GraphqlOperationArgumentDescriptor {
     }
 }
 
+/// How the owning service selects the assurance one generated root requires.
+///
+/// A generated update whose entity declares `update_assurance(...)` selects
+/// one of [`Self::levels`] per request, from the typed field patch and the
+/// locked current row, after the row is locked and before any write. The
+/// selection is conditional: a caller or router cannot know which level a
+/// request needs before the owning service reads the row, so this
+/// declaration is advisory. It lists every level a request may need and
+/// never authorizes execution; the owning service enforces the selected
+/// level itself.
+///
+/// Each level is an assurance policy ID, the same identifier a host passes to
+/// an assurance registry's `require` and an evaluator receives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct GraphqlConditionalAssurance {
+    levels: Vec<String>,
+}
+
+impl GraphqlConditionalAssurance {
+    /// Creates a conditional selection among `levels`.
+    ///
+    /// Levels are sorted and deduplicated, so declaration order carries no
+    /// meaning. An empty list is kept empty; derive output never emits one.
+    pub fn new<I, S>(levels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut levels = levels.into_iter().map(Into::into).collect::<Vec<_>>();
+        levels.sort();
+        levels.dedup();
+        Self { levels }
+    }
+
+    /// Returns every assurance policy ID a request may be required to meet,
+    /// sorted and without duplicates.
+    pub fn levels(&self) -> &[String] {
+        &self.levels
+    }
+
+    /// Returns `true`: the level is chosen per request by the owning service.
+    pub const fn is_conditional(&self) -> bool {
+        true
+    }
+}
+
 /// Immutable metadata for one resolver emitted by `GraphQLOperations`.
 ///
 /// This declaration proves that the derive emitted the resolver for the active
 /// backend/entity feature profile. It deliberately does not claim that a
 /// `schema_roots!` invocation merged the resolver into a public root. Use
 /// [`GraphqlOperationCatalog::operations`] for resolved exposure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GeneratedGraphqlOperationDescriptor {
     entity_rust_type: &'static str,
     diagnostic_rust_type: &'static str,
@@ -493,6 +542,39 @@ pub struct GeneratedGraphqlOperationDescriptor {
     ai_mutation_execution: AiMutationExecutionPolicy,
     authorization_fingerprint: String,
     router_export_fingerprint: String,
+    conditional_assurance: Option<GraphqlConditionalAssurance>,
+}
+
+impl std::fmt::Debug for GeneratedGraphqlOperationDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The output matches the derived form, plus `conditional_assurance`
+        // only when declared, so an existing catalogue prints unchanged.
+        let mut debug = f.debug_struct("GeneratedGraphqlOperationDescriptor");
+        debug
+            .field("entity_rust_type", &self.entity_rust_type)
+            .field("diagnostic_rust_type", &self.diagnostic_rust_type)
+            .field("entity_name", &self.entity_name)
+            .field("table_name", &self.table_name)
+            .field("backend", &self.backend)
+            .field("kind", &self.kind)
+            .field("category", &self.category)
+            .field("query_shape", &self.query_shape)
+            .field("field_name", &self.field_name)
+            .field("description", &self.description)
+            .field("arguments", &self.arguments)
+            .field("rust_result_type", &self.rust_result_type)
+            .field("graphql_result_type", &self.graphql_result_type)
+            .field("schema_signature", &self.schema_signature)
+            .field("fingerprint", &self.fingerprint)
+            .field("authorization", &self.authorization)
+            .field("ai_mutation_execution", &self.ai_mutation_execution)
+            .field("authorization_fingerprint", &self.authorization_fingerprint)
+            .field("router_export_fingerprint", &self.router_export_fingerprint);
+        if let Some(conditional_assurance) = &self.conditional_assurance {
+            debug.field("conditional_assurance", conditional_assurance);
+        }
+        debug.finish()
+    }
 }
 
 impl GeneratedGraphqlOperationDescriptor {
@@ -700,11 +782,42 @@ impl GeneratedGraphqlOperationDescriptor {
             },
             authorization_fingerprint: String::new(),
             router_export_fingerprint: String::new(),
+            conditional_assurance: None,
         };
-        descriptor.fingerprint = descriptor.compute_fingerprint();
-        descriptor.authorization_fingerprint = descriptor.compute_authorization_fingerprint();
-        descriptor.router_export_fingerprint = descriptor.compute_router_export_fingerprint();
+        descriptor.refresh_fingerprints();
         descriptor
+    }
+
+    fn refresh_fingerprints(&mut self) {
+        self.fingerprint = self.compute_fingerprint();
+        self.authorization_fingerprint = self.compute_authorization_fingerprint();
+        self.router_export_fingerprint = self.compute_router_export_fingerprint();
+    }
+
+    /// Records that the owning service selects this mutation's assurance per
+    /// request among `levels`.
+    ///
+    /// This builder is public only for derive output. It has no effect on
+    /// queries and subscriptions. A declared selection is part of
+    /// [`Self::fingerprint`] (and so of the router-export fingerprint); a
+    /// descriptor without one keeps its fingerprints unchanged.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_conditional_assurance(mut self, levels: &[&'static str]) -> Self {
+        if self.kind == GraphqlOperationKind::Mutation {
+            self.conditional_assurance =
+                Some(GraphqlConditionalAssurance::new(levels.iter().copied()));
+            self.refresh_fingerprints();
+        }
+        self
+    }
+
+    /// Returns the conditional assurance selection the owning service
+    /// enforces, or `None` when the operation declares none.
+    ///
+    /// See [`GraphqlConditionalAssurance`] for what the declaration promises.
+    pub const fn conditional_assurance(&self) -> Option<&GraphqlConditionalAssurance> {
+        self.conditional_assurance.as_ref()
     }
 
     /// Records the real Rust path for diagnostics. No fingerprint includes it.
@@ -877,6 +990,18 @@ impl GeneratedGraphqlOperationDescriptor {
         hash.part("rust_result_type", self.rust_result_type);
         hash.part("graphql_result_type", &self.graphql_result_type);
         hash.part("schema_signature", self.schema_signature);
+        // Absent for every operation without a declaration, so existing
+        // fingerprints are unchanged.
+        if let Some(conditional_assurance) = &self.conditional_assurance {
+            hash.part("conditional_assurance", "conditional");
+            hash.part(
+                "conditional_assurance.level_count",
+                &conditional_assurance.levels.len().to_string(),
+            );
+            for (index, level) in conditional_assurance.levels.iter().enumerate() {
+                hash.part(&format!("conditional_assurance.level[{index}]"), level);
+            }
+        }
         hash.finish()
     }
 
@@ -1008,6 +1133,12 @@ impl GraphqlResolverOperationDescriptor {
         self.generated.query_shape()
     }
 
+    /// Returns the conditional assurance selection the owning service
+    /// enforces, when the derive declared one.
+    pub const fn conditional_assurance(&self) -> Option<&GraphqlConditionalAssurance> {
+        self.generated.conditional_assurance()
+    }
+
     /// Returns the conventional root type name.
     pub const fn root_type(&self) -> &'static str {
         self.generated.root_type()
@@ -1087,6 +1218,38 @@ impl GraphqlResolverOperationDescriptor {
     }
 }
 
+/// Failure to compose the operation descriptors of a schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum GraphqlOperationCatalogError {
+    /// Two entity groups claim the same declared identity.
+    DuplicateEntityIdentity {
+        /// The repeated explicit or default identity.
+        identity: &'static str,
+        /// The Rust type of the first claimant.
+        first_rust_type: &'static str,
+        /// The Rust type of the second claimant.
+        second_rust_type: &'static str,
+    },
+}
+
+impl std::fmt::Display for GraphqlOperationCatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateEntityIdentity {
+                identity,
+                first_rust_type,
+                second_rust_type,
+            } => write!(
+                f,
+                "duplicate entity identity {identity:?} for Rust types {first_rust_type:?} and {second_rust_type:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphqlOperationCatalogError {}
+
 /// Deterministic catalog of generated operations for one `schema_roots!` use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphqlOperationCatalog {
@@ -1112,40 +1275,56 @@ impl GraphqlOperationCatalog {
     /// Panics when entity groups repeat a declared identity
     /// ([`GeneratedGraphqlOperationDescriptor::entity_rust_type`]). The diagnostic
     /// names both Rust types, including when an explicit identity collides with
-    /// a default module-path identity. Generated `try_schema_builder*` helpers
-    /// compose the catalogue at schema build, so they also panic on a repeated
-    /// identity rather than returning it as a schema-builder error.
+    /// a default module-path identity. For fallible composition, use
+    /// [`Self::try_compose`].
     #[doc(hidden)]
     pub fn compose<I>(groups: I) -> Self
     where
         I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
     {
+        Self::try_compose(groups).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Composes generated descriptors with per-entity mutation and subscription
+    /// exposure. Queries remain exposed whenever generated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when entity groups repeat a declared identity.
+    pub fn try_compose<I>(groups: I) -> Result<Self, GraphqlOperationCatalogError>
+    where
+        I: IntoIterator<Item = (&'static [GeneratedGraphqlOperationDescriptor], bool, bool)>,
+    {
         let mut identities = std::collections::BTreeMap::new();
-        let mut operations = groups
-            .into_iter()
-            .inspect(|(generated, _, _)| {
-                let entities = generated.iter().map(|entity| (
-                    entity.entity_rust_type(), entity.diagnostic_rust_type(),
-                )).collect::<std::collections::BTreeSet<_>>();
-                for (identity, diagnostic) in entities {
-                    if let Some(previous) = identities.insert(identity, diagnostic) {
-                        panic!(
-                            "duplicate entity identity {identity:?} for Rust types {previous:?} and {diagnostic:?}",
-                        );
-                    }
-                }
-            })
-            .flat_map(|(generated, mutations_exposed, subscriptions_exposed)| {
-                generated.iter().map(move |operation| {
-                    let exposed = match operation.kind() {
-                        GraphqlOperationKind::Query => true,
-                        GraphqlOperationKind::Mutation => mutations_exposed,
-                        GraphqlOperationKind::Subscription => subscriptions_exposed,
-                    };
-                    GraphqlResolverOperationDescriptor::new(operation, exposed)
+        let mut operations = Vec::new();
+        for (generated, mutations_exposed, subscriptions_exposed) in groups {
+            let entities = generated
+                .iter()
+                .map(|operation| {
+                    (
+                        operation.entity_rust_type(),
+                        operation.diagnostic_rust_type(),
+                    )
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
+            for (identity, diagnostic) in entities {
+                if let Some(previous) = identities.insert(identity, diagnostic) {
+                    return Err(GraphqlOperationCatalogError::DuplicateEntityIdentity {
+                        identity,
+                        first_rust_type: previous,
+                        second_rust_type: diagnostic,
+                    });
+                }
+            }
+            operations.extend(generated.iter().map(|operation| {
+                let exposed = match operation.kind() {
+                    GraphqlOperationKind::Query => true,
+                    GraphqlOperationKind::Mutation => mutations_exposed,
+                    GraphqlOperationKind::Subscription => subscriptions_exposed,
+                };
+                GraphqlResolverOperationDescriptor::new(operation, exposed)
+            }));
+        }
         // The order is a fingerprint input, so it must not depend on where an
         // entity is declared. The resolved fingerprint is the final key: it
         // covers every remaining distinguishing value.
@@ -1195,12 +1374,12 @@ impl GraphqlOperationCatalog {
         export_hash.part("algorithm", GRAPHQL_ROUTER_EXPORT_FINGERPRINT_ALGORITHM);
         export_hash.part("operation_catalog_fingerprint", &fingerprint);
         export_hash.part("authorization_fingerprint", &authorization_fingerprint);
-        Self {
+        Ok(Self {
             operations: operations.into_boxed_slice(),
             fingerprint,
             authorization_fingerprint,
             router_export_fingerprint: export_hash.finish(),
-        }
+        })
     }
 
     /// Returns all generated operations, including mutations omitted at root.
@@ -1506,8 +1685,89 @@ mod tests {
         }
     }
 
+    fn update_descriptor() -> GeneratedGraphqlOperationDescriptor {
+        GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+            "example::Record",
+            "Record",
+            "records",
+            "sqlite",
+            GraphqlOperationKind::Mutation,
+            GeneratedGraphqlOperationCategory::Update,
+            "updateRecord",
+            vec![],
+            "RecordResult",
+            "RecordResult!",
+            "shape-v1",
+            GraphqlAuthorizationRequirement::default(),
+        )
+    }
+
     #[test]
-    #[should_panic(expected = "duplicate entity identity")]
+    fn conditional_assurance_is_absent_by_default_and_changes_nothing_then() {
+        let descriptor = update_descriptor();
+        assert_eq!(descriptor.conditional_assurance(), None);
+        // The Debug form is the derived one: no new member appears.
+        assert!(!format!("{descriptor:?}").contains("conditional_assurance"));
+    }
+
+    #[test]
+    fn conditional_assurance_lists_sorted_levels_and_binds_the_operation_fingerprint() {
+        let plain = update_descriptor();
+        let conditional =
+            update_descriptor().with_conditional_assurance(&["write", "elevated", "write"]);
+        let selection = conditional
+            .conditional_assurance()
+            .expect("declared selection");
+        assert!(selection.is_conditional());
+        assert_eq!(selection.levels(), ["elevated", "write"]);
+        assert!(format!("{conditional:?}").contains("conditional_assurance"));
+        assert_ne!(plain.fingerprint(), conditional.fingerprint());
+        assert_ne!(
+            plain.router_export_fingerprint(),
+            conditional.router_export_fingerprint()
+        );
+        // Assurance is not a scope requirement.
+        assert_eq!(
+            plain.authorization_fingerprint(),
+            conditional.authorization_fingerprint()
+        );
+        // Declaration order is not meaningful.
+        assert_eq!(
+            conditional.fingerprint(),
+            update_descriptor()
+                .with_conditional_assurance(&["elevated", "write"])
+                .fingerprint()
+        );
+        assert_ne!(
+            conditional.fingerprint(),
+            update_descriptor()
+                .with_conditional_assurance(&["elevated"])
+                .fingerprint()
+        );
+    }
+
+    #[test]
+    fn conditional_assurance_applies_only_to_mutations() {
+        let query = GeneratedGraphqlOperationDescriptor::generated(
+            "example::Record",
+            "Record",
+            "records",
+            "sqlite",
+            GraphqlOperationKind::Query,
+            GeneratedGraphqlOperationCategory::List,
+            "records",
+            vec![],
+            "Record",
+            "[Record!]!",
+            "shape",
+        );
+        let fingerprint = query.fingerprint().to_owned();
+        let query = query.with_conditional_assurance(&["elevated"]);
+        assert_eq!(query.conditional_assurance(), None);
+        assert_eq!(query.fingerprint(), fingerprint);
+    }
+
+    #[test]
     fn duplicate_derived_identity_is_rejected() {
         let generated = Box::leak(
             vec![GeneratedGraphqlOperationDescriptor::generated(
@@ -1525,7 +1785,19 @@ mod tests {
             )]
             .into_boxed_slice(),
         );
-        GraphqlOperationCatalog::compose([(&*generated, true, true), (&*generated, true, true)]);
+        let groups = [(&*generated, true, true), (&*generated, true, true)];
+        let error = GraphqlOperationCatalog::try_compose(groups).unwrap_err();
+        assert_eq!(
+            error,
+            GraphqlOperationCatalogError::DuplicateEntityIdentity {
+                identity: "example::Record",
+                first_rust_type: "example::Record",
+                second_rust_type: "example::Record",
+            }
+        );
+        let panic =
+            std::panic::catch_unwind(|| GraphqlOperationCatalog::compose(groups)).unwrap_err();
+        assert_eq!(panic.downcast_ref::<String>(), Some(&error.to_string()));
     }
 
     #[test]
@@ -1936,6 +2208,82 @@ mod tests {
         // Generated queries remain exposed, while the generated mutation is
         // correctly omitted from protocol export.
         assert_eq!(hidden.router_protocol_operations().unwrap().len(), 1);
+    }
+
+    /// A router export carries the scope names, scope templates and
+    /// `SubgraphOnly` text of exposed operations, and nothing of an operation
+    /// the schema root omits.
+    #[cfg(feature = "router-protocol")]
+    #[test]
+    fn protocol_export_discloses_requirements_of_exposed_operations_only() {
+        let root = |kind, category, field: &'static str, authorization| {
+            GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+                "example::Record",
+                "Record",
+                "records",
+                "sqlite",
+                kind,
+                category,
+                field,
+                vec![GraphqlOperationArgumentDescriptor::generated(
+                    "id", "String", "String!",
+                )],
+                "Record",
+                "Record!",
+                "record-shape-v1",
+                authorization,
+            )
+        };
+        let generated: &'static [GeneratedGraphqlOperationDescriptor] = Box::leak(Box::new([
+            root(
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::SingleRead,
+                "record",
+                GraphqlAuthorizationRequirement::AllScopes {
+                    scopes: vec!["records.{id}.read".into(), "records.read".into()],
+                },
+            ),
+            root(
+                GraphqlOperationKind::Query,
+                GeneratedGraphqlOperationCategory::List,
+                "records",
+                GraphqlAuthorizationRequirement::SubgraphOnly {
+                    policy: GraphqlUnrepresentablePolicy::new(
+                        GraphqlUnrepresentablePolicyCode::Custom,
+                        "host policy decides",
+                    ),
+                },
+            ),
+            root(
+                GraphqlOperationKind::Mutation,
+                GeneratedGraphqlOperationCategory::Delete,
+                "deleteRecord",
+                GraphqlAuthorizationRequirement::AllScopes {
+                    scopes: vec!["records.purge".into()],
+                },
+            ),
+        ]));
+        let export = |mutations| {
+            let catalog = GraphqlOperationCatalog::compose([(generated, mutations, true)]);
+            serde_json::to_string(&catalog.router_protocol_operations().unwrap()).unwrap()
+        };
+        let exposed = export(true);
+        for disclosed in [
+            "records.{id}.read",
+            "records.read",
+            "host policy decides",
+            "records.purge",
+        ] {
+            assert!(exposed.contains(disclosed), "{disclosed}");
+        }
+        // No backend, Rust path or schema signature is exported.
+        for undisclosed in ["sqlite", "example::Record", "record-shape-v1"] {
+            assert!(!exposed.contains(undisclosed), "{undisclosed}");
+        }
+        let hidden = export(false);
+        assert!(hidden.contains("records.read"));
+        assert!(!hidden.contains("records.purge"));
+        assert!(!hidden.contains("deleteRecord"));
     }
 }
 

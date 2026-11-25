@@ -2,7 +2,6 @@
 
 #![allow(missing_docs)]
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::orm_read_bounds::InternalReadBound as _;
 use graphql_orm::prelude::*;
 
@@ -29,14 +28,12 @@ use graphql_orm::prelude::*;
         name = "idx_graphql_orm_ai_provider_sessions_parked_wait",
         columns = ["state", "parked_expires_at", "updated_at", "id"],
         directions = ["asc", "asc", "asc", "asc"]
-    )
+    ),
+    mssql(schema_policy = "external_writable", exact_string_filters = true)
 )]
-#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
-#[cfg_attr(
-    any(feature = "sqlite", feature = "postgres"),
-    derive(GraphQLEntity, GraphQLOperations)
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiProviderSessionBindingRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -130,8 +127,8 @@ pub(crate) struct AiProviderSessionBindingRecord {
     pub row_version: i64,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod service {
+    use crate::AiOrmBackend;
     use std::sync::Arc;
 
     use agql_auth::{AuthPrincipal, Clock, CurrentPrincipalResolver, PrincipalReference};
@@ -139,9 +136,7 @@ mod service {
     use graphql_orm::db::Database;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::filters::{Int64Filter, StringFilter, UuidFilter};
-    use graphql_orm::graphql::orm::{
-        ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionMode,
-    };
+    use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, MutationContext, TransactionMode};
     use serde::{Deserialize, Serialize};
     use sha2::Digest;
     use time::{Duration, OffsetDateTime};
@@ -194,9 +189,9 @@ mod service {
     /// Generated-ORM provider-session store with protected cursors and exact
     /// run/session fencing.
     pub struct OrmAiProviderSessionService {
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         /// The handle the host supplied, returned by `database()`.
-        host_database: Database<DefaultWriteBackend>,
+        host_database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -221,7 +216,7 @@ mod service {
         /// bound is positive and at most one hour.
         #[allow(clippy::too_many_arguments)]
         pub fn new(
-            database: Database<DefaultWriteBackend>,
+            database: Database<AiOrmBackend>,
             access_policy: Arc<dyn AiAccessPolicy>,
             protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
             content_protector: Arc<dyn AiContentProtector>,
@@ -258,7 +253,7 @@ mod service {
         // The public accessor returns the host's handle; `database` is the
         // crate's internal handle and never leaves the crate.
         #[allow(clippy::misnamed_getters)]
-        pub const fn database(&self) -> &Database<DefaultWriteBackend> {
+        pub const fn database(&self) -> &Database<AiOrmBackend> {
             &self.host_database
         }
 
@@ -2883,7 +2878,7 @@ mod service {
     /// it with other bindings that need manual provider cleanup and the
     /// cleanup scan never examines it again.
     async fn quarantine_malformed_binding(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         candidate: &AiProviderSessionBindingRecord,
         now: OffsetDateTime,
     ) -> Result<(), OrmPublicError> {
@@ -2964,7 +2959,7 @@ mod service {
     }
 
     async fn load_and_validate_completed_run(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         lease: &AiRunLease,
     ) -> Result<AiRunRecord, OrmPublicError> {
         let run = tx
@@ -3002,7 +2997,7 @@ mod service {
     /// proof that no provider turn, adopted wait, or assistant output of this
     /// run was persisted.
     async fn load_and_validate_interrupted_run(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         lease: &AiRunLease,
     ) -> Result<AiRunRecord, OrmPublicError> {
         let run = tx
@@ -3035,7 +3030,7 @@ mod service {
     /// Both are read inside the settling transaction, so a concurrent writer
     /// cannot slip persisted output past the check.
     async fn run_persisted_no_output(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         run_id: AiRunId,
     ) -> Result<bool, OrmPublicError> {
         let messages = tx
@@ -3076,7 +3071,7 @@ mod service {
 
     /// Loads the single provider-session binding of one session.
     async fn load_single_session_binding(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         session_id: Uuid,
     ) -> Result<AiProviderSessionBindingRecord, OrmPublicError> {
         let records = tx
@@ -3124,7 +3119,7 @@ mod service {
     }
 
     async fn validate_native_wait_source(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         checkpoint: &AiRunCheckpointRecord,
         wait: AiProviderSessionWaitIdentity,
         finalized: bool,
@@ -3334,7 +3329,7 @@ mod service {
     }
 
     async fn validate_wait_confirmation(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         binding: &AiProviderSessionBindingRecord,
         run: &AiRunRecord,
         source_checkpoint: &AiRunCheckpointRecord,
@@ -3459,7 +3454,7 @@ mod service {
     }
 
     async fn reconcile_parked_confirmation(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         binding: &AiProviderSessionBindingRecord,
         now: OffsetDateTime,
     ) -> Result<bool, OrmPublicError> {
@@ -3577,7 +3572,7 @@ mod service {
     }
 
     async fn validate_wait_reclaim(
-        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut MutationContext<'_, AiOrmBackend>,
         binding: &AiProviderSessionBindingRecord,
         run: &AiRunRecord,
         lease: &AiRunLease,
@@ -3980,7 +3975,7 @@ mod service {
     }
 
     async fn append_audit(
-        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
         action: &str,
         binding_id: Uuid,
         reason_code: &str,
@@ -4014,7 +4009,7 @@ mod service {
     /// appended to the ordinary sequenced session stream so it replays,
     /// retains, and authorizes exactly like every other session event.
     async fn append_provider_session_disclosure(
-        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
         event_type: &str,
         session_id: Uuid,
         binding_id: Uuid,
@@ -4077,7 +4072,7 @@ mod service {
     }
 
     async fn append_cleanup_completion_audit(
-        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+        tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
         record: &AiProviderSessionBindingRecord,
         observed_at: OffsetDateTime,
     ) -> Result<(), OrmPublicError> {
@@ -5346,11 +5341,11 @@ mod service {
         #[derive(Clone)]
         struct RepositoryOnlyHostPolicy;
 
-        impl graphql_orm::graphql::orm::EntityPolicy<DefaultWriteBackend> for RepositoryOnlyHostPolicy {
+        impl graphql_orm::graphql::orm::EntityPolicy<AiOrmBackend> for RepositoryOnlyHostPolicy {
             fn can_access_entity<'a>(
                 &'a self,
                 _context: Option<&'a async_graphql::Context<'_>>,
-                _database: &'a Database<DefaultWriteBackend>,
+                _database: &'a Database<AiOrmBackend>,
                 _entity_name: &'static str,
                 _policy_key: Option<&'static str>,
                 _kind: graphql_orm::graphql::orm::EntityAccessKind,
@@ -6035,5 +6030,4 @@ mod service {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use service::*;

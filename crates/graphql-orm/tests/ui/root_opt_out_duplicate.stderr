@@ -1,0 +1,5 @@
+error: generated root option may only be declared once
+ --> tests/ui/root_opt_out_duplicate.rs:4:56
+  |
+4 | #[graphql_entity(table = "records", mutations = false, mutations = true)]
+  |                                                        ^^^^^^^^^

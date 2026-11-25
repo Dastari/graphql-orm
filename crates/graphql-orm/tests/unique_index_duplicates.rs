@@ -113,6 +113,22 @@ async fn repeated_keys_refuse_the_plan_before_any_statement_and_name_only_the_in
         &step.step,
         MigrationStep::CreateIndex { index, .. } if index.is_unique
     )));
+    let mut mismatched = plan.clone();
+    mismatched.backend = "postgres";
+    let mismatch = database
+        .schema()
+        .preflight_unique_indexes(&mismatched)
+        .await
+        .expect_err("preflight must refuse a plan for another backend");
+    assert!(mismatch.to_string().contains("preflight uses sqlite"));
+
+    let preflight_error = database
+        .schema()
+        .preflight_unique_indexes(&plan)
+        .await
+        .expect_err("preflight must refuse repeated keys");
+    assert!(UniqueIndexDuplicates::from_error(&preflight_error).is_some());
+
     let refused = database
         .schema()
         .apply_migration(&plan, ApplyOptions::default())
@@ -137,6 +153,12 @@ async fn repeated_keys_refuse_the_plan_before_any_statement_and_name_only_the_in
         .execute(database.pool())
         .await
         .expect("duplicate should delete");
+    database
+        .schema()
+        .preflight_unique_indexes(&plan)
+        .await
+        .expect("clean preflight should succeed");
+    assert_eq!(unique_index_count(&database).await, 0);
     database
         .schema()
         .apply_migration(&plan, ApplyOptions::default())

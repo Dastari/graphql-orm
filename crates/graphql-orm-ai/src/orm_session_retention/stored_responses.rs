@@ -10,6 +10,7 @@
 //! committed before any request, only confirmed absence removes a row, and
 //! the bounded attempts end in the terminal `cleanup_unconfirmed` state.
 
+use crate::AiOrmBackend;
 use graphql_orm::graphql::filters::Int64Filter;
 use graphql_orm::graphql::orm::MutationContext;
 use sha2::{Digest, Sha256};
@@ -52,7 +53,7 @@ fn parse_recorded_kind(value: &str) -> Option<ProviderKind> {
 /// deletion boundary in this crate. A response already in the ledger is left
 /// unchanged.
 pub(crate) async fn record_retained_provider_response(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     session_id: Uuid,
     provider_kind: &str,
     provider_profile_id: &str,
@@ -112,7 +113,7 @@ pub(crate) async fn record_retained_provider_response(
 /// Whether a session still has retained responses that retention has not
 /// released. Finalization waits for this to become false.
 pub(super) async fn session_has_retained_responses(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     session_id: Uuid,
 ) -> Result<bool, OrmPublicError> {
     Ok(!tx
@@ -636,7 +637,7 @@ impl OrmAiSessionRetentionService {
 }
 
 async fn insert_cleanup_audit(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     id: Uuid,
     outcome: &str,
     correlation_id: String,

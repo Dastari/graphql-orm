@@ -1,7 +1,6 @@
 //! ORM-backed authenticated usage reporting.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_support::{map_usage, page_input, principal_identity};
 use std::sync::Arc;
 
@@ -9,7 +8,6 @@ use agql_auth::AuthPrincipal;
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::filters::{Int64Filter, StringFilter};
-use graphql_orm::graphql::orm::DefaultWriteBackend;
 use graphql_orm::graphql::pagination::ValidatedKeysetConnection;
 
 use crate::persistence::*;
@@ -25,14 +23,14 @@ use crate::{
 /// reservation counter internals. Host policy chooses current-principal-only
 /// or exact-scope visibility for each request.
 pub struct OrmAiUsageService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiUsageAccessPolicy>,
 }
 
 impl OrmAiUsageService {
     /// Creates an authenticated usage service over the AI ORM database.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiUsageAccessPolicy>,
     ) -> Self {
         let database = crate::custody_field_policy::custody_database(database);

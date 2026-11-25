@@ -170,7 +170,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # The fixture runner tests run in orm-fixtures; scripts/check-ci-orm-split.py
       # requires this list to be exactly the tests those binaries define.
-      - run: cargo test -p graphql-orm -- --exact --skip sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip external_legacy_migration_surface_compiles --skip pascal_relationship_semantics_compile_as_a_complete_query_capability --skip external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
+      - run: cargo test -p graphql-orm -- --exact --skip backend_coexistence_fixture::sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip backend_coexistence_fixture::direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip migration_api_compatibility_fixture::external_legacy_migration_surface_compiles --skip relationship_capability_fixture::pascal_relationship_semantics_compile_as_a_complete_query_capability --skip repository_aggregate_consumer_fixture::external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots
       - run: cargo test -p graphql-orm --no-default-features --features sqlite --test federation_entity_keys_case_features
         env:
@@ -215,7 +215,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --test backend_coexistence_fixture --test cross_crate_relations_fixture --test federation_end_to_end_fixture --test migration_api_compatibility_fixture --test relationship_capability_fixture --test repository_aggregate_consumer_fixture
+      - run: cargo test -p graphql-orm --test consumer_fixtures --test cross_crate_relations_fixture --test federation_end_to_end_fixture
+      - name: Check backup adapter backend selection
+        run: bash scripts/check-backup-backend-fixture.sh
       - name: Run the graphql-orm-usage skill examples and behaviour contract
         run: cargo test --manifest-path skills/verify/Cargo.toml --target-dir target/fixtures --locked
 
@@ -235,7 +237,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "2"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_queries --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes --test runtime_operation_assurance --test runtime_graphql_formats -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test sqlite_runtime_queries --test runtime_live --test runtime_search_graphql --test runtime_search_writes --test runtime_operation_assurance --test runtime_graphql_formats -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_scalar_readback --test runtime_live --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir --test runtime_many_to_many --test runtime_search_long_tables -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
           cargo check -p graphql-orm --locked --no-default-features --features sqlite,mssql,runtime-graphql --all-targets
@@ -271,7 +273,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "1"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test postgres_rls --test postgres_rls_drift --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test computed_field_invalidation --test postgres_rls --test postgres_rls_drift --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test server_only_relation_keys --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
@@ -302,7 +304,7 @@ jobs:
         run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - name: Execute MSSQL schema and query regressions without a database
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_transport --test mssql_restore_marker
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_owned_connections --test mssql_restore_marker
 
   orm-security-sqlite:
     name: Current authority and subscription privacy (SQLite)
@@ -368,7 +370,7 @@ jobs:
       - name: Verify TLS and retained query notifications on owned servers
         env:
           GRAPHQL_ORM_TEST_MSSQL_PULL: missing
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_transport --test mssql_notifications -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_owned_connections -- --ignored --test-threads=1
 
   orm-text-group-pages:
     runs-on: ubuntu-latest
@@ -438,7 +440,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test subscription_path_order --test composite_subscription_scopes --test operation_catalog_sdl_conformance --test generated_input_disclosure --test custom_input_disclosure_roots --test client_facing_metadata
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test compile_ui record_version_ui
 
   # Provider tests and companion lint/docs use separate runners, while provider
@@ -603,7 +605,11 @@ jobs:
 
   ai-postgres-parity:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -611,7 +617,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
-        run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
+        run: scripts/run-owned-database-lanes.sh ai-postgres
+
+  ai-mssql-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Run ORM parity against a test-owned disposable SQL Server container
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: scripts/run-owned-database-lanes.sh ai-mssql
 
   semver:
     if: github.event_name == 'pull_request'

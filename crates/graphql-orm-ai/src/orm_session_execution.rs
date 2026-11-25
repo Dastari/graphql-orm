@@ -1,5 +1,6 @@
 //! Durable session-selection reads and exact legacy evidence checks.
 
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_transaction, principal_identity, record_scope};
 use agql_auth::{Clock, CurrentPrincipalResolver};
@@ -7,7 +8,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{DefaultWriteBackend, MutationContext, TransactionMode};
+use graphql_orm::graphql::orm::{MutationContext, TransactionMode};
 use std::sync::Arc;
 
 use crate::orm_runs::load_and_validate_active_lease;
@@ -21,7 +22,7 @@ use crate::{
 /// Reads immutable enqueue-time choices under the existing durable lease fence.
 /// This is routing metadata only; ordinary per-egress/tool authorization remains mandatory.
 pub struct OrmAiRunExecutionSelectionReader {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     principal_resolver: crate::principal_projection::AiCurrentPrincipalResolver,
     access_policy: Arc<dyn AiAccessPolicy>,
     clock: Arc<dyn Clock>,
@@ -31,7 +32,7 @@ impl OrmAiRunExecutionSelectionReader {
     /// Creates a reader. Resolved principals must match the recorded reference,
     /// remain unexpired and be less than 30 seconds old at the final fenced read.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         principal_resolver: Arc<dyn CurrentPrincipalResolver>,
         access_policy: Arc<dyn AiAccessPolicy>,
         clock: Arc<dyn Clock>,
@@ -137,11 +138,65 @@ impl AiRunExecutionSelectionReader for OrmAiRunExecutionSelectionReader {
             encoded.as_deref().ok_or(AiError::SessionExecutionUnbound)?,
         )
     }
+
+    async fn verify_compaction_fence(
+        &self,
+        lease: &AiRunLease,
+        selection: &AiSessionExecutionSelection,
+    ) -> Result<(), AiError> {
+        let lease = lease.clone();
+        let selection = selection.clone();
+        let expires_at = lease.lease_expires_at();
+        let clock = self.clock.clone();
+        let snapshot_clock = clock.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let conflict = || OrmPublicError::new(OrmErrorCode::Conflict);
+                    let run = crate::orm_runs::load_and_validate_active_lease(
+                        tx,
+                        &lease,
+                        snapshot_clock.now(),
+                    )
+                    .await?;
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&run.session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(conflict)?;
+                    let now = snapshot_clock.now();
+                    let pin = run
+                        .execution_selection
+                        .as_deref()
+                        .and_then(|value| crate::AiSessionExecutionSelection::decode(value).ok());
+                    if lease.state() != crate::AiRunState::Running
+                        || run.cancellation_request_id.is_some()
+                        || session.state != "active"
+                        || session.deleted_at.is_some()
+                        || session.execution_selection != run.execution_selection
+                        || pin.as_ref() != Some(&selection)
+                        || run
+                            .lease_expires_at
+                            .is_none_or(|expiry| expiry <= now.unix_timestamp())
+                        || now >= expires_at
+                    {
+                        return Err(conflict());
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        if clock.now() >= expires_at {
+            return Err(AiError::Conflict);
+        }
+        Ok(())
+    }
 }
 
 /// Checks bounded historical evidence inside the same transaction as the pin.
 pub(crate) async fn prove_legacy_selection(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     session: &AiSessionRecord,
     selection: &AiSessionExecutionSelection,
     descriptor: &crate::AiProviderSessionDescriptor,
@@ -256,7 +311,7 @@ pub(crate) async fn prove_legacy_selection(
 }
 
 pub(crate) async fn legacy_binding(
-    database: &Database<DefaultWriteBackend>,
+    database: &Database<AiOrmBackend>,
     session_id: uuid::Uuid,
 ) -> Result<crate::orm_provider_session::AiProviderSessionBindingRecord, AiError> {
     use crate::orm_provider_session::{

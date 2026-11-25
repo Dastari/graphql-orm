@@ -474,6 +474,7 @@ fn compute_after_target(
         target,
         ownership,
         super::super::migrations::DefaultEquivalence::Pinned8e1,
+        None,
     )?;
     let scoped = scoped_current(current, ownership, options, target);
     let c = diff(current, target, a, b, l, cap)?;

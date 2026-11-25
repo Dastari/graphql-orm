@@ -1,7 +1,6 @@
 //! ORM-backed atomic budget reservations and reconciliation.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_transaction, principal_identity};
 use std::collections::BTreeSet;
@@ -12,9 +11,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{BoolFilter, StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionError, TransactionMode};
 use time::{Date, Duration, Month, OffsetDateTime};
 use uuid::Uuid;
 
@@ -93,9 +90,9 @@ impl AiBudgetServiceLimits {
 /// limit, and policy ceiling have been checked in one transaction.
 #[derive(Clone)]
 pub struct OrmAiBudgetService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     clock: Arc<dyn Clock>,
     limits: AiBudgetServiceLimits,
 }
@@ -103,7 +100,7 @@ pub struct OrmAiBudgetService {
 impl OrmAiBudgetService {
     /// Creates an ORM-backed budget service with deployment hard limits.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         clock: Arc<dyn Clock>,
         limits: AiBudgetServiceLimits,
     ) -> Self {
@@ -121,7 +118,7 @@ impl OrmAiBudgetService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
@@ -742,7 +739,7 @@ struct CounterPlan {
 /// cannot diverge from ordinary provider reconciliation.
 #[cfg(feature = "provider-openai-core")]
 pub(crate) async fn commit_uncertain_background_budget(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     record: &AiBudgetReservationRecord,
     actual: AiBudgetAmounts,
     cached_input_tokens: u64,
@@ -885,7 +882,7 @@ pub(crate) async fn commit_uncertain_background_budget(
 /// under-count, and it moves nothing between policies: the reserved column
 /// falls by exactly the amount the committed column rises.
 pub(crate) async fn commit_stranded_reservation(
-    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, AiOrmBackend>,
     record: &AiBudgetReservationRecord,
     now: OffsetDateTime,
 ) -> Result<AiBudgetReservationRecord, OrmPublicError> {

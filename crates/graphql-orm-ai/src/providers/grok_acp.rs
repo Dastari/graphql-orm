@@ -4,6 +4,7 @@
 //! responder. This module owns no process, credential, session cursor or tool
 //! executor and grants no provider admission or application authority.
 
+use crate::provider::ModelToolOffer;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
@@ -61,7 +62,7 @@ struct Pending {
 pub struct AiGrokAcpSdkBroker {
     server_id: String,
     response_id: String,
-    tools: BTreeMap<String, ModelToolDefinition>,
+    tools: BTreeMap<String, ModelToolOffer>,
     seen_outer: BTreeSet<String>,
     seen_inner: BTreeSet<String>,
     pending: BTreeMap<String, Pending>,
@@ -107,7 +108,9 @@ impl AiGrokAcpSdkBroker {
         for tool in tools {
             tool.validate()?;
             if !ids.insert(tool.tool_id.clone())
-                || frozen.insert(tool.provider_name.clone(), tool).is_some()
+                || frozen
+                    .insert(tool.provider_name.clone(), ModelToolOffer::new(tool))
+                    .is_some()
             {
                 return Err(ProviderError::InvalidRequest);
             }
@@ -225,7 +228,8 @@ impl AiGrokAcpSdkBroker {
                 let tools: Vec<_> = self
                     .tools
                     .values()
-                    .map(|tool| {
+                    .map(|offer| {
+                        let tool = offer.definition();
                         json!({
                             "name":tool.provider_name,"description":tool.description,
                             "inputSchema":tool.parameters
@@ -237,7 +241,8 @@ impl AiGrokAcpSdkBroker {
             }
             Some("tools/call") if self.initialized && self.calls < self.maximum_calls => {
                 let name = inner["params"]["name"].as_str().ok_or_else(rejected)?;
-                let tool = self.tools.get(name).ok_or_else(rejected)?;
+                let offer = self.tools.get(name).ok_or_else(rejected)?;
+                let tool = offer.definition();
                 let mut identity = Sha256::new();
                 identity.update(b"graphql-orm-ai/grok-sdk-call/v1\0");
                 for value in [&self.response_id, &self.server_id, &tool.fingerprint] {
@@ -250,22 +255,21 @@ impl AiGrokAcpSdkBroker {
                     .get("arguments")
                     .cloned()
                     .ok_or_else(rejected)?;
-                let validator =
-                    jsonschema::validator_for(&tool.parameters).map_err(|_| rejected())?;
+                let validator = offer.validator().map_err(|_| rejected())?;
                 let inbound = if !arguments.is_object() || !validator.is_valid(&arguments) {
                     AiGrokAcpSdkInbound::InvalidToolCall(
-                        crate::ProviderInvalidDynamicToolCall::from_definition(
+                        crate::ProviderInvalidDynamicToolCall::from_offer(
                             &self.response_id,
                             &call_id,
-                            tool,
+                            offer,
                             arguments,
                         )?,
                     )
                 } else {
-                    AiGrokAcpSdkInbound::ToolCall(ProviderDynamicToolCall::from_definition(
+                    AiGrokAcpSdkInbound::ToolCall(ProviderDynamicToolCall::from_offer(
                         &self.response_id,
                         &call_id,
-                        tool,
+                        offer,
                         arguments,
                     )?)
                 };
@@ -430,7 +434,7 @@ impl AiGrokAcpUsage {
     }
 }
 
-#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -38,6 +38,9 @@ connection and schema policy.
 Schema construction never applies migrations; applications choose and execute
 schema changes explicitly.
 
+Typed transactions support [bounded set-based deletes](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+on opted-in mutable entities.
+
 ## Install
 
 Packages are distributed through Git. Use the
@@ -106,6 +109,11 @@ Do not deploy that configuration. See [authentication and
 authorization](docs/architecture/authentication-and-authorization.md),
 [operation assurance](docs/architecture/operation-assurance.md), and the
 [GraphQL workflow](docs/development/graphql-workflow.md).
+
+SQL Server hosts can declare column types and opt in to parameter binding
+that allows index seeks for ASCII comparison filters over indexed VARCHAR
+columns. Policy and pattern operands and non-ASCII inputs use Unicode
+binding. The opt-in is per connection pool. [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types)
 
 ## Documentation
 

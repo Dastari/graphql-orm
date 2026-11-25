@@ -1,7 +1,5 @@
 //! Protected fenced checkpoints for replay-safe coordinator phases.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_support::map_orm;
 use crate::persisted_state::ToolCallState;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1865,6 +1863,9 @@ impl OrmAiCoordinatorCheckpointService {
         checkpoint_id: Uuid,
         class: CompletedToolCheckpointClass,
     ) -> Result<AiAdoptedReadOnlyToolBatch, AiError> {
+        if lease.state() != crate::AiRunState::Running {
+            return Err(AiError::Conflict);
+        }
         let session =
             AiSessionRecord::find_by_id(self.run_service.custody_database(), &lease.session_id().0)
                 .await
@@ -1895,6 +1896,8 @@ impl OrmAiCoordinatorCheckpointService {
         if checkpoint.run_id != lease.run_id().0
             || checkpoint.checkpoint_kind != class.checkpoint_kind()
             || checkpoint.assistant_message_id.is_some()
+            || checkpoint.lease_generation <= 0
+            || checkpoint.lease_generation > lease.lease_generation()
         {
             return Err(AiError::Conflict);
         }
@@ -2360,6 +2363,9 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::ReauthorizationFailed);
         }
+        self.run_service
+            .verify_adoption_fence(lease, checkpoint_id)
+            .await?;
         Ok(AiAdoptedReadOnlyToolBatch::new(
             checkpoint_id,
             payload.provider_turns,

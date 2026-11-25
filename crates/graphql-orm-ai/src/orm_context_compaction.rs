@@ -1,7 +1,5 @@
 //! Protected, exact-source context compaction for active run workers.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{content_context, map_context_compaction as map_orm, record_scope};
 use std::collections::{HashMap, HashSet};
@@ -145,7 +143,7 @@ pub struct AiPreparedContextCompaction {
     lease: AiRunLease,
     checkpoint_id: Uuid,
     scope: AiScope,
-    provider_kind: ProviderKind,
+    selection: crate::AiSessionExecutionSelection,
     request: ModelRequest,
     egress_sources: Vec<AiDataSourceRef>,
     estimated_source_bytes: u64,
@@ -167,7 +165,7 @@ impl fmt::Debug for AiPreparedContextCompaction {
             .field("session_id", &self.lease.session_id())
             .field("run_id", &self.lease.run_id())
             .field("checkpoint_id", &self.checkpoint_id)
-            .field("provider_kind", &self.provider_kind)
+            .field("provider_kind", &self.selection.provider_kind())
             .field("provider_model", &self.request.model)
             .field("through_sequence", &self.through_sequence)
             .field("source_hash", &self.source_hash)
@@ -185,6 +183,11 @@ impl AiPreparedContextCompaction {
     /// Exact provider-neutral request. Its content is sensitive.
     pub fn model_request(&self) -> &ModelRequest {
         &self.request
+    }
+
+    /// Exact pinned profile ID required in the model-inference manifest.
+    pub fn provider_profile_id(&self) -> &str {
+        self.selection.profile_id()
     }
 
     /// Exact redacted source set required in the model-inference manifest.
@@ -395,8 +398,9 @@ impl OrmAiContextCompactionService {
     ///
     /// Fails closed for stale fencing or principal authority, deleted/nonowned
     /// sessions, malformed or over-bound checkpoints/messages/blocks, gaps,
-    /// purged/incomplete content, unready protection, or invalid provider and
-    /// requested-boundary values.
+    /// purged/incomplete content, unready protection, missing session execution
+    /// selection, a provider or model different from that selection, or an
+    /// invalid requested boundary.
     pub async fn prepare(
         &self,
         lease: &AiRunLease,
@@ -416,7 +420,6 @@ impl OrmAiContextCompactionService {
                 "invalid context-compaction request".to_owned(),
             ));
         }
-        let lease = self.run_service.heartbeat(lease).await?;
         if lease.state() != AiRunState::Running {
             return Err(AiError::Conflict);
         }
@@ -426,8 +429,10 @@ impl OrmAiContextCompactionService {
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
         let scope = record_scope(&session);
-        validate_session_binding(&session, &lease, &scope)?;
-        let (principal, policy) = self.authorize(&lease, &scope).await?;
+        validate_session_binding(&session, lease, &scope)?;
+        let (principal, policy) = self.authorize(lease, &scope).await?;
+        let selection = validate_compaction_route(&session, &provider_kind, &provider_model)?;
+        let lease = self.run_service.heartbeat(lease).await?;
 
         let recent = i64::try_from(self.limits.minimum_recent_messages)
             .map_err(|_| AiError::InvalidConfiguration("invalid compaction limits".to_owned()))?;
@@ -544,7 +549,13 @@ impl OrmAiContextCompactionService {
                 egress_sources.push(AiDataSourceRef {
                     kind: "message_block".to_owned(),
                     reference: format!("{}:{}:{}", message.id, block.id, message.sequence),
-                    classification: DataClassification::Restricted,
+                    // Only a validated handle is exported for reference blocks.
+                    // Unlabelled plaintext can contain arbitrary sensitive data.
+                    classification: if crate::is_entity_reference_block_kind(&block.block_kind) {
+                        DataClassification::Confidential
+                    } else {
+                        DataClassification::Restricted
+                    },
                     trust: if message.message_role == "user" {
                         AiSourceTrust::UserProvided
                     } else {
@@ -606,7 +617,7 @@ impl OrmAiContextCompactionService {
             builtin_tools: Vec::new(),
             maximum_builtin_tool_calls: None,
             reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
-            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            reasoning_effort: selection.reasoning_effort(),
             output_schema: None,
             maximum_output_tokens: Some(maximum_output_tokens),
         };
@@ -618,7 +629,7 @@ impl OrmAiContextCompactionService {
             lease,
             checkpoint_id: Uuid::new_v4(),
             scope,
-            provider_kind,
+            selection,
             request,
             egress_sources,
             estimated_source_bytes,
@@ -698,8 +709,7 @@ impl OrmAiContextCompactionService {
                     through_sequence,
                     source_hash: source_hash.clone(),
                     token_estimate,
-                    provider_kind: result.provider_kind().as_str().to_owned(),
-                    provider_model: result.provider_model().to_owned(),
+                    selection: prepared.selection,
                     protected_summary,
                     expected_parent: prepared.parent,
                     sources: prepared.sources,
@@ -1136,20 +1146,21 @@ fn validate_result(
         || result.run_id() != prepared.lease.run_id()
         || result.attempt_id() != prepared.lease.attempt_id()
         || result.lease_generation() != prepared.lease.lease_generation()
-        || result.provider_kind() != &prepared.provider_kind
+        || *result.provider_kind() != prepared.selection.provider_kind()
         || result.provider_model() != prepared.request.model
         || result.request_snapshot() != &prepared.request
         || !result.tool_calls().is_empty()
         || result.usage().runs != 1
         || result.usage().output_tokens == 0
         || manifest.capability != AiEgressCapability::ModelInference
-        || manifest.provider_kind != prepared.provider_kind.as_str()
+        || manifest.provider_kind != prepared.selection.provider_kind().as_str()
+        || manifest.provider_profile_id != prepared.selection.profile_id()
         || manifest.model != prepared.request.model
         || manifest.scope != prepared.scope
         || manifest.session_id != Some(prepared.lease.session_id())
         || manifest.run_id != Some(prepared.lease.run_id())
         || manifest.attachment_count != 0
-        || manifest.purpose != "context_compaction"
+        || manifest.purpose != crate::provider::CONTEXT_COMPACTION_PURPOSE
         || manifest.estimated_bytes < prepared.estimated_source_bytes
         || manifest.estimated_tokens < prepared.estimated_source_tokens
         || actual_sources != prepared.egress_sources
@@ -1250,6 +1261,23 @@ fn valid_provenance(
         .is_some_and(|message| message.sequence == through_sequence)
 }
 
+pub(crate) fn validate_compaction_route(
+    session: &AiSessionRecord,
+    provider_kind: &ProviderKind,
+    model: &str,
+) -> Result<crate::AiSessionExecutionSelection, AiError> {
+    let selection = crate::AiSessionExecutionSelection::decode(
+        session
+            .execution_selection
+            .as_deref()
+            .ok_or(AiError::SessionExecutionUnbound)?,
+    )?;
+    if selection.provider_kind() != *provider_kind || selection.model() != model {
+        return Err(AiError::Conflict);
+    }
+    Ok(selection)
+}
+
 fn validate_session_binding(
     session: &AiSessionRecord,
     lease: &AiRunLease,
@@ -1296,27 +1324,27 @@ fn limit_with_lookahead(limit: usize) -> Result<i64, AiError> {
         .map_err(|_| AiError::InvalidConfiguration("invalid compaction limits".to_owned()))
 }
 
-fn map_protection(error: crate::ContentProtectionError) -> AiError {
-    match error {
-        crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
-        _ => AiError::PersistenceFailed,
-    }
+pub(super) fn map_protection(error: crate::ContentProtectionError) -> AiError {
+    crate::content_protection::map_orm_protection_error("context_compaction", error)
 }
 
 fn map_transaction(error: TransactionError) -> AiError {
     map_orm(error.public_error().clone())
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AiOrmBackend;
     use agql_auth::{
         AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, ResolvedPrincipal, SessionContext,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::OrmErrorCode;
-    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
-    use graphql_orm::prelude::{Database, SqliteBackend};
+    #[cfg(feature = "sqlite")]
+    use graphql_orm::graphql::orm::ApplyOptions;
+    use graphql_orm::graphql::orm::OrmSchemaModule;
+    use graphql_orm::prelude::Database;
     use time::OffsetDateTime;
 
     use crate::{
@@ -1382,17 +1410,24 @@ mod tests {
     }
 
     struct Fixture {
-        database: Database<SqliteBackend>,
+        database: Database<AiOrmBackend>,
         service: OrmAiContextCompactionService,
         lease: AiRunLease,
         scope: AiScope,
         first_block_id: Uuid,
+        #[cfg(not(feature = "sqlite"))]
+        _server: crate::durable_database::OwnedServer,
     }
 
     async fn fixture() -> Fixture {
-        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        #[cfg(feature = "sqlite")]
+        let database = Database::<AiOrmBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
+        #[cfg(not(feature = "sqlite"))]
+        let (server, database) = crate::durable_database::owned_database()
+            .await
+            .expect("owned database is required for compaction parity");
         let module = AiSchemaModule;
         let migration = database
             .schema()
@@ -1403,11 +1438,14 @@ mod tests {
             )
             .await
             .expect("AI schema should plan");
+        #[cfg(feature = "sqlite")]
         database
             .schema()
             .apply_migration(&migration, ApplyOptions::default())
             .await
             .expect("AI schema should apply");
+        #[cfg(not(feature = "sqlite"))]
+        crate::durable_database::apply_parity_migration(&server, &database, &migration).await;
         crate::orm_runtime_recovery::open_test_epoch(&database).await;
 
         let now = OffsetDateTime::now_utc();
@@ -1424,10 +1462,19 @@ mod tests {
         });
         let scope = AiScope::new("tenant", "context-tenant").with_tenant_id("context-tenant");
         let session_id = Uuid::new_v4();
+        let execution_selection = crate::AiSessionExecutionSelection::new(
+            ProviderKind::OpenAi,
+            "compaction-test",
+            "test-model",
+            crate::ModelReasoningEffort::Low,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
         AiSessionRecord::insert(
             &database,
             CreateAiSessionRecordInput {
-                execution_selection: None,
+                execution_selection: Some(execution_selection.clone()),
                 id: session_id,
                 owner_principal_kind: "user".to_owned(),
                 owner_subject: principal.subject().to_owned(),
@@ -1511,7 +1558,7 @@ mod tests {
             &database,
             CreateAiRunRecordInput {
                 recovery_epoch_id: None,
-                execution_selection: None,
+                execution_selection: Some(execution_selection),
                 id: Uuid::new_v4(),
                 session_id,
                 input_message_id: message_ids[5],
@@ -1572,6 +1619,8 @@ mod tests {
             lease,
             scope,
             first_block_id,
+            #[cfg(not(feature = "sqlite"))]
+            _server: server,
         }
     }
 
@@ -1580,7 +1629,7 @@ mod tests {
         scope: &AiScope,
     ) -> crate::AiEgressManifest {
         crate::AiEgressManifest {
-            provider_profile_id: "context-test-profile".to_owned(),
+            provider_profile_id: prepared.provider_profile_id().to_owned(),
             provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
             model: prepared.model_request().model.clone(),
             destination: "context-test-provider".to_owned(),
@@ -1650,7 +1699,8 @@ mod tests {
     /// writes (`stored_handle_content`); `tests/entity_references.rs` proves
     /// the send path stores nothing else.
     #[tokio::test]
-    async fn compaction_after_revocation_carries_reference_handles_only() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_compaction_after_revocation_carries_reference_handles_only() {
         const PAYLOAD: &str = "payload readable before revocation";
         struct Hook(Arc<std::sync::atomic::AtomicBool>);
         #[async_trait]
@@ -1738,6 +1788,22 @@ mod tests {
             .prepare(&fixture.lease, ProviderKind::OpenAi, "test-model", 2, 128)
             .await
             .expect("compaction should prepare");
+        let sources = prepared.egress_sources();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.classification == DataClassification::Confidential)
+                .count(),
+            1,
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| source.classification == DataClassification::Restricted)
+                .count(),
+            2,
+        );
         let summarizer_prompt =
             serde_json::to_string(prepared.model_request()).expect("request serializes");
         assert!(
@@ -1811,7 +1877,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_compaction_chains_and_loads_without_debug_disclosure() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_compaction_refuses_a_provider_or_model_other_than_the_session_pin() {
+        let fixture = fixture().await;
+        for (provider, model) in [
+            (ProviderKind::Anthropic, "test-model"),
+            (ProviderKind::OpenAi, "other-model"),
+        ] {
+            assert!(matches!(
+                fixture
+                    .service
+                    .prepare(&fixture.lease, provider, model, 2, 128)
+                    .await,
+                Err(AiError::Conflict)
+            ));
+        }
+        fixture
+            .service
+            .prepare(&fixture.lease, ProviderKind::OpenAi, "test-model", 2, 128)
+            .await
+            .expect("a mismatched request must not consume the lease");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_exact_compaction_chains_and_loads_without_debug_disclosure() {
         let fixture = fixture().await;
         let prepared = fixture
             .service
@@ -1898,7 +1988,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_sources_and_inexact_egress_fail_closed() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_changed_sources_and_inexact_egress_fail_closed() {
         let fixture = fixture().await;
         let prepared = fixture
             .service
@@ -1957,7 +2048,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_access_denial_prevents_source_opening() {
+    #[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable database")]
+    async fn database_parity_current_access_denial_prevents_source_opening() {
         let mut fixture = fixture().await;
         fixture.service.access_policy = Arc::new(crate::DenyAllAiAccessPolicy);
         assert!(matches!(

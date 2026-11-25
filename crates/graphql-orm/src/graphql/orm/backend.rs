@@ -1263,6 +1263,7 @@ fn bind_sqlite_value<'q>(
         SqlValue::Bool(value) => query.bind(*value),
         SqlValue::BoolNull => query.bind(Option::<bool>::None),
         SqlValue::Null => query.bind(Option::<String>::None),
+        SqlValue::MssqlTyped(typed) => bind_sqlite_value(query, typed.value()),
     }
 }
 
@@ -1320,5 +1321,6 @@ pub(super) fn bind_postgres_value<'q>(
         SqlValue::Bool(value) => query.bind(*value),
         SqlValue::BoolNull => query.bind(Option::<bool>::None),
         SqlValue::Null => query.bind(Option::<String>::None),
+        SqlValue::MssqlTyped(typed) => bind_postgres_value(query, typed.value()),
     }
 }

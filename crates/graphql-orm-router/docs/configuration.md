@@ -299,9 +299,14 @@ Scope matching is a separate resource-server policy. Omission or
 Exact-only requirements always reject wildcard-derived matches. Direct exact
 grants remain valid. Configured super-scopes remain excluded by default and
 become valid only when `allowSuperScopesForExactOnly` is explicitly enabled;
-membership in `superScopes` is exact and case-sensitive. Lists are normalized
-and deduplicated at startup. The router applies this one matcher to fixed and
-rendered operation requirements; resolver guards remain authoritative.
+membership in `superScopes` and `exactOnlyScopes` is exact and case-sensitive.
+In `exactOnlyScopePatterns`, use wildcards as whole segments, such as
+`records.*`. `AgqlScopeMatcher::hierarchical` rejects in-segment wildcards such
+as `records*` for both file configuration and programmatic setup. Hosts are
+responsible for validating opaque matchers passed to `AgqlScopeMatcher::new`.
+File configuration lists are normalized and deduplicated at startup. The
+router applies this one matcher to fixed and rendered operation requirements.
+Resolver guards remain authoritative.
 
 A rendered requirement substitutes each `{argument}` with that argument's
 value only when the value is one plain segment: 1–256 ASCII letters, digits,

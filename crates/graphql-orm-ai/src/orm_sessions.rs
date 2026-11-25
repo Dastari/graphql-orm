@@ -1,7 +1,6 @@
 //! Durable ORM-backed conversational session service.
 
-#![cfg(any(feature = "sqlite", feature = "postgres"))]
-
+use crate::AiOrmBackend;
 use crate::AiRunState;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{
@@ -16,9 +15,7 @@ use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
-use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, OrderDirection, TransactionMode,
-};
+use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, OrderDirection, TransactionMode};
 use graphql_orm::graphql::pagination::{KeysetConnectionInput, ValidatedKeysetConnection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -74,9 +71,9 @@ impl Default for AiSessionServiceLimits {
 /// full user's authority. The refusal applies whether or not run authorization
 /// or submission admission is installed; neither admits these credentials.
 pub struct OrmAiSessionService {
-    database: Database<DefaultWriteBackend>,
+    database: Database<AiOrmBackend>,
     /// The handle the host supplied, returned by `database()`.
-    host_database: Database<DefaultWriteBackend>,
+    host_database: Database<AiOrmBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
@@ -120,7 +117,7 @@ impl OrmAiSessionService {
 
     /// Creates a durable session service.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        database: Database<AiOrmBackend>,
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
@@ -227,12 +224,12 @@ impl OrmAiSessionService {
     // The public accessor returns the host's handle; `database` is the
     // crate's internal handle and never leaves the crate.
     #[allow(clippy::misnamed_getters)]
-    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+    pub fn database(&self) -> &Database<AiOrmBackend> {
         &self.host_database
     }
 
     /// The crate's internal handle: the host handle behind the custody field policy.
-    pub(crate) fn custody_database(&self) -> &Database<DefaultWriteBackend> {
+    pub(crate) fn custody_database(&self) -> &Database<AiOrmBackend> {
         &self.database
     }
 
@@ -2725,7 +2722,7 @@ mod bootstrap_window_tests {
     /// One terminal run holding `TOOL_CALLS` tool calls, on a database whose
     /// page maximum is `HOST_MAXIMUM`.
     async fn fixture() -> (OrmAiSessionService, AiSessionId) {
-        let database = Database::<DefaultWriteBackend>::connect_sqlite("sqlite::memory:")
+        let database = Database::<AiOrmBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open")
             .with_pagination_config(PaginationConfig::default().with_max_limit(Some(HOST_MAXIMUM)));

@@ -67,8 +67,386 @@ matches the existing physical name needs no data migration.
 **Action needed** for Codex app-server process implementations. The next
 breaking graphql-orm-ai release moves all six turn methods to a consuming
 dispatch. Use the protocol actor's `write_turn` with the shared process writer.
-See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#next-breaking-graphql-orm-ai-release).
+See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#breaking-release-unreleased).
 No data migration is needed.
+
+## 0.217.0 to 0.218.0: server-only relation join keys
+
+**No action.** Upgrade ORM and macros together. `server_only_key` is a new,
+opt-in relation option; existing relations, their checks and their SQL are
+unchanged. Hand-written `GeneratedRelationReadability` implementations keep
+compiling: the new `SERVER_ONLY_COLUMNS` constant defaults to empty, so they
+cannot be a server-only target until they list the column. Store server-only
+key members in canonical form on both sides (for example lower-case UUID text
+on SQLite): a target stored in another spelling matches no row.
+See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+## 0.216.0 to 0.217.0: Relation target assurance
+
+**Action needed.** A requirement on *any* generated query root of an entity
+(list, get-by-id, keyset, scan, search or aggregate) now gates every generated
+relation into that entity. If you require assurance on any generated query
+root, clients traversing relations into that root's entity must satisfy the
+same policy. Handle `STEP_UP_REQUIRED` on relation fields, mutation result
+selections, and queries using related-row filters, relation-count ordering,
+or related search sources. Related reads can be issued again after step-up.
+If a relation field in a mutation result needs step-up, refresh it with a
+separate query since the mutation may already have committed. Upgrade ORM
+and macros together.
+
+The runtime GraphQL composer is not covered yet: runtime `node(id:)` checks
+only `Query.node`, runtime child layers do not check the target collection's
+roots, and generated `_entities` checks only get-by-id. Require `Query.node`
+or enforce step-up in `RuntimeReadAuthority` meanwhile
+([#902](https://github.com/Dastari/graphql-orm/issues/902)).
+
+## Operation catalogue 0.15.0
+
+**No action.** Generated relationships with a declared field policy export
+`subgraph_only` in the resolver catalogue. The resolver catalogue fingerprint
+changes for exports that previously referenced a target root for such a
+relationship. Consumers of older exports should defer authorization to the
+subgraph when `has_field_policy` is true. Rebind any pinned
+resolver-catalogue fingerprint.
+
+## 0.215.0 to 0.216.0: PostgreSQL RLS search
+
+**No action.** Upgrade ORM and macros together. Native search on generated
+PostgreSQL `#[graphql_rls]` entities with an unqualified, column-based
+default sort can use a document primary-key probe or a bulk join. Both RLS
+policies still apply. The change only affects ORM-generated queries, so hosts
+need no database migration, index rebuild, or policy update. PostgreSQL
+evaluates `@@` after the document policy, which prevents GIN from serving
+the search. With 200,000 documents the median selective page at 10%
+visibility went from 318 to 87 ms and its count from 276 to 79 ms. At full
+visibility the common page went from 370 to 353 ms and its count from 252
+to 238 ms. The full-visibility selective query still scanned documents and
+its page went from 233 to 256 ms. Broad partial visibility can also be
+slower. At 50% and 90% visibility the common page went from 280 to 418 ms
+and from 422 to 628 ms, respectively. The 90%-visible common count went
+from 300 to 546 ms. See the
+[measured plans and costs](docs/reference/graphql-orm/postgres.md#search-performance).
+
+## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
+
+**No action.** Upgrade ORM and macros together. SQL Server keeps the
+existing Unicode string and BIGINT binds by default. To use each declared
+type, add the matching `mssql_type` field attribute and enable
+`MssqlPoolOptions::typed_parameters(true)` for the corresponding database.
+The attribute overrides generated DDL independently of the pool setting.
+Printable ASCII VARCHAR operands in ordinary comparison filters can use the
+declared type. Authorization predicates, patterns, and non-ASCII text retain
+Unicode binding. Generated unsigned operands outside their SQL Server range
+return `INVALID_INPUT`. SQL Server ALTER COLUMN planning parses the column
+identifier for its collation lookup.
+See [SQL Server parameter types](docs/reference/graphql-orm/macros-and-attributes.md#sql-server-parameter-types).
+
+## 0.213.0 to 0.214.0: agql-auth v0.27.0
+
+**Action needed** for hosts with direct `agql-auth` dependencies. Upgrade
+ORM/macros together and choose the same Auth Git tag in the same upgrade:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.27.0", version = "0.27.0" }
+```
+
+Refresh the host lockfile and run `cargo tree -i agql-auth` with the host's
+deployment features enabled. Cargo reports an ambiguous package specification
+if multiple sources resolve in that graph. The tag resolves to
+`71a3acee5942bd5b6aac57dcaccbb6391b383880`.
+Cargo considers a different tag or a `rev` selector a different source, even
+at the same commit. This matters when passing `AuthPrincipal` to
+`auth_bundle_from_principal` or using the AI and router Auth integration types.
+
+Auth 0.27 requires `typ = "access"` and `purpose = "access_token"` by default,
+rejects legacy array scope claims by default, and requires the `Bearer` scheme
+for Authorization values. Access tokens from the default 0.26 issuer already
+carry both access markers. Hierarchical scope wildcards match whole segments.
+Rewrite raw-prefix grants such as `records*` as `records.*` when they should
+grant the whole subtree. API-token services reject a mismatched audience or
+configured resource. An audience-bound token requires a declared audience.
+Without a configured resource, the host still enforces the token's resource
+binding.
+
+**Action needed** for hosts using `with_exact_only_scope_patterns` or
+equivalent configuration. In-segment wildcards now match literally. Rewrite
+raw-prefix patterns such as `records*` as whole-segment patterns such as
+`records.*` to protect the subtree.
+
+**Action needed** for hosts building Auth guards. Every Auth user and
+principal guard now fails closed for delegated tokens or tokens carrying an
+`actor` claim unless the guard calls `.allow_delegated()`. Opt in on each
+guard that is intended to accept these tokens. The Auth `RequireAll*` guards
+and `has_all_scopes` helpers also fail closed on empty lists. Supply a
+non-empty list where scopes or roles are required.
+
+Hosts using Auth's rotating JWKS cache should explicitly set
+`stale_policy: StaleKeyPolicy::Reject` to preserve fail-closed refresh behavior.
+The new default, `UseStale`, permits cached keys after a failed refresh until
+the cache TTL plus the one-hour default `max_stale` window. A host requiring
+token confirmation must use a validator entry point that passes the verified
+confirmation material.
+
+Auth issuers must update their stores and rollout procedures. Auth 0.27 adds
+user-wide refresh-session revocation and a default 90-day absolute lifetime for
+new session families. Existing records without a family deadline end at their
+recorded expiry. Completing a password reset revokes the user's refresh
+sessions. Session-bound delegation requires a current enabled parent. Rehydrated
+delegations retain their bindings, are capped at the earlier of parent and
+delegated expiry, and intersect current grants with the original delegation's
+grant ceiling. Pre-0.27 persisted delegation references lack the ceiling and
+must be replaced through fresh authorization. Host token-status and current
+authority checks still apply to accepted requests.
+
+The ORM has no schema or data migration for this pin. For Auth-owned stores,
+validators and login flows, follow the
+[Auth 0.27 migration guide](https://github.com/Dastari/agql-auth/blob/v0.27.0/MIGRATION.md#0260-to-0270-security-hardening).
+
+## 0.212.0 to 0.213.0: Test harness coordination
+
+**No action.** Upgrade the ORM and macros together. This release fixes
+parallel test execution in the workspace (#887, #888).
+
+## 0.211.0 to 0.212.0: scoped SQLite column drop
+
+**No action.** Upgrade ORM and macros together. An owned SQLite plan whose
+only change is to drop a column now renders SQLite's native `DROP COLUMN`.
+The plan is destructive and still requires `ApplyOptions::allow_destructive`.
+Planning and application check the live foreign-key catalog and test SQLite's
+native alterations against an empty copy of the schema. Planning reports
+detected dependencies as `InvalidPhysicalContract`. A trial rename identifies
+retained references that SQLite could silently rebind or ignore, including
+`UPDATE OF` trigger events. The live drop proceeds only when the checks
+verify that it preserves the retained physical schema.
+This narrows the [0.111.0 column-removal restrictions](#01110-sqlite-columncheckfk-rebuild-preservation)
+for the single-drop shape. Plans containing a drop and additional steps still
+rebuild or refuse. Run SQLite migrations with no TEMP objects on other
+connections, or use a dedicated migration connection with other connections closed.
+Refs #882.
+
+## 0.210.0 to 0.211.0: Described root result metadata
+
+**No action.** Described roots returning an entity registered in
+`schema_roots!` use the same schema-bound semantic metadata as the
+generated roots (#883). Operation catalogue 0.14.0 uses local Rust type
+identity to detect conflicting declarations. Existing valid SDL and
+fingerprints retain their values.
+
+## 0.209.0 to 0.210.0: required ExpectedVersion and conditional update assurance (operation catalogue 0.13.0)
+
+**No action.** Both features are opt-in, and no data migration is needed.
+Entities that declare neither option generate byte-identical SDL, operation
+and semantic catalogues and fingerprints. Upgrade ORM and macros together.
+
+To opt in, restrict the entity's roots with `mutation_shapes` so it generates
+neither `update_many` nor `upsert`. Then add
+`update_expected_version = "required"`, `update_assurance(select, levels)` or
+both. The update's `ExpectedVersion` becomes `Int!`, so clients that omit it
+must send it. A declared selection changes the update's operation and
+router-export fingerprints. Regenerate exported SDL and catalogues, and
+re-approve any bindings to that operation. Install `AssuranceEnforcement`
+before you enable `update_assurance`: without it, every update of the entity
+is refused with `AUTHORIZATION_MISCONFIGURED`.
+
+The derive also refuses either option on an entity with a relation declaring
+`on_delete = "set_null"`. Use `restrict` or `cascade` instead. The runtime IR
+conversion (`RuntimeSchema::from_static_entities*`) refuses the entity.
+
+Some schema configuration bypasses the checks, and the derive cannot see it,
+so avoid it:
+
+- Do not declare database-only foreign keys that set the table's keys to null.
+- Do not map a guarded table through another entity or a separate migration
+  plan. It could install its own `SET NULL` key or expose its own update.
+- Do not use runtime IR over a guarded table that you write by hand or
+  deserialize. It bypasses these protections.
+
+The caller can observe the level a selector chooses, because the update either
+succeeds or is refused for step-up. Write selectors that branch only on the
+patch and on fields the writing principal may read. A selector error or panic
+reaches the client only as `INTERNAL_ERROR`. No ORM write runs before the
+selector. Host SQL in a filter or policy predicate runs inside the same
+transaction, and any write it makes rolls back on refusal.
+See [required `ExpectedVersion`](docs/reference/graphql-orm/macros-and-attributes.md#required-expectedversion)
+and [conditional update assurance](docs/reference/graphql-orm/macros-and-attributes.md#conditional-update-assurance).
+
+## 0.208.0 to 0.209.0: external migration preflight
+
+**No action.** Upgrade ORM and macros together. Hosts applying DDL externally
+can call `database.schema().preflight_unique_indexes(&plan).await?` before any
+migration statements. Use a connection that can read all affected rows and
+quiesce concurrent writes and schema changes through application. Repeated
+keys return `UniqueIndexDuplicates`. No data migration is needed for this API.
+
+## 0.207.0 to 0.208.0: bounded set-based deletes
+
+**No action.** Upgrade ORM and macros together. Opt in per entity to call
+`MutationContext::delete_keys_set_bounded` or `delete_where_set_bounded`
+inside a `StateMachine` transaction. Existing delete APIs keep their
+behavior. Review the
+[set-delete contract](docs/reference/graphql-orm/runtime-and-writes.md#bounded-set-based-deletes)
+before implementing `SetDeleteEntity`.
+
+## 0.206.0 to 0.207.0: SQLite closure rendering and nested closure read predicates
+
+**No action.** SQLite renders every closure read predicate, single-level and
+nested, in the original form, byte for byte as before 0.200.0 (#876). Hosts
+on 0.200.0 through 0.206.0 were exposed only if a SQLite closure walks a
+pointer column whose collation treats values as equal that the key column
+distinguishes, for example a `NOCASE` or `RTRIM` pointer joined to a `BINARY`
+key. There, pointers such as `'a'` and `'A'`, or `'a'` and `'a '`, reached at
+the same depth were followed only once. An `Any` closure could then deny a
+row that the original rendering admits. A randomized search found no case
+that admitted extra rows, but over-admission is not proven impossible: SQLite
+does not guarantee which of several equal pointers it keeps.
+
+On PostgreSQL and SQL Server, a root closure whose target is itself a closure
+over built-in column tests and NULL checks can reuse the inner walk's
+three-valued result, with fewer SQL fragments and bind parameters. PostgreSQL
+and SQL Server single-level closures keep their 0.200.0 rendering. The policy
+admits the same rows as the original rendering on SQLite, PostgreSQL, and SQL
+Server, including text pointers and targets with declared collations and
+binds whose type differs from the column's. Where PostgreSQL or SQL Server
+cannot compare a pointer and key with different collations, both renderings
+fail the statement. Composition limits still apply. Applications that
+snapshot generated policy SQL may need to refresh those snapshots. Refs #785.
+
+## 0.205.0 to 0.206.0: backend-typed backup runtime
+
+**No action.** Upgrade ORM and macros together. SQLite and PostgreSQL
+`Database<B>` handles expose full backup and restore even when Cargo enables
+multiple ORM backends. Incremental backup still requires a single ORM backend
+with `change-journal`: in a multi-backend build `ensure_change_journal_table`,
+`ensure_change_journal_recorder` and `export_changes*` exist but always return
+an error. Use backup 0.30.0 from the same reviewed workspace
+revision to select a typed adapter with `orm-sqlite` or `orm-postgres`.
+
+## 0.204.0 to 0.205.0: generated Changed subscriptions
+
+**No action.** Upgrade ORM and macros together. Generated Changed
+subscriptions use shared stream code. SDL, operation catalogues,
+fingerprints, and the subscription authorization and delivery rules stay
+the same.
+
+## 0.203.0 to 0.204.0: externally managed backup and restore
+
+**No action.** The default backup and restore behavior stays the same. No
+data migration is needed. For a database whose backup and restore are owned
+by another product, opt in with
+`DatabaseBuilder::externally_managed_backup_restore(true)` on every handle.
+Backup, restore, and explicit restore-fencing operations return
+`BACKUP_RESTORE_EXTERNALLY_MANAGED`. Use the same reviewed workspace revision
+for ORM and backup 0.29.0 if you use its ORM adapter.
+See [backup ownership](docs/reference/graphql-orm/backup-runtime.md#externally-managed-backup-and-restore).
+
+## 0.202.0 to 0.203.0: durable AI SQL Server prerequisites
+
+**Action needed** for SQL Server hosts with `append_only = true` entities.
+Regenerated plans now install an `AFTER UPDATE, DELETE` trigger that rejects
+both operations. Before applying a plan, review cleanup jobs and foreign-key
+cascades that delete rows from these tables. Change or disable those paths
+and rehearse the migration on a copy. There is no trigger opt-out while an
+entity remains append-only. Remove `append_only = true` only if the entity
+should no longer have the append-only contract.
+
+**Action needed** for SQL Server hosts whose declarations can resolve to the
+same physical table. Regenerate the plan and resolve any identifier conflict
+before applying it. Use one declaration for each physical table, including
+when an unqualified name and a `dbo`-qualified name refer to the same object.
+
+**No action** for SQLite or PostgreSQL ORM consumers. Update ORM and macros
+together. No physical schema or data migration is required on these backends.
+
+## 0.201.0 to 0.202.0: test and repository hygiene
+
+**No action.** Upgrade ORM and macros together. Source checkouts can use the
+[grouped test selectors](docs/development/testing.md) to run individual tests.
+
+## 0.200.0 to 0.201.0: duplicate entity identities (operation catalogue 0.12.0)
+
+**No action.** Upgrade ORM and macros together. The generated resolver
+catalogue and `try_schema_builder*` report duplicate entity identities as
+errors. Use unique `stable_type_id` values or distinct default Rust type paths
+if you receive this error. Call `GraphqlOperationCatalog::try_compose` for
+fallible composition of descriptor groups. Existing SDL, catalogue exports
+and fingerprints are unchanged.
+
+## 0.199.0 to 0.200.0: closure read predicates
+
+**No action** for policy definitions or stored data. Only standalone closure
+policies can render fewer SQL placeholders. Update assertions that compare
+their exact SQL or bind count. Composed closures keep their existing SQL
+and composition limits.
+See [closure read predicates](docs/reference/graphql-orm/pagination-migration.md#read-predicate-transitive-closures).
+
+## 0.198.0 to 0.199.0: generated mutation and subscription roots
+
+**No action.** Default schemas retain their `MutationRoot` and
+`SubscriptionRoot` Rust tuple structs, schema builder types, and SDL.
+
+**No action for missing database handling.** Hand-built schemas missing the
+database now receive field errors from generated mutations, entity getters,
+and relation resolvers.
+
+When you opt out with `mutations = false` or `subscriptions = false`, use
+`schema_builder(database)` to omit a root whose last field is disabled.
+For a manually assembled schema, pass async-graphql's `EmptyMutation` or
+`EmptySubscription` for that root. Update clients and regenerate exported
+schema and catalogues for the removed fields.
+Repository inputs and repository and transaction writes still compile.
+See [omitting generated roots](docs/reference/graphql-orm/macros-and-attributes.md#omitting-generated-roots).
+
+## 0.197.0 to 0.198.0: restore page size checks
+
+**No action.** Upgrade ORM and macros together. The AI restore collector
+uses a size check before loading repository pages on SQLite and PostgreSQL.
+When row policy or predicates require Rust evaluation, the opt-in guard
+checks the whole candidate range through the scan ceiling or exhaustion
+before loading rows. Spatial fields are measured in their normal projected
+form. No data migration is needed.
+
+## 0.196.0 to 0.197.0: database binding and decoding
+
+**No action.** SQL Server selects compatible scalar conversions by wire type
+and preserves the driver error when a read fails. Out-of-range column indexes
+return an error. Boolean reads support `BIT`, `INT`, and `SMALLINT`. For
+integer columns, zero is false, any nonzero value is true, and an optional
+boolean reads SQL NULL as `None`.
+
+**No action.** For handwritten binds, use `SqlValue::UuidNull` and
+`SqlValue::BytesNull` for UUID and binary columns. `SqlValue::Null` binds
+as text. Legacy text-backed array fields still decode incompatible JSON
+as an empty list. Use explicit JSON storage for fallible decoding.
+
+**No action.** Runtime search accepts collection columns named
+`__gom_search_key` or `__gom_search_score`. Existing search cursors and
+indexes remain compatible.
+
+## 0.195.0 to 0.196.0: computed-field invalidations
+
+**No action.** Upgrade ORM and macros together. To opt in, declare a topic and
+its disclosure policy, register a subscription resolver and enqueue invalidations
+from the trusted writer's transaction. Existing schema surfaces and Changed
+streams require no configuration changes. [Subscription reference](docs/reference/graphql-orm/entities-and-relations.md#computed-field-invalidations)
+
+## 0.194.0 to 0.195.0: integration test consolidation
+
+**No action** for application hosts. For individual integration tests in source
+checkouts, use the [grouped test selectors](docs/development/testing.md).
+
+## 0.193.0 to 0.194.0: resolver catalogue (operation catalogue 0.11.0)
+
+Upgrade ORM and macros together, with operation catalogue 0.11.0.
+
+**No action.** `schema_roots!` emits one more function,
+`graphql_orm_resolver_catalog()`, which returns
+`Result<&GraphqlResolverCatalog, &GraphqlSemanticError>`, and the operation catalogue crate adds
+`GraphqlResolverCatalog`, `rfc8785_canonical_json` and `rfc8785_json_hash`.
+The SDL, the operation and semantic catalogues, the client metadata, the
+router export and every existing fingerprint and receiver binding are
+unchanged, so nothing stored needs to be regenerated. A module that already
+defines an item named `graphql_orm_resolver_catalog` beside `schema_roots!`
+must rename it.
 
 ## 0.192.0 to 0.193.0: handwritten fields on generated objects
 

@@ -1,6 +1,7 @@
 //! Transaction-only native checkpoint graph checks. Protected proof is opened by its owner.
 
 use super::*;
+use crate::AiOrmBackend;
 
 pub(crate) const COMPLETED_KIND: &str = "native_completed_provider_turn_persisted";
 
@@ -24,7 +25,7 @@ pub(crate) struct NativeTurn<'a> {
 }
 
 pub(crate) async fn candidate(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     id: Uuid,
 ) -> Result<AiNativeApprovalCandidateRecord, NativeCheckError> {
     tx.find_by_id::<AiNativeApprovalCandidateRecord>(&id)
@@ -86,7 +87,7 @@ fn missing() -> NativeCheckError {
 /// Checks all callback rows, including no-effect control receipts, under one transaction.
 /// The protected checkpoint service independently proves their ordered provider payloads.
 pub(crate) async fn cohort(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     turn: NativeTurn<'_>,
     candidate: &AiNativeApprovalCandidateRecord,
     phase: PendingPhase,
@@ -292,7 +293,7 @@ pub(crate) async fn cohort(
 }
 
 async fn validate_egress(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     budget: &AiBudgetReservationRecord,
     decision_id: Option<Uuid>,
     manifest_hash: Option<&str>,
@@ -329,7 +330,7 @@ async fn validate_egress(
 }
 
 pub(crate) async fn source(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     candidate: &AiNativeApprovalCandidateRecord,
     budget: &AiBudgetReservationRecord,
     response_id: Option<&str>,
@@ -389,7 +390,7 @@ pub(crate) async fn source(
 /// An outcome is new-fence evidence of the one approved effect, never a rebinding of old usage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn outcome(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     run_id: Uuid,
     session_id: Uuid,
     generation: i64,
@@ -477,7 +478,7 @@ pub(crate) async fn outcome(
 
 /// Metadata-only snapshot proof for denial/expiry reconciliation; not an execution grant.
 pub(crate) async fn waiting(
-    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    tx: &mut MutationContext<'_, AiOrmBackend>,
     candidate: &AiNativeApprovalCandidateRecord,
     checkpoint: &AiRunCheckpointRecord,
     budget: &AiBudgetReservationRecord,

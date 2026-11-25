@@ -3,12 +3,38 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-17
+last_reviewed: 2026-11-20
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # `graphql-orm-operation-catalog`
+
+Version 0.14.0 uses Rust type provenance to resolve described root
+results during static schema composition (#883).
+[Migration](../../MIGRATION.md#02100-to-02110-described-root-result-metadata)
+
+Version `0.13.0` adds `GraphqlConditionalAssurance` and
+`conditional_assurance()` on generated and resolved operation descriptors. A
+generated update that selects its assurance level per request lists every
+possible level and marks the selection as conditional. The declaration is
+advisory: the owning service enforces the selected level. The declaration is
+part of the operation and router-export fingerprints. Descriptors without one
+keep their fingerprints and debug output. No data migration is needed. See
+[conditional assurance](../../docs/architecture/operation-assurance.md#conditional-assurance-on-generated-updates).
+
+Version `0.11.0` adds two opt-in pieces and changes no existing descriptor,
+wire format or fingerprint. No data migration is needed.
+
+- `GraphqlResolverCatalog` lists what has no root coordinate: every
+  relationship field the schema serves and every entity it resolves by a
+  Federation key. See
+  [relation and entity resolvers](#relation-and-entity-resolvers).
+- `rfc8785_canonical_json` and `rfc8785_json_hash` encode JSON as RFC 8785
+  specifies. See [canonical JSON encodings](#canonical-json-encodings).
+
+[What an export discloses](#what-an-export-discloses) states who learns which
+names from each export.
 
 Version `0.10.0` (**breaking fingerprints**) removes the Rust module path from
 generated-operation fingerprints and from the catalogue order.
@@ -212,13 +238,191 @@ subscriptions use the observation contract. Runtime target enablement, current
 principal resolution, ordinary resolver authorization, disclosure, and any
 one-shot approval are separate mandatory boundaries.
 
+## Relation and entity resolvers
+
+`GraphqlOperationCatalog` and the operations of `GraphqlSemanticCatalog`
+describe root fields. A relationship field resolves below an object, and a
+Federation entity resolver is reached through `_entities`, so neither is a
+root field and neither is in those lists. `GraphqlResolverCatalog` (wire
+version `GRAPHQL_RESOLVER_CATALOG_VERSION` 1) lists both:
+
+| Member | Contents |
+| --- | --- |
+| `relations` | one `GraphqlRelationResolverDescriptor` per served relationship field with a generated resolver: owning type, field, target type, cardinality, argument names, whether a field policy exists, and an authorization reference |
+| `entities` | one `GraphqlEntityResolverDescriptor` per type the schema resolves by a `@key`: the type name, each key's field names in `@key` order, and an authorization reference |
+
+Coordinates are those of the served schema, not of the Rust declarations:
+
+- A relationship the semantic catalogue describes is listed only when the
+  schema serves it: the owning type has a field of that name, the field
+  returns the related type (directly, or as the nodes of a connection for a
+  to-many relationship), and it takes exactly the catalogue's arguments with
+  the same types. A handwritten field that only shares a relation's name is
+  not listed. An entity that declares a relation but mounts no resolver for it
+  has no entry.
+- A key is listed only when the schema resolves it. A type the subgraph marks
+  unresolvable (a Federation reference) is not listed, whatever keys are
+  registered for it.
+- An entity whose Rust type the schema does not register has no entry at all,
+  even when the schema serves an unrelated type with the same name.
+- `type_name` and `target` are the names the schema registers. Where a type
+  is registered under another name than its semantic catalogue entity
+  (`#[graphql(name = "...")]`), the descriptor also carries
+  `semantic_entity_name` or `semantic_target`, so it still binds to the
+  catalogue. They are omitted when the names are equal.
+- A key may name as many fields as an entity can have
+  (`GRAPHQL_RESOLVER_MAXIMUM_KEY_FIELDS`).
+
+It is a separate document with its own fingerprint
+(`graphql-orm-resolver-catalog-rfc8785-sha256-v1`), bound to one semantic
+catalogue by `semantic_catalog_fingerprint`. `schema_roots!` emits
+`graphql_orm_resolver_catalog()`, which reads the served coordinates from the
+query root's type registry and returns a `Result`: a document that does not
+validate is an error, never a panic. A host that never calls it is unaffected.
+`GraphqlResolverCatalog::compose(&semantic, sources, &served)` builds one for
+a schema composed some other way. `served` is a `GraphqlServedObjects` holding
+the object types that schema serves and each field's type and arguments
+(`GraphqlServedField`); nothing outside it is listed. A relationship is
+listed only when a source names it as a mounted generated resolver; the served
+schema confirms that claim and never creates one. A source marked
+`unregistered()` says the schema registers no type for that entity.
+
+```rust,ignore
+let resolvers = my_service::graphql_orm_resolver_catalog()?;
+let children = resolvers.relation("Parent", "children").unwrap();
+assert_eq!(children.target, "Child");
+std::fs::write("resolver-catalog.json", resolvers.export_json()?)?;
+```
+
+`validate_against(&semantic)` checks a decoded document against the catalogue
+it claims to describe: every relation must be a relationship field of that
+catalogue, with the same target, cardinality, arguments and field-policy flag,
+every key and authorization reference must name something the catalogue
+publishes, and the entries must agree on which served type each catalogue
+entity is. It cannot check that no served relationship is missing, because
+the semantic catalogue does not record which of its fields a schema serves.
+
+An authorization requirement is never spelled out. `GraphqlResolverAuthorization`
+is one of:
+
+- `same_as_root`: the resolver enforces the static requirement of the named
+  exposed generated root of the related or resolved entity (its list root for
+  a to-many relationship, its single-read root for a to-one relationship or an
+  entity lookup). Read the requirement from that root's descriptor.
+- `subgraph_only`: the requirement is not published. This covers a target
+  with no matching exposed root, a target that is not a generated entity of
+  the schema, a requirement that binds root arguments (scope templates), and a
+  traversal that requires more than the root does. A relation with a declared
+  field policy also uses `subgraph_only` because the target root cannot
+  describe the policy on the owning field.
+
+The reference is to a static requirement only. The subgraph also applies the
+owning type's authentication mode, field policy, row policy and database
+policy, and a consumer must not treat a reference as permission.
+Older version 1 documents may pair `same_as_root` with `has_field_policy: true`.
+In that case defer the field authorization decision to the subgraph.
+
+### Out of scope for version 1: handwritten resolvers
+
+Version 1 lists only what the ORM generates. The following are not listed,
+and their absence says nothing about whether the schema serves them:
+
+- handwritten relationship fields, including a handwritten field with the
+  name, return type and arguments of a declared relation;
+- a generated relation whose name a `SimpleObject` getter on the same struct
+  also serves (on a composed object, a relation field without
+  `#[graphql(skip)]`; anywhere, a field renamed to the relation's name). Which of the two the schema serves is
+  async-graphql's choice, so the entry is left out. If the struct has a
+  `#[graphql(flatten)]` field or a `#[graphql(derived(...))]` getter, the
+  derive does not know every name the object serves, and no relation of that
+  entity is listed;
+- handwritten entity resolvers (`#[graphql(entity)]` in a host's own object).
+
+Nothing proves what a handwritten resolver resolves or enforces. Listing them
+is a follow-up that needs an explicit per-field annotation.
+
+### What the catalogue cannot observe
+
+The resolver catalogue reflects how the ORM's generated code mounts resolvers.
+It cannot observe dispatch a host writes by hand. A host that writes the
+`#[Object]` implementation of a type itself, for example one that flattens the
+generated relation wrapper and adds its own method serving the same field
+name, decides what that field resolves to, and is responsible for keeping the
+object consistent with what the catalogue says about it.
+
+A consumer must therefore not treat an entry as proof of enforcement for a
+type whose object implementation the host wrote. For every type, an entry is
+descriptive metadata from a trusted host, as the rest of the catalogue is.
+
+## Canonical JSON encodings
+
+Two encodings exist, and each algorithm identifier names the one it uses.
+
+| Encoding | Used by |
+| --- | --- |
+| Compact `serde_json` output with object keys sorted by UTF-8 bytes | `canonical_json_hash` (receiver purpose version 1), the semantic catalogue fingerprint, the client metadata fingerprint and export |
+| RFC 8785 (JCS) | `rfc8785_canonical_json`, `rfc8785_json_hash`, the resolver catalogue fingerprint and export |
+
+The first encoding is not RFC 8785. The two give the same bytes unless a value
+holds a number with a fraction or exponent (`1.0` against `1`, `1e+16` against
+`10000000000000000`), an integer above 2^53 in magnitude, or object keys whose
+UTF-16 and UTF-8 orders differ. The first encoding spells numbers as the
+locked `serde_json` release does; a unit test pins that spelling, so a
+dependency update that changes it fails the build instead of silently changing
+bindings. The semantic catalogue and client metadata hold none of
+these, so their bytes already equal their RFC 8785 form; receiver-purpose
+variables and arguments can hold fractions, so the issuer and receiver must
+both use `canonical_json_hash` with the same `serde_json` number encoding.
+Receiver purpose version 1 keeps that encoding.
+
+`rfc8785_canonical_json` refuses an integer that is not exactly an IEEE 754
+double, because RFC 8785 numbers are doubles and encoding it would change the
+value. The check reads the integer's digits, so it also holds for integers of
+any length under `serde_json/arbitrary_precision`. Use the encoder for a new
+format, and name it in that format's algorithm identifier.
+
+The encoder is given a `serde_json::Value`, so the caller owns two checks that
+must happen on the JSON text. `serde_json` keeps the last value of a repeated
+member name without reporting it, and it turns a non-finite float into `null`.
+A caller that canonicalizes untrusted text must reject repeated names while
+parsing, and one that builds values from floats must refuse non-finite ones.
+
+`exact_document_hash` is SHA-256 over the document's exact UTF-8 bytes. It does
+not parse or normalise: two documents that differ in whitespace, a comment,
+field order or a line ending have different hashes. That is deliberate and
+fails closed; an issuer must hash the same bytes the receiver has registered.
+
+## What an export discloses
+
+Whoever receives an export reads every name in it. Each export carries the
+following, and none carries a table, column, relationship condition, Rust path
+or policy implementation.
+
+| Export | Names it carries | Also in the generated schema |
+| --- | --- | --- |
+| `GraphqlOperationCatalog::router_protocol_operations()` | exposed generated root fields, their argument names and types, and each root's authorization requirement: **scope names and scope templates**, or the short `SubgraphOnly` explanation | root fields and arguments are in the SDL; fixed scopes are in the Federation SDL as `@requiresScopes`. Scope templates and the `SubgraphOnly` text are not in the SDL |
+| `GraphqlSemanticCatalog` extension | public types, fields, arguments, descriptions, relationship targets, classifications; whether a policy exists, never its name | names and descriptions are in the SDL |
+| `GraphqlClientMetadata` | public field names of streams, lifetimes and relationship keys | yes |
+| `GraphqlResolverCatalog` | served type, field, argument and root names and `@key` field sets; for a type registered under another name, its semantic catalogue entity name; no scope name | yes: types, fields and arguments in the SDL, keys in the Federation SDL. The entity name of a renamed type is in the semantic catalogue, not the SDL |
+
+A router descriptor is therefore operator-facing configuration, not a public
+document: it tells its reader which scopes guard which root field. A fixed
+scope is already visible to anyone who can read the Federation SDL
+(`_service { sdl }`), which Federation requires the router to read. A scope
+template is published only through the router export. Give a descriptor to the
+router that enforces it and to no wider audience, and do not put anything
+secret in a scope name. Unexposed operations are never exported.
+
+Fingerprints are SHA-256 digests of these documents. They reveal nothing
+beyond equality, and they are not signatures.
+
 ## Errors and migration
 
-The package has no fallible catalog-builder API for ordinary consumers; macro
-and schema compilation reject invalid declarations earlier. Treat a changed
-fingerprint as a review signal, not automatic permission to deploy. Preserve
-the algorithm identifiers with any exported value so a consumer can reject an
-unknown contract version.
+`GraphqlOperationCatalog::try_compose` reports repeated entity identities.
+`GraphqlResolverCatalog::compose` reports invalid resolver metadata or an
+invalid semantic catalogue. Treat a changed fingerprint as a review signal.
+Preserve the algorithm identifiers with any exported value so a consumer can
+reject an unknown contract version.
 
 See the [core macro reference](../../docs/reference/graphql-orm/macros-and-attributes.md),
 and [operation assurance architecture](../../docs/architecture/operation-assurance.md).
@@ -241,10 +445,12 @@ ASCII bytes without whitespace or control characters.
 The schema signature still records field types, argument types and relation
 targets as spelled in source, so changing such a spelling changes fingerprints.
 
-`GraphqlOperationCatalog::compose` panics if entity groups repeat an identity,
-including declared IDs that collide with default paths, and names both real Rust
-types. Multiple operations belonging to one entity remain valid. Empty groups
-have no operation identity to check. Semantic catalogues and tool/router bindings
+Use `GraphqlOperationCatalog::try_compose` to receive a
+`GraphqlOperationCatalogError` if entity groups repeat an identity, including
+when a declared ID collides with a default path. The error names both real Rust
+types. The infallible `compose` panics with the same diagnostic. Multiple
+operations belonging to one entity remain valid. Empty groups have no
+operation identity to check. Semantic catalogues and tool/router bindings
 consume the resulting operation fingerprints rather than independently producing
 Rust identities.
 

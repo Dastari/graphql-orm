@@ -10,13 +10,18 @@ supersedes: []
 
 # Migration Guide
 
-## Next breaking graphql-orm-ai release
+## Breaking release (unreleased)
 
 **Action needed** for hosts implementing `AiCodexAppServerRunProcess`.
-Switch all six `start_*_turn` methods to take a consuming
-`AiCodexAppServerTurnDispatch`. For example, the fresh-turn path changes as
-follows. The thread setup and response-stream methods in these excerpts are
-host code.
+Switch all six `start_*_turn` methods to take an owned
+`AiCodexAppServerTurnDispatch`. If your implementation overrides
+`start_dispatch_turn` from AI 0.159.0, move that routing into the corresponding
+fresh, newly bound, and retained methods for tool-free and dynamic-tool
+turns. Replace `dispatch.input()` with `dispatch.turn_input()` and move from
+`write_dispatch_turn` to `write_turn`.
+
+The fresh-turn path below uses host-provided thread setup and response-stream
+methods.
 
 **Before**
 
@@ -74,6 +79,214 @@ prevents resending data and leaves earlier data in the provider-retained
 thread until deletion. See [entity reference delivery](docs/entity-references.md#adapters-for-a-local-process)
 for the deadline and frame-size fallback. No GraphQL SDL, schema-module,
 or data migration is needed.
+
+## 0.161.0 to 0.162.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, provider definitions, describe output
+and existing bindings stay unchanged. No AI schema module or data migration
+is needed.
+
+## 0.160.0 to 0.161.0
+
+**No action.** AI 0.161.0 uses ORM 0.215.0. The change adapts one SQL Server
+internal call to the ORM's string-filter renderer and has no AI schema, data or
+public API migration. See the
+[workspace migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers).
+
+## 0.159.0 to 0.160.0
+
+**Action needed.** Move direct Auth dependencies to the published `v0.27.0`
+Git tag in the same upgrade and refresh the host lockfile. AI's principal and
+assurance APIs use types from that source. `RecentMfaPolicy` struct literals
+must now set `required_amr` and `required_context`. Auth denies accepted MFA
+with no recorded method. AI continues to refuse delegated credentials for
+durable work and rehydrates current authority at execution checkpoints.
+
+AI 0.160.0 uses ORM 0.214.0. There is no AI schema or AI data migration for this
+update. See the [workspace migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270)
+for Auth store and token changes.
+
+## 0.158.0 to 0.159.0
+
+**No action.** Resolved reference delivery to Codex app-server requires a
+registration opt-in and a process implementation that passes the dispatch to
+the protocol actor's consuming write. Existing process implementations keep
+receiving markers. The actor filters echoed `userMessage` items and sets
+existing thread `preview` values to the empty string for every host,
+regardless of opt-in. Hosts that display these previews will receive empty
+strings. No data migration is needed. See
+[per-message entity references](docs/entity-references.md#adapters-for-a-local-process).
+
+## 0.157.0 to 0.158.0
+
+**Action needed** on SQL Server. Generate the external schema plan for
+`AiSchemaModule` 0.85.0 through `Database::schema().plan_migration_to_entities`
+with `AiSchemaModule.entities()`. Review the change to
+`dbo.graphql_orm_ai_runs.state` from `NVARCHAR(MAX)` to
+`NVARCHAR(450) COLLATE Latin1_General_100_BIN2` and creation of the
+`idx_graphql_orm_ai_runs_claim_candidates` and
+`idx_graphql_orm_ai_runs_recovery_candidates` indexes.
+
+Plan a maintenance window and quiesce writers. The `ALTER COLUMN` rewrites the
+run table under an exclusive schema modification lock. User-created statistics
+on `state` block the ALTER. Drop them after the preflight and before the ALTER,
+inside the same transaction. A blocked ALTER rolls back the transaction,
+including any drops already performed.
+
+Replace the indicated comment with the reviewed plan statements. Run the whole
+batch on one connection.
+
+The check counts UTF-16 bytes, including trailing spaces and both code units
+of a supplementary character. SQL Server can silently trim trailing spaces
+when narrowing this column, even with `ANSI_WARNINGS ON`.
+
+```sql
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+
+IF EXISTS (
+    SELECT 1
+    FROM [dbo].[graphql_orm_ai_runs] WITH (TABLOCKX, HOLDLOCK)
+    WHERE DATALENGTH([state]) > 900
+)
+    THROW 50000, N'Cannot narrow graphql_orm_ai_runs.state to NVARCHAR(450): a stored value exceeds 900 bytes.', 1;
+
+-- Insert the reviewed plan statements here, including any required DROP STATISTICS before ALTER COLUMN.
+COMMIT;
+```
+
+No valid run state is that long. Repair or quarantine the corrupt rows before
+retrying the upgrade. The migration keeps values within the bound exactly as
+stored.
+
+**Action needed** on SQLite, PostgreSQL, and SQL Server. Drain active workers
+before opening the new schema-module epoch. Leases granted under the previous
+epoch no longer authorize work after the successor epoch opens. SQLite and
+PostgreSQL require no schema or data migration.
+
+## 0.156.0 to 0.157.0
+
+**Action needed** when upgrading a store that still has the pre-0.83
+`idx_graphql_orm_ai_approvals_tool_call_id` lookup index. Quiesce writers
+and other migrations. Re-plan against the live store using a schema-owner
+connection with visibility of every affected row, then admit and apply the
+same plan. On SQLite and PostgreSQL:
+
+```rust,ignore
+let module = AiSchemaModule;
+let plan = database
+    .schema()
+    .plan_migration_to_entities(upgrade_version, "AI schema upgrade", module.entities())
+    .await?;
+let options = module
+    .admit_index_replacements_with_live_schema(&database, &plan, ApplyOptions::default())
+    .await?;
+database.schema().apply_migration(&plan, options).await?;
+```
+
+The experimental SQL Server schema profile from before 0.83.0 generated the
+same lookup index. Apply reviewed SQL Server DDL with your external
+transactional migration tool. Keep writes and other schema changes quiesced
+until it commits. Choose either sequence:
+
+1. To admit the approval upgrade on its own, plan against the live store
+   with only the `[graphql_orm_ai_approvals]` table as the target entity.
+   Select it by `table_name` from `AiSchemaModule::entities()` and pass that
+   one-element slice to `plan_migration_to_entities`. Review the plan, call
+   `admit_index_replacements_with_live_schema` with default
+   options, and require `options.allow_destructive` before applying that
+   plan's statements in one transaction. Plan and review the remaining AI
+   schema changes separately.
+2. To upgrade the full module together, plan against all
+   `AiSchemaModule::entities()`. Legacy SQL Server stores can also require
+   destructive index replacements introduced in module 0.84.0, so the
+   approval admission helper can leave `allow_destructive` unset. Review
+   every destructive step, then run
+   `database.schema().preflight_unique_indexes(&plan).await?` on the full
+   reviewed plan. After it succeeds, explicitly authorize destructive
+   application (`allow_destructive: true` for an
+   `ApplyOptions`-based gate) and apply the same plan's statements in one
+   external transaction.
+
+If the check returns `UniqueIndexDuplicates`, use the table and columns in
+the error to inspect the conflicting rows. Resolve them according to your
+approval retention rules, then plan and check again. The upgrade preserves
+existing approvals and requires no data backfill. AI schema module remains
+`0.84.0`.
+
+## 0.155.0 to 0.156.0: capability model-context benchmark
+
+**No action.** Upgrade together with AI tool profiles 0.28.0. Broker
+definitions, provider-session bindings, capability, index and index-set
+fingerprints, model-facing results, GraphQL SDL and the AI schema module are
+unchanged, so no retained session rebinds and no data migration is needed.
+Broker calls on a host that supplies one index through
+`AiCurrentCapabilityIndex` cost the same at any index size, and describe and
+`describe_type` are faster for wide entities. To measure a deployment's own
+shape, run the
+[model-context benchmark](docs/capability-discovery-and-execution.md#model-context-benchmark).
+
+## 0.154.0 to 0.155.0
+
+**No action.** The exported AI roots now implement `GraphqlRootFieldNames`,
+so existing `schema_roots!` declarations can compose them directly with their
+configured field names. No data migration is needed.
+
+## 0.153.0 to 0.154.0
+
+**Action needed.** When adopting SQL Server, install the ORM restore marker with
+the schema owner, then generate the external schema plan for `AiSchemaModule`
+0.84.0 with `Database::schema().plan_migration_to_entities` and
+`AiSchemaModule.entities()`. Review and apply the statements with your own
+migration tooling. Use a verified TLS connection and an explicitly writable
+runtime pool. Rehearse readiness and restore on an owned copy. If a schema-only
+deployment already created the AI tables, replace the nullable provider response
+UNIQUE constraint and the message client-ID index with the planned filtered
+indexes. Apply the planned BIN2 collation to generated string keys, dropping
+and recreating dependent indexes as needed before enabling writers. Install
+the append-only triggers before enabling writers. Existing responses keep
+their values. Nonempty session activity lists return a configuration error on
+SQL Server. Session point reads and durable subscription replay are available.
+See the
+[SQL Server capability matrix](docs/backend-capability-matrix.md#sql-server-deployment).
+
+**No action.** For SQLite and PostgreSQL, the module version advances
+to 0.84.0 without a physical schema or data migration on these backends.
+
+**Action needed.** On SQLite, PostgreSQL, and SQL Server, quiesce new claims
+and drain current runs before reopening on the upgraded module. The
+successor epoch invalidates leases from the previous module. Let ordinary
+lease recovery classify any work that did not drain.
+
+## 0.152.0 to 0.153.0
+
+**Action needed** for direct checkpoint adoption callers. Start each claimed
+lease before adopting a completed tool batch. Pass the latest lease proof and
+handle a conflict if it expires, is cancelled, or is superseded during adoption.
+Consumption also refuses a lease that expires while waiting for the transaction.
+
+**Action needed** for hosts using context compaction. Register the adapter
+with `AiRuntimeBuilder::provider_with_compaction_admission`, supplying its
+exact stable profile ID and the host's execution selection resolver. Implement
+its `compaction_provider` method to return the exact adapter instance from the
+host's approved route registration. Install
+`OrmAiRunExecutionSelectionReader` on the executor with
+`with_context_compaction_selection_reader`. Use
+`AiPreparedContextCompaction::provider_profile_id()` and the prepared source
+list in the model-inference manifest. Use the prepared request's pinned
+reasoning effort for the reservation. Re-admission must authorize that exact
+provider, profile, model and effort at dispatch. The approved and registered
+adapters must be the same instance. The runtime verifies the live lease again
+after re-admission. Give an unrelated replacement adapter a different profile ID.
+
+**Action needed** for legacy sessions using compaction. Pin a verified
+execution selection where the retained evidence supports it. Start a new chat
+when there is insufficient evidence to pin the existing session.
+
+Restore collection checks the candidate payload size before loading each page
+and charges the decoded rows to the aggregate budget. With residual row policy,
+it checks all candidates through the scan ceiling and look-ahead or exhaustion. No persistent schema,
+GraphQL SDL, or data migration is needed.
 
 ## 0.151.2 to 0.152.0: opt-in entity references on local-process adapters
 

@@ -1,0 +1,30 @@
+error[E0308]: mismatched types
+  --> tests/ui/update_assurance_selector_signature.rs:5:25
+   |
+ 5 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+   |                         ^^^^^^^^^^^^^^^^^ expected `&Review`, found `UpdateAssuranceInput<'_, Review, ...>`
+...
+ 9 |     update_assurance(select = "select", levels = "write")
+   |                               -------- arguments to this function are incorrect
+   |
+   = note: expected reference `&Review`
+                 found struct `UpdateAssuranceInput<'_, Review, UpdateReviewInput>`
+note: function defined here
+  --> tests/ui/update_assurance_selector_signature.rs:19:4
+   |
+19 | fn select(_: &Review) -> &'static str {
+   |    ^^^^^^ ----------
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+ --> tests/ui/update_assurance_selector_signature.rs:5:25
+  |
+5 | #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+  |                         ^^^^^^^^^^^^^^^^^
+  |                         |
+  |                         expected `Result<&str, Error>`, found `&str`
+  |                         expected `Result<&'static str, async_graphql::Error>` because of return type
+  |
+  = note:   expected enum `Result<&'static str, async_graphql::Error>`
+          found reference `&'static str`
+  = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
