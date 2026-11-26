@@ -1890,7 +1890,6 @@ fn search_candidate(entry: &AiCapabilityIndexEntry) -> AiCapabilitySearchCandida
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn generated_entry(
     id: AiToolId,
     kind: AiCapabilityKind,
