@@ -1100,6 +1100,12 @@ where
 #[derive(Clone, Debug)]
 pub struct AiLoadedCapabilityBinding {
     nonce: Uuid,
+    /// The model-facing `loadedReference`, fixed at load and kept when a
+    /// hidden-only catalogue change refreshes the binding.
+    reference: String,
+    /// [`visible_fingerprint`] of the capability as this principal was shown
+    /// it at load.
+    visible_fingerprint: String,
     principal_reference_fingerprint: String,
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
@@ -1141,6 +1147,9 @@ struct LoadedTarget {
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
+    /// Model-facing contract of the resolved root, which a continued page
+    /// must share with its first page.
+    contract_fingerprint: String,
     operation_name: String,
 }
 
@@ -1165,24 +1174,16 @@ impl AiLoadedCapabilityBinding {
 
     /// Opaque non-authoritative audit reference.
     pub fn audit_reference(&self) -> String {
-        hash_json(&json!({
-            "version": 1,
-            "nonce": self.nonce,
-            "entry": self.entry_fingerprint,
-            "run": self.run_id,
-            "attempt": self.attempt_id,
-        }))
+        self.reference.clone()
     }
 }
 
 #[derive(Clone)]
 struct CachedCapabilityDiscovery {
-    /// [`candidate_reference_fence`] of the run the references were issued
-    /// to. A cached search answers only that principal, session, run,
-    /// attempt and provider session.
-    fence: String,
-    references: Vec<(String, AiToolId)>,
-    search: AiCapabilityIndexSetSearchResult,
+    /// The issued search, with the fence of the run its references were
+    /// issued to. A cached search answers only that principal, session,
+    /// run, attempt and provider session.
+    issued: IssuedSearch,
     expires_at: OffsetDateTime,
 }
 
@@ -1279,18 +1280,23 @@ impl AiCapabilityDiscoveryBroker {
         Ok(self)
     }
 
-    /// Caps how many entries one discovery query may send to host policy:
-    /// the ranked matches plus each matching entity's grouped roots (or each
-    /// matching root's entity, in per-root discovery). Unset by default, so
-    /// every match is evaluated.
+    /// Caps the authorized view of one discovery query and the size of each
+    /// host policy batch. Unset by default: no view is refused and policy
+    /// batches hold at most [`AI_CAPABILITY_BROWSE_POLICY_BATCH`] decisions.
     ///
-    /// A query that matches more entries than `maximum` is refused before any
-    /// policy call with [`AiError::InvalidInput`] carrying
-    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`]. The refusal depends only on the
-    /// total number of matches, permitted or not, which search latency
-    /// already reflects; it never depends on a policy decision. The cap is
-    /// applied before truncation so a restricted principal still receives
-    /// every permitted candidate of an admitted query.
+    /// Every ranked match is decided, in rank order, in policy batches of at
+    /// most `maximum` decisions (and never more than
+    /// [`AI_CAPABILITY_BROWSE_POLICY_BATCH`]); an entity whose grouped roots
+    /// exceed a batch is decided alone. A query whose authorized view (the
+    /// admitted matches with their admitted grouped roots and, in per-root
+    /// discovery, each admitted entity) exceeds `maximum` is refused with
+    /// [`AiError::InvalidInput`] carrying
+    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`]. Denied matches never count
+    /// towards it, so the refusal depends only on what the principal may
+    /// see. The guarantee covers the response, not timing: policy work grows
+    /// with the hidden matches decided. The ceiling is applied before
+    /// truncation, so a restricted principal still receives every permitted
+    /// candidate of an admitted query.
     ///
     /// # Errors
     ///
@@ -1306,12 +1312,7 @@ impl AiCapabilityDiscoveryBroker {
         Ok(self)
     }
 
-    fn cache_discovery(
-        &self,
-        fence: &str,
-        search: &AiCapabilityIndexSetSearchResult,
-        references: &[CandidateReference],
-    ) {
+    fn cache_discovery(&self, issued: &IssuedSearch) {
         let Some(cache) = &self.discovery_cache else {
             return;
         };
@@ -1319,12 +1320,7 @@ impl AiCapabilityDiscoveryBroker {
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.expires_at > now);
         entries.push_back(CachedCapabilityDiscovery {
-            fence: fence.to_owned(),
-            references: references
-                .iter()
-                .map(|reference| (reference.reference.clone(), reference.capability_id.clone()))
-                .collect(),
-            search: search.clone(),
+            issued: issued.clone(),
             expires_at: now + cache.ttl,
         });
         while entries.len() > cache.maximum_searches {
@@ -1332,14 +1328,14 @@ impl AiCapabilityDiscoveryBroker {
         }
     }
 
-    /// The cached search that issued `reference` for `capability_id` under
-    /// exactly `fence`.
+    /// The cached snapshot that issued `reference` for `capability_id` under
+    /// exactly `fence`, with the reference's visible fingerprint.
     fn cached_discovery(
         &self,
         fence: &str,
         capability_id: &AiToolId,
         reference: &str,
-    ) -> Option<AiCapabilityIndexSetSearchResult> {
+    ) -> Option<(Arc<AiCapabilityIndexSetSearchResult>, String)> {
         let cache = self.discovery_cache.as_ref()?;
         let now = self.clock.now();
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1347,14 +1343,7 @@ impl AiCapabilityDiscoveryBroker {
         entries
             .iter()
             .rev()
-            .find(|entry| {
-                entry.fence == fence
-                    && entry
-                        .references
-                        .iter()
-                        .any(|(issued, id)| issued == reference && id == capability_id)
-            })
-            .map(|entry| entry.search.clone())
+            .find_map(|entry| entry.issued.resolve(capability_id, reference, fence))
     }
 
     /// Searches current model-safe metadata after rehydrating the principal
@@ -1382,6 +1371,7 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
         self.search_admitted(principal_reference, run, query, false, |_| true)
             .await
+            .map(|(result, _)| result)
     }
 
     /// [`Self::search`] over the entries `admit` accepts. An entry `admit`
@@ -1396,7 +1386,7 @@ impl AiCapabilityDiscoveryBroker {
         query: &AiCapabilitySearchQuery,
         per_root: bool,
         admit: impl Fn(&AiCapabilityIndexEntry) -> bool,
-    ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
+    ) -> Result<(AiCapabilityIndexSetSearchResult, Vec<String>), AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
         let mut ranked = if per_root {
@@ -1405,7 +1395,7 @@ impl AiCapabilityDiscoveryBroker {
             indexes.ranked_matches(query)?
         };
         ranked.retain(|candidate| admit(candidate.entry()));
-        let kept = Box::pin(self.admit_matches(&principal, run, &ranked, per_root, true)).await?;
+        let kept = Box::pin(self.admit_ranked(&principal, run, &ranked, per_root)).await?;
         // Rank again on each entity's own metadata and its admitted roots,
         // so a denied root's text decides neither whether nor where its
         // entity appears. Per-root ranks depend on the root alone already.
@@ -1414,33 +1404,97 @@ impl AiCapabilityDiscoveryBroker {
         } else {
             indexes.rank_admitted(query, &kept)?
         };
-        let candidates = order
+        let (candidates, visible) = order
             .into_iter()
             .take(usize::from(query.maximum_results))
             .map(|position| {
                 let (candidate, admitted) = &kept[position];
-                candidate.admitted_candidate(admitted)
+                (
+                    candidate.admitted_candidate(admitted),
+                    visible_fingerprint(candidate.entry(), admitted),
+                )
             })
-            .collect();
-        Ok(AiCapabilityIndexSetSearchResult {
-            index_set_fingerprint: indexes.fingerprint().to_owned(),
-            candidates,
-        })
+            .unzip();
+        Ok((
+            AiCapabilityIndexSetSearchResult {
+                index_set_fingerprint: indexes.fingerprint().to_owned(),
+                candidates,
+            },
+            visible,
+        ))
+    }
+
+    /// Applies host policy to every ranked match, in rank order, in batches
+    /// of at most [`AI_CAPABILITY_BROWSE_POLICY_BATCH`] decisions, or the
+    /// host's [`Self::with_maximum_discovery_authorizations`] when it is
+    /// lower. An entity whose grouped roots exceed a batch is decided alone.
+    ///
+    /// The configured authorization ceiling applies to the authorized view
+    /// alone: the admitted matches with their admitted grouped roots (and,
+    /// per root, their admitted entities). Denied matches never count
+    /// towards it, so whether a query is refused as
+    /// [`AI_CAPABILITY_DISCOVERY_TOO_BROAD`] depends only on what the
+    /// principal may see. Hidden matches change how much policy work is
+    /// done, never the response.
+    async fn admit_ranked<'a>(
+        &self,
+        principal: &ResolvedPrincipal,
+        run: &AiCapabilityRunBinding,
+        ranked: &[AiCapabilityRankedMatch<'a>],
+        per_root: bool,
+    ) -> Result<Vec<(AiCapabilityRankedMatch<'a>, BTreeSet<AiToolId>)>, AiError> {
+        let batch_size = self
+            .maximum_discovery_authorizations
+            .unwrap_or(AI_CAPABILITY_BROWSE_POLICY_BATCH)
+            .clamp(1, AI_CAPABILITY_BROWSE_POLICY_BATCH);
+        let mut kept = Vec::new();
+        let mut position = 0;
+        while position < ranked.len() {
+            let mut chunk = Vec::new();
+            let mut decisions = 0_usize;
+            let mut entities = BTreeSet::new();
+            while let Some(candidate) = ranked.get(position) {
+                let size = 1 + if per_root {
+                    candidate.entity().map_or(0, |entity| {
+                        usize::from(!entities.contains(&entity.entry().id))
+                    })
+                } else {
+                    candidate.entry().operations.len()
+                };
+                if !chunk.is_empty() && decisions + size > batch_size {
+                    break;
+                }
+                if per_root && let Some(entity) = candidate.entity() {
+                    entities.insert(entity.entry().id.clone());
+                }
+                chunk.push(*candidate);
+                decisions += size;
+                position += 1;
+            }
+            kept.extend(Box::pin(self.admit_matches(principal, run, &chunk, per_root)).await?);
+            if self
+                .maximum_discovery_authorizations
+                .is_some_and(|maximum| authorized_view_size(&kept, per_root) > maximum)
+            {
+                return Err(AiError::InvalidInput(
+                    AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
+                ));
+            }
+        }
+        Ok(kept)
     }
 
     /// Applies one host policy batch to every match, with the entries each
     /// depends on, and keeps the admitted matches in order, each with the
     /// grouped roots policy admitted.
     ///
-    /// The batch size depends only on the matches, never on a decision, and
-    /// is bounded by [`Self::with_maximum_discovery_authorizations`].
+    /// The batch size depends only on the matches, never on a decision.
     async fn admit_matches<'a>(
         &self,
         principal: &ResolvedPrincipal,
         run: &AiCapabilityRunBinding,
         ranked: &[AiCapabilityRankedMatch<'a>],
         per_root: bool,
-        bounded: bool,
     ) -> Result<Vec<(AiCapabilityRankedMatch<'a>, BTreeSet<AiToolId>)>, AiError> {
         // One policy batch decides every match together with the entries it
         // depends on: an entity entry's grouped roots follow it, and in
@@ -1471,15 +1525,6 @@ impl AiCapabilityDiscoveryBroker {
                 }
             }
             slots.push((at, roots, entity_at));
-        }
-        if bounded
-            && self
-                .maximum_discovery_authorizations
-                .is_some_and(|maximum| batch.len() > maximum)
-        {
-            return Err(AiError::InvalidInput(
-                AI_CAPABILITY_DISCOVERY_TOO_BROAD.to_owned(),
-            ));
         }
         let decisions = self
             .authority
@@ -1543,9 +1588,24 @@ impl AiCapabilityDiscoveryBroker {
         {
             return Err(AiError::Forbidden);
         }
+        self.load_entry(&principal, run, &indexes, index, entry)
+            .await
+    }
+
+    /// Loads the current `entry` of `indexes` for `principal` after fresh
+    /// host policy for the entry, its entity and each grouped root. The
+    /// caller has already proven that the run holds the selection.
+    async fn load_entry(
+        &self,
+        principal: &ResolvedPrincipal,
+        run: &AiCapabilityRunBinding,
+        indexes: &AiCapabilityIndexSet,
+        index: &AiCapabilityIndex,
+        entry: &AiCapabilityIndexEntry,
+    ) -> Result<AiLoadedCapabilityBinding, AiError> {
         let decision = self
             .authority
-            .authorize(&principal, index, entry, run)
+            .authorize(principal, index, entry, run)
             .await?;
         if !decision.allowed || !valid_binding_value(&decision.policy_fingerprint) {
             return Err(AiError::Forbidden);
@@ -1556,7 +1616,7 @@ impl AiCapabilityDiscoveryBroker {
             Some(entity) => {
                 let entity_decision = self
                     .authority
-                    .authorize(&principal, index, entity, run)
+                    .authorize(principal, index, entity, run)
                     .await?;
                 if !entity_decision.allowed
                     || !valid_binding_value(&entity_decision.policy_fingerprint)
@@ -1577,7 +1637,7 @@ impl AiCapabilityDiscoveryBroker {
                     .ok_or(AiError::Forbidden)?;
                 let member_decision = self
                     .authority
-                    .authorize(&principal, index, root, run)
+                    .authorize(principal, index, root, run)
                     .await?;
                 if member_decision.allowed
                     && valid_binding_value(&member_decision.policy_fingerprint)
@@ -1595,10 +1655,23 @@ impl AiCapabilityDiscoveryBroker {
                 return Err(AiError::Forbidden);
             }
         }
+        let nonce = Uuid::new_v4();
+        let admitted = operations
+            .iter()
+            .map(|operation| operation.capability_id.clone())
+            .collect::<BTreeSet<_>>();
         Ok(AiLoadedCapabilityBinding {
+            reference: hash_json(&json!({
+                "version": 2,
+                "nonce": nonce,
+                "capability": entry.id,
+                "run": run.run_id,
+                "attempt": run.attempt_id,
+            })),
+            visible_fingerprint: visible_fingerprint(entry, &admitted),
             operations,
             entity_policy_fingerprint,
-            nonce: Uuid::new_v4(),
+            nonce,
             principal_reference_fingerprint: principal_reference_fingerprint(principal.reference()),
             capability_id: entry.id.clone(),
             capability_kind: entry.kind,
@@ -1725,7 +1798,73 @@ impl AiCapabilityDiscoveryBroker {
     /// whole and then the chosen root entry again, with its own fingerprints
     /// and host policy, so the root is never reached on the entity's
     /// decision alone.
+    ///
+    /// When an exact server-side fingerprint has drifted, the binding is
+    /// loaded again from the current index under current policy. If what this
+    /// principal is shown of the capability ([`visible_fingerprint`]) is
+    /// unchanged, the drift lies only in state it cannot see (another
+    /// capability, a root it is denied, another target): the session's
+    /// binding is replaced by the refreshed one, under the same
+    /// `loadedReference` and expiry, and the call proceeds against the exact
+    /// current capability. Otherwise the call is [`AI_CAPABILITY_STALE`].
     async fn authorize_loaded_operation(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        loaded: &AiLoadedCapabilityBinding,
+        operation: Option<&str>,
+    ) -> Result<LoadedTarget, AiError> {
+        match self
+            .authorize_exact_operation(principal_reference, run, loaded, operation)
+            .await
+        {
+            Err(error) if is_capability_stale(&error) => {
+                let refreshed = self
+                    .refresh_loaded(principal_reference, run, loaded)
+                    .await?;
+                let target = self
+                    .authorize_exact_operation(principal_reference, run, &refreshed, operation)
+                    .await?;
+                session.replace_loaded(refreshed);
+                Ok(target)
+            }
+            result => result,
+        }
+    }
+
+    /// Loads `loaded` again from the current index under current policy and
+    /// keeps its reference and expiry, when the principal's visible view of
+    /// the capability is unchanged.
+    async fn refresh_loaded(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        loaded: &AiLoadedCapabilityBinding,
+    ) -> Result<AiLoadedCapabilityBinding, AiError> {
+        let principal = self.rehydrate(principal_reference).await?;
+        let indexes = self.current_indexes.current_index_set(run)?;
+        let (index, entry) = indexes
+            .entry(&loaded.capability_id)
+            .ok_or_else(stale_capability)?;
+        if entry.kind != loaded.capability_kind {
+            return Err(AiError::Forbidden);
+        }
+        let mut refreshed = self
+            .load_entry(&principal, run, &indexes, index, entry)
+            .await?;
+        if refreshed.visible_fingerprint != loaded.visible_fingerprint {
+            return Err(stale_capability());
+        }
+        refreshed.nonce = loaded.nonce;
+        refreshed.reference.clone_from(&loaded.reference);
+        refreshed.expires_at = loaded.expires_at;
+        Ok(refreshed)
+    }
+
+    /// [`Self::authorize_loaded_operation`] against the exact fingerprints
+    /// `loaded` records.
+    async fn authorize_exact_operation(
         &self,
         principal_reference: &PrincipalReference,
         run: &AiCapabilityRunBinding,
@@ -1759,6 +1898,7 @@ impl AiCapabilityDiscoveryBroker {
                 capability_id: loaded.capability_id.clone(),
                 capability_kind: loaded.capability_kind,
                 capability_fingerprint: loaded.capability_fingerprint.clone(),
+                contract_fingerprint: entry.contract_fingerprint.clone(),
                 operation_name: entry.operation_name.clone(),
             });
         };
@@ -1786,6 +1926,7 @@ impl AiCapabilityDiscoveryBroker {
             capability_id: root.id.clone(),
             capability_kind: root.kind,
             capability_fingerprint: root.capability_fingerprint.clone(),
+            contract_fingerprint: root.contract_fingerprint.clone(),
             operation_name: root.operation_name.clone(),
         })
     }
@@ -2011,11 +2152,11 @@ impl AiCapabilityBrokerAmplification {
 
 #[derive(Debug, Default)]
 struct BrokerSessionState {
-    searches: VecDeque<AiCapabilityIndexSetSearchResult>,
+    /// Retained discover and browse results, each with the references it
+    /// issued.
+    searches: VecDeque<IssuedSearch>,
     loaded: VecDeque<(String, AiLoadedCapabilityBinding)>,
     continuations: VecDeque<(String, BrokerContinuation)>,
-    /// Opaque candidate references issued by discover and browse.
-    candidate_references: VecDeque<CandidateReference>,
     deferred_installation_pending: bool,
     amplification: AiCapabilityBrokerAmplification,
 }
@@ -2303,51 +2444,49 @@ impl AiCapabilityBrokerSession {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn record_search(
-        &self,
-        result: AiCapabilityIndexSetSearchResult,
-        references: Vec<CandidateReference>,
-    ) {
+    fn record_search(&self, issued: IssuedSearch) {
         let mut state = self.state();
         state.amplification.discover_calls = state.amplification.discover_calls.saturating_add(1);
-        state.searches.push_back(result);
+        self.retain_search(&mut state, issued);
+    }
+
+    /// Retains one issued search with its references. Evicting a search
+    /// evicts its references with it, so a reference resolves only while
+    /// the exact snapshot it was issued with is retained.
+    fn retain_search(&self, state: &mut BrokerSessionState, issued: IssuedSearch) {
+        state.searches.push_back(issued);
         while state.searches.len() > usize::from(self.limits.maximum_retained_searches) {
             state.searches.pop_front();
         }
-        self.retain_references(&mut state, references);
     }
 
-    /// Retains newly issued candidate references, keeping at most one full
-    /// page per retained search.
-    fn retain_references(
-        &self,
-        state: &mut BrokerSessionState,
-        references: Vec<CandidateReference>,
-    ) {
-        state.candidate_references.extend(references);
-        let maximum = usize::from(self.limits.maximum_retained_searches)
-            .saturating_mul(usize::from(AI_CAPABILITY_BROWSE_PAGE_MAXIMUM));
-        while state.candidate_references.len() > maximum {
-            state.candidate_references.pop_front();
-        }
-    }
-
-    fn candidate_search(
+    /// The exact snapshot, and the visible fingerprint, behind one opaque
+    /// candidate reference that this session issued for `capability_id`
+    /// under exactly `fence`.
+    fn issued_reference(
         &self,
         capability_id: &AiToolId,
-        candidate_fingerprint: &str,
-    ) -> Option<AiCapabilityIndexSetSearchResult> {
+        reference: &str,
+        fence: &str,
+    ) -> Option<(Arc<AiCapabilityIndexSetSearchResult>, String)> {
         self.state()
             .searches
             .iter()
             .rev()
-            .find(|search| {
-                search.candidates.iter().any(|candidate| {
-                    &candidate.id == capability_id
-                        && candidate.entry_fingerprint == candidate_fingerprint
-                })
-            })
-            .cloned()
+            .find_map(|issued| issued.resolve(capability_id, reference, fence))
+    }
+
+    /// Replaces the binding held under `binding`'s reference, after a
+    /// hidden-only refresh.
+    fn replace_loaded(&self, binding: AiLoadedCapabilityBinding) {
+        let mut state = self.state();
+        if let Some((_, held)) = state
+            .loaded
+            .iter_mut()
+            .find(|(reference, _)| reference == &binding.reference)
+        {
+            *held = binding;
+        }
     }
 
     fn record_loaded(&self, reference: String, binding: AiLoadedCapabilityBinding) {
@@ -2367,10 +2506,16 @@ impl AiCapabilityBrokerSession {
     ) {
         let mut state = self.state();
         state.amplification.discover_calls = state.amplification.discover_calls.saturating_add(1);
-        state.searches.push_back(result);
-        while state.searches.len() > usize::from(self.limits.maximum_retained_searches) {
-            state.searches.pop_front();
-        }
+        // Client-deferred discovery issues no references; its candidates
+        // are loaded at once.
+        self.retain_search(
+            &mut state,
+            IssuedSearch {
+                fence: String::new(),
+                search: Arc::new(result),
+                references: Vec::new(),
+            },
+        );
         state.loaded = loaded.into();
         state.deferred_installation_pending = true;
     }
@@ -2391,40 +2536,12 @@ impl AiCapabilityBrokerSession {
             .map(|(_, binding)| binding.clone())
     }
 
-    fn record_browse(
-        &self,
-        result: Option<AiCapabilityIndexSetSearchResult>,
-        references: Vec<CandidateReference>,
-    ) {
+    fn record_browse(&self, issued: Option<IssuedSearch>) {
         let mut state = self.state();
         state.amplification.browse_calls = state.amplification.browse_calls.saturating_add(1);
-        if let Some(result) = result {
-            state.searches.push_back(result);
-            while state.searches.len() > usize::from(self.limits.maximum_retained_searches) {
-                state.searches.pop_front();
-            }
+        if let Some(issued) = issued {
+            self.retain_search(&mut state, issued);
         }
-        self.retain_references(&mut state, references);
-    }
-
-    /// Entry fingerprint behind one opaque candidate reference that this
-    /// session issued for `capability_id` under exactly `fence`.
-    fn candidate_reference(
-        &self,
-        capability_id: &AiToolId,
-        reference: &str,
-        fence: &str,
-    ) -> Option<String> {
-        self.state()
-            .candidate_references
-            .iter()
-            .rev()
-            .find(|issued| {
-                issued.reference == reference
-                    && &issued.capability_id == capability_id
-                    && issued.fence == fence
-            })
-            .map(|issued| issued.entry_fingerprint.clone())
     }
 
     fn record_continuation(&self, handle: String, continuation: BrokerContinuation) {
@@ -2481,10 +2598,18 @@ struct BrokerDescribeArguments {
     #[serde(default)]
     candidate_reference: Option<String>,
     /// Earlier broker contracts named a discover candidate by its entry
-    /// fingerprint. A replayed one is accepted only to be answered as a
-    /// selection the run does not hold, whatever its value.
-    #[serde(default)]
-    candidate_fingerprint: Option<serde::de::IgnoredAny>,
+    /// fingerprint. A replayed one, `null` included, is accepted only to be
+    /// answered as a selection the run does not hold, whatever its value.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    candidate_fingerprint: Option<()>,
+}
+
+/// `Some(())` whenever the member is present, whatever its value, `null`
+/// included.
+fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<()>, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| Some(()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2616,21 +2741,21 @@ fn fixed_candidate_value(
 }
 
 /// One opaque candidate reference a discover or browse call issued: the
-/// model-facing reference, the capability it names, the entry fingerprint it
-/// stands for (server-side only) and the fence it was issued under.
+/// model-facing reference, the capability it names and the
+/// [`visible_fingerprint`] of that candidate as it was shown.
 #[derive(Clone, Debug)]
 struct CandidateReference {
     reference: String,
     capability_id: AiToolId,
-    entry_fingerprint: String,
-    fence: String,
+    visible_fingerprint: String,
 }
 
 impl CandidateReference {
-    /// A fresh random reference to `candidate` under `fence`. It hashes no
-    /// index, entry or policy fingerprint, so nothing about entries the
-    /// principal may not see enters it.
-    fn issue(candidate: &crate::AiCapabilitySearchCandidate, fence: &str) -> Self {
+    /// A fresh random reference to `candidate`, shown as
+    /// `visible_fingerprint` describes. The reference hashes no index, entry
+    /// or policy fingerprint, so nothing about entries the principal may not
+    /// see enters it.
+    fn issue(candidate: &crate::AiCapabilitySearchCandidate, visible_fingerprint: String) -> Self {
         Self {
             reference: hash_json(&json!({
                 "version": 1,
@@ -2638,9 +2763,36 @@ impl CandidateReference {
                 "capability": candidate.id,
             })),
             capability_id: candidate.id.clone(),
-            entry_fingerprint: candidate.entry_fingerprint.clone(),
-            fence: fence.to_owned(),
+            visible_fingerprint,
         }
+    }
+}
+
+/// One discover or browse result a run was given: the exact search snapshot
+/// the model was shown, the fence of the run it was issued to, and the
+/// references it issued. A reference resolves only against this snapshot,
+/// and only while it is retained.
+#[derive(Clone, Debug)]
+struct IssuedSearch {
+    fence: String,
+    search: Arc<AiCapabilityIndexSetSearchResult>,
+    references: Vec<CandidateReference>,
+}
+
+impl IssuedSearch {
+    fn resolve(
+        &self,
+        capability_id: &AiToolId,
+        reference: &str,
+        fence: &str,
+    ) -> Option<(Arc<AiCapabilityIndexSetSearchResult>, String)> {
+        if self.fence != fence {
+            return None;
+        }
+        self.references
+            .iter()
+            .find(|issued| issued.reference == reference && &issued.capability_id == capability_id)
+            .map(|issued| (Arc::clone(&self.search), issued.visible_fingerprint.clone()))
     }
 }
 
@@ -2674,7 +2826,8 @@ fn valid_browse_name(value: &str) -> bool {
 struct BrokerContinuation {
     loaded_reference: String,
     capability_id: AiToolId,
-    capability_fingerprint: String,
+    /// Model-facing contract of the first page's root.
+    contract_fingerprint: String,
     operation_name: String,
     plan: serde_json::Value,
     cursor: String,
@@ -2940,6 +3093,84 @@ fn stale_capability() -> AiError {
     AiError::InvalidInput(AI_CAPABILITY_STALE.to_owned())
 }
 
+/// Size of an authorized discovery view: each admitted match with its
+/// admitted grouped roots and, per root, each distinct admitted entity.
+fn authorized_view_size(
+    kept: &[(AiCapabilityRankedMatch<'_>, BTreeSet<AiToolId>)],
+    per_root: bool,
+) -> usize {
+    let entities = if per_root {
+        kept.iter()
+            .filter_map(|(candidate, _)| candidate.entity().map(|entity| entity.entry().id.clone()))
+            .collect::<BTreeSet<_>>()
+            .len()
+    } else {
+        0
+    };
+    kept.iter()
+        .map(|(_, admitted)| 1 + admitted.len())
+        .sum::<usize>()
+        + entities
+}
+
+fn is_capability_stale(error: &AiError) -> bool {
+    matches!(error, AiError::InvalidInput(message) if message == AI_CAPABILITY_STALE)
+}
+
+/// Fingerprint of what one principal is shown of `entry`: its model-facing
+/// metadata and contract fingerprint and, for an entity, exactly the
+/// `admitted` roots with theirs.
+///
+/// It covers nothing host policy hides and no catalogue-wide fingerprint, so
+/// an edit to a root the principal is denied, to another capability or to
+/// another target leaves it unchanged. It decides only whether a held
+/// selection is reported as [`AI_CAPABILITY_STALE`]; execution always binds
+/// the exact current capability.
+fn visible_fingerprint(entry: &AiCapabilityIndexEntry, admitted: &BTreeSet<AiToolId>) -> String {
+    let entity = entry.kind == AiCapabilityKind::GeneratedEntity;
+    let operations = entry
+        .operations
+        .iter()
+        .filter(|member| admitted.contains(&member.capability_id))
+        .map(|member| {
+            json!({
+                "id": member.capability_id.as_str(),
+                "operation": member.operation_name,
+                "shape": member.operation_shape,
+                "description": member.description,
+                "resultDescription": member.result_description,
+                "resultRecordCost": member.result_record_cost,
+                "risk": member.risk,
+                "approval": member.approval,
+                "contract": member.contract_fingerprint,
+            })
+        })
+        .collect::<Vec<_>>();
+    hash_json(&json!({
+        "version": 1,
+        "id": entry.id.as_str(),
+        "kind": entry.kind,
+        "name": entry.name,
+        "description": entry.description,
+        "namespace": entry.namespace,
+        "entity": entry.entity_name,
+        "operation": entry.operation_name,
+        "shape": entry.operation_shape,
+        "scalarFields": entry.scalar_fields,
+        "relationships": entry.relationships,
+        "aggregates": entry.aggregate_features,
+        "resultClassification": entry.result_classification,
+        // An entity's own risk, result summaries and contract combine all
+        // of its roots, hidden ones included; its admitted roots stand in.
+        "resultDescription": (!entity).then_some(&entry.result_description),
+        "resultRecordCost": (!entity).then_some(entry.result_record_cost),
+        "risk": (!entity).then_some(entry.risk),
+        "approval": (!entity).then_some(entry.approval),
+        "contract": (!entity).then_some(&entry.contract_fingerprint),
+        "operations": operations,
+    }))
+}
+
 fn invalid_operation() -> AiError {
     AiError::InvalidInput(AI_CAPABILITY_OPERATION_INVALID.to_owned())
 }
@@ -3168,6 +3399,8 @@ pub struct AiCapabilityExecution {
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
+    /// Model-facing contract of the resolved root.
+    contract_fingerprint: String,
     audit_reference: String,
     plan: serde_json::Value,
     operation_name: String,
@@ -3606,18 +3839,19 @@ impl AiCapabilityDiscoveryBroker {
             entity_or_operation: parsed.entity_or_class,
             maximum_results: parsed.maximum_results,
         };
-        let result = self
+        let (result, visible) = self
             .search_admitted(principal_reference, run, &query, false, admit)
             .await?;
         // Each candidate carries a fresh opaque reference bound to this
-        // principal and run. The index-set and entry fingerprints hash
-        // entries host policy hides from this principal, so they stay
-        // server-side.
+        // principal and run, and to this exact snapshot. The index-set and
+        // entry fingerprints hash entries host policy hides from this
+        // principal, so they stay server-side.
         let fence = candidate_reference_fence(principal_reference, run);
         let references = result
             .candidates
             .iter()
-            .map(|candidate| CandidateReference::issue(candidate, &fence))
+            .zip(visible)
+            .map(|(candidate, visible)| CandidateReference::issue(candidate, visible))
             .collect::<Vec<_>>();
         let value = json!({
             "version": AI_CAPABILITY_BROKER_VERSION,
@@ -3628,8 +3862,13 @@ impl AiCapabilityDiscoveryBroker {
                 .map(|(candidate, reference)| fixed_candidate_value(candidate, reference, true))
                 .collect::<Vec<_>>(),
         });
-        self.cache_discovery(&fence, &result, &references);
-        session.record_search(result, references);
+        let issued = IssuedSearch {
+            fence,
+            search: Arc::new(result),
+            references,
+        };
+        self.cache_discovery(&issued);
+        session.record_search(issued);
         Ok(value)
     }
 
@@ -3646,10 +3885,12 @@ impl AiCapabilityDiscoveryBroker {
     /// roots, in one batch before anything is counted or paged, exactly as
     /// for discovery: a namespace, capability or operation appears only when
     /// current policy admits it, and an entity only with its admitted roots.
-    /// The amount of policy work depends on the level and filters, never on
-    /// a decision, and is bounded by
-    /// [`Self::with_maximum_discovery_authorizations`]. Listed capabilities
-    /// are retained like discovery candidates, so describe accepts them;
+    /// Policy is decided in batches bounded by
+    /// [`Self::with_maximum_discovery_authorizations`], and browsing stops
+    /// once the requested page is decided, so hidden entries change how much
+    /// policy work is done, never the response. Listed capabilities are
+    /// retained, with their references, like discovery candidates, so
+    /// describe accepts them;
     /// browsing grants no load or execution authority.
     ///
     /// # Errors
@@ -3746,9 +3987,7 @@ impl AiCapabilityDiscoveryBroker {
             if chunk.is_empty() {
                 break;
             }
-            for admitted in
-                Box::pin(self.admit_matches(&principal, run, &chunk, false, false)).await?
-            {
+            for admitted in Box::pin(self.admit_matches(&principal, run, &chunk, false)).await? {
                 if parsed.level == BrowseLevel::Namespaces {
                     found_namespaces.insert(admitted.0.entry().namespace.as_str());
                 }
@@ -3769,8 +4008,11 @@ impl AiCapabilityDiscoveryBroker {
         // for the same principal and run.
         let fence = candidate_reference_fence(principal_reference, run);
         let mut references = Vec::new();
-        let mut reference_for = |candidate: &crate::AiCapabilitySearchCandidate| {
-            let reference = CandidateReference::issue(candidate, &fence);
+        let mut reference_for = |candidate: &crate::AiCapabilitySearchCandidate,
+                                 entry: &AiCapabilityIndexEntry,
+                                 admitted: &BTreeSet<AiToolId>| {
+            let reference =
+                CandidateReference::issue(candidate, visible_fingerprint(entry, admitted));
             references.push(reference.clone());
             reference
         };
@@ -3798,7 +4040,7 @@ impl AiCapabilityDiscoveryBroker {
                     let summary = candidate.admitted_candidate(admitted);
                     items.push(fixed_candidate_value(
                         &summary,
-                        &reference_for(&summary),
+                        &reference_for(&summary, candidate.entry(), admitted),
                         true,
                     ));
                     retained.push(summary);
@@ -3810,7 +4052,7 @@ impl AiCapabilityDiscoveryBroker {
                 let (candidate, admitted) = match kept.as_slice() {
                     // An unknown entity and one policy denies look the same.
                     [] => {
-                        session.record_browse(None, Vec::new());
+                        session.record_browse(None);
                         return Ok(value);
                     }
                     [only] => only,
@@ -3828,7 +4070,11 @@ impl AiCapabilityDiscoveryBroker {
                 // the only one, and it honours the requested limit.
                 object.insert(
                     "capability".to_owned(),
-                    fixed_candidate_value(&summary, &reference_for(&summary), false),
+                    fixed_candidate_value(
+                        &summary,
+                        &reference_for(&summary, candidate.entry(), admitted),
+                        false,
+                    ),
                 );
                 object.insert("nextOffset".to_owned(), json!(next));
                 object.insert(
@@ -3848,11 +4094,15 @@ impl AiCapabilityDiscoveryBroker {
                 retained.push(summary);
             }
         }
-        let retained = (!retained.is_empty()).then(|| AiCapabilityIndexSetSearchResult {
-            index_set_fingerprint: indexes.fingerprint().to_owned(),
-            candidates: retained,
+        let issued = (!retained.is_empty()).then(|| IssuedSearch {
+            fence,
+            search: Arc::new(AiCapabilityIndexSetSearchResult {
+                index_set_fingerprint: indexes.fingerprint().to_owned(),
+                candidates: retained,
+            }),
+            references,
         });
-        session.record_browse(retained, references);
+        session.record_browse(issued);
         Ok(value)
     }
 
@@ -3889,7 +4139,7 @@ impl AiCapabilityDiscoveryBroker {
         };
         // Client-deferred delivery installs one exact definition per root,
         // so it ranks roots: an entity's roots stand in for the entity.
-        let result = self
+        let (result, _) = self
             .search_admitted(principal_reference, run, &query, true, |_| true)
             .await?;
         if result.candidates.len() > usize::from(session.limits().maximum_deferred_definitions) {
@@ -3935,14 +4185,20 @@ impl AiCapabilityDiscoveryBroker {
     /// discover or browse call of this run returned. The reference resolves
     /// only for the principal reference, AI session, run, attempt and
     /// provider session it was issued to, from this session or, when enabled,
-    /// the unexpired discovery cache; its server-held entry fingerprint must
-    /// still match. An unknown identifier, an unknown reference and one issued
-    /// to another run are all reported as one
-    /// bounded retryable [`AI_CAPABILITY_SELECTION_STALE`], so describe cannot
-    /// be used to probe for capabilities the current principal cannot see.
-    /// A candidate this run does hold whose index set has since changed is
-    /// reported as the distinct retryable [`AI_CAPABILITY_STALE`], telling the
-    /// model to discover and describe again.
+    /// the unexpired discovery cache, and only against the exact search
+    /// snapshot it was issued with, while that search is retained. An unknown
+    /// identifier, an unknown or evicted reference, one issued to another run
+    /// and an earlier contract's `candidateFingerprint` are all reported as
+    /// one bounded retryable [`AI_CAPABILITY_SELECTION_STALE`], so describe
+    /// cannot be used to probe for capabilities the current principal cannot
+    /// see.
+    ///
+    /// A held candidate whose server-side fingerprints have moved is loaded
+    /// from the current index under current policy. When what this principal
+    /// is shown of it is unchanged, the change lies only in state it cannot
+    /// see and the description is returned; otherwise the call is the
+    /// distinct retryable [`AI_CAPABILITY_STALE`], telling the model to
+    /// discover and describe again.
     ///
     /// # Errors
     ///
@@ -3959,48 +4215,61 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityDescription, AiError> {
         let parsed: BrokerDescribeArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
-        let reference = match (parsed.candidate_reference, parsed.candidate_fingerprint) {
-            (Some(reference), None) if crate::valid_sha256(&reference) => reference,
-            // A transcript from an earlier contract holds no selection: the
-            // model discovers again and receives references.
-            (None, Some(_)) => return Err(stale_selection()),
-            _ => return Err(malformed_broker_arguments()),
-        };
+        // A transcript from an earlier contract holds no selection: the
+        // model discovers again and receives references.
+        if parsed.candidate_fingerprint.is_some() {
+            return Err(stale_selection());
+        }
+        let reference = parsed
+            .candidate_reference
+            .filter(|reference| crate::valid_sha256(reference))
+            .ok_or_else(malformed_broker_arguments)?;
         let capability_id = AiToolId::parse(parsed.capability_id).map_err(|_| stale_selection())?;
         // A discovered or browsed candidate names an opaque reference that
         // only the run it was issued to resolves, from its own session or
-        // the discovery cache, to the candidate held server-side.
+        // the discovery cache, to the exact snapshot it was issued with.
         let fence = candidate_reference_fence(principal_reference, run);
-        let search = session
-            .candidate_reference(&capability_id, &reference, &fence)
-            .and_then(|fingerprint| session.candidate_search(&capability_id, &fingerprint))
+        let (search, shown) = session
+            .issued_reference(&capability_id, &reference, &fence)
             .or_else(|| self.cached_discovery(&fence, &capability_id, &reference))
+            .ok_or_else(stale_selection)?;
+        let candidate = search
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == capability_id)
             .ok_or_else(stale_selection)?;
         // Admission is decided from the held candidate first: a candidate
         // this run's rules or brokered tools do not reach is a stale
         // selection, never a distinguishable catalogue-drift outcome.
-        if !search
-            .candidates
-            .iter()
-            .find(|candidate| candidate.id == capability_id)
-            .is_some_and(|candidate| session.brokers_candidate(candidate))
-        {
+        if !session.brokers_candidate(candidate) {
             return Err(stale_selection());
         }
+        let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
         // The run holds this exact candidate, so reporting catalogue drift
         // discloses nothing the principal was not already shown.
-        verify_search_binding(&indexes, &search).map_err(|_| stale_capability())?;
-        let (_, entry) = indexes.entry(&capability_id).ok_or_else(stale_capability)?;
+        let (index, entry) = indexes.entry(&capability_id).ok_or_else(stale_capability)?;
         // A static tool is loadable only while this run brokers its exact
         // fingerprint. A cached discovery from a run that did, or any other
         // capability family, is the same stale selection as an unknown ID.
         if !session.brokers_entry(entry) {
             return Err(stale_selection());
         }
+        if candidate.kind != entry.kind {
+            return Err(AiError::Forbidden);
+        }
+        let exact = search.index_set_fingerprint == indexes.fingerprint()
+            && candidate.capability_fingerprint == entry.capability_fingerprint
+            && candidate.entry_fingerprint == entry.fingerprint;
         let loaded = self
-            .load(principal_reference, run, &search, &capability_id)
+            .load_entry(&principal, run, &indexes, index, entry)
             .await?;
+        // A server-side fingerprint that moved while what this principal is
+        // shown stayed the same is a change it cannot see: the candidate is
+        // loaded from the current index. Anything it can see is stale.
+        if !exact && loaded.visible_fingerprint != shown {
+            return Err(stale_capability());
+        }
         let loaded_reference = loaded.audit_reference();
         let expires_in_seconds = (loaded.expires_at - self.clock.now())
             .whole_seconds()
@@ -4093,6 +4362,7 @@ impl AiCapabilityDiscoveryBroker {
             .authorize_loaded_operation(
                 principal_reference,
                 run,
+                session,
                 &loaded,
                 parsed.operation.as_deref(),
             )
@@ -4185,7 +4455,7 @@ impl AiCapabilityDiscoveryBroker {
             BrokerContinuation {
                 loaded_reference: execution.audit_reference.clone(),
                 capability_id: execution.capability_id.clone(),
-                capability_fingerprint: execution.capability_fingerprint.clone(),
+                contract_fingerprint: execution.contract_fingerprint.clone(),
                 operation_name: execution.operation_name.clone(),
                 plan: execution.plan.clone(),
                 cursor: cursor.to_owned(),
@@ -4224,9 +4494,10 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// Returns [`AiError::InvalidInput`] for malformed arguments, for an
     /// unknown loaded reference or an expired binding
-    /// ([`AI_CAPABILITY_SELECTION_STALE`]), and for a loaded capability whose
-    /// index, schema, catalogue, entry or policy fingerprint has drifted
-    /// ([`AI_CAPABILITY_STALE`]). Returns [`AiError::Forbidden`] for a non-read
+    /// ([`AI_CAPABILITY_SELECTION_STALE`]), and for a loaded capability of
+    /// which something this principal is shown has changed
+    /// ([`AI_CAPABILITY_STALE`]). Drift only in state the principal cannot see
+    /// refreshes the binding under the same reference instead. Returns [`AiError::Forbidden`] for a non-read
     /// capability or any revocation or substitution.
     pub async fn authorize_broker_execution(
         &self,
@@ -4285,6 +4556,7 @@ impl AiCapabilityDiscoveryBroker {
             .authorize_loaded_operation(
                 principal_reference,
                 run,
+                session,
                 &loaded,
                 parsed.operation.as_deref(),
             )
@@ -4377,6 +4649,7 @@ impl AiCapabilityDiscoveryBroker {
                 capability_id: target.capability_id,
                 capability_kind: target.capability_kind,
                 capability_fingerprint: target.capability_fingerprint,
+                contract_fingerprint: target.contract_fingerprint,
                 audit_reference: loaded.audit_reference(),
                 plan: plan_arguments,
                 operation_name: target.operation_name,
@@ -4405,6 +4678,7 @@ impl AiCapabilityDiscoveryBroker {
             capability_id: target.capability_id,
             capability_kind: target.capability_kind,
             capability_fingerprint: target.capability_fingerprint,
+            contract_fingerprint: target.contract_fingerprint,
             audit_reference: loaded.audit_reference(),
             plan: serde_json::Value::Object(plan),
             operation_name: target.operation_name,
@@ -4472,10 +4746,13 @@ impl AiCapabilityDiscoveryBroker {
             let operation = (loaded.capability_kind == AiCapabilityKind::GeneratedEntity)
                 .then_some(continuation.operation_name.as_str());
             let target = self
-                .authorize_loaded_operation(principal_reference, run, loaded, operation)
+                .authorize_loaded_operation(principal_reference, run, session, loaded, operation)
                 .await?;
+            // The first page's plan stays valid while the root's
+            // model-facing contract is unchanged; the page executes
+            // against the exact current capability.
             if target.capability_id != continuation.capability_id
-                || target.capability_fingerprint != continuation.capability_fingerprint
+                || target.contract_fingerprint != continuation.contract_fingerprint
                 || target.capability_kind != AiCapabilityKind::GeneratedQuery
             {
                 return Err(stale_capability());
@@ -4500,6 +4777,7 @@ impl AiCapabilityDiscoveryBroker {
             capability_id: target.capability_id,
             capability_kind: target.capability_kind,
             capability_fingerprint: target.capability_fingerprint,
+            contract_fingerprint: target.contract_fingerprint,
             audit_reference: loaded_reference,
             plan: continuation.plan,
             operation_name: target.operation_name,
@@ -6122,31 +6400,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_authorization_bound_refuses_broad_queries_before_policy() {
+    async fn discovery_authorization_bound_counts_only_the_authorized_view() {
         let index = large_static_index(200);
         let principal_reference = principal().reference();
+        // One permitted entry among 200 matches: the hidden matches are
+        // decided in policy batches of the bound, never counted against it.
         let authority = Arc::new(PermittedSet::new(["catalogue.record_0199"]));
-        let bounded = batch_broker(&index, authority.clone())
-            .with_maximum_discovery_authorizations(199)
-            .expect("bound");
-        assert!(matches!(
-            bounded
-                .search(&principal_reference, &run_binding(), &catalogue_query(8))
-                .await,
-            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_DISCOVERY_TOO_BROAD
-        ));
-        assert_eq!(authority.calls.load(Ordering::SeqCst), 0);
-
-        let admitted = batch_broker(&index, authority.clone())
-            .with_maximum_discovery_authorizations(200)
-            .expect("bound");
-        let result = admitted
+        let unbounded = batch_broker(&index, authority.clone())
             .search(&principal_reference, &run_binding(), &catalogue_query(8))
             .await
-            .expect("bounded search");
-        assert_eq!(result.candidates.len(), 1);
-        assert_eq!(result.candidates[0].id.as_str(), "catalogue.record_0199");
-        assert_eq!(authority.calls.load(Ordering::SeqCst), 200);
+            .expect("unbounded search");
+        for bound in [1, 7, 199, 200] {
+            let bounded = batch_broker(&index, authority.clone())
+                .with_maximum_discovery_authorizations(bound)
+                .expect("bound");
+            let result = bounded
+                .search(&principal_reference, &run_binding(), &catalogue_query(8))
+                .await
+                .expect("bounded search");
+            assert_eq!(result.candidates, unbounded.candidates, "bound {bound}");
+        }
+        assert_eq!(unbounded.candidates.len(), 1);
+        assert_eq!(unbounded.candidates[0].id.as_str(), "catalogue.record_0199");
+
+        // The bound refuses a query whose admitted view exceeds it, whatever
+        // the hidden matches.
+        let permitted = (0..8)
+            .map(|position| format!("catalogue.record_{position:04}"))
+            .collect::<Vec<_>>();
+        let visible = Arc::new(PermittedSet::new(permitted.iter().map(String::as_str)));
+        for size in [8, 200] {
+            let broad = batch_broker(&large_static_index(size), visible.clone())
+                .with_maximum_discovery_authorizations(7)
+                .expect("bound");
+            assert!(
+                matches!(
+                    broad
+                        .search(&principal_reference, &run_binding(), &catalogue_query(8))
+                        .await,
+                    Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_DISCOVERY_TOO_BROAD
+                ),
+                "{size} entries"
+            );
+            let admitted = batch_broker(&large_static_index(size), visible.clone())
+                .with_maximum_discovery_authorizations(8)
+                .expect("bound")
+                .search(&principal_reference, &run_binding(), &catalogue_query(8))
+                .await
+                .expect("admitted view within the bound");
+            assert_eq!(admitted.candidates.len(), 8, "{size} entries");
+        }
 
         assert!(matches!(
             batch_broker(&index, authority).with_maximum_discovery_authorizations(0),
@@ -7143,20 +7446,19 @@ mod tests {
             .await
             .expect("the re-described capability executes under the same binding");
 
-        // A changed host-policy fingerprint that still allows the capability
-        // is drift; a denial is never reported as drift.
+        // A changed host-policy fingerprint that still admits the same view
+        // shows the principal nothing new: the binding is refreshed and the
+        // call proceeds. A denial is never reported as drift.
         *fixture
             .authority
             .policy_fingerprint
             .write()
             .expect("policy") = "current-policy-v2".to_owned();
-        assert_stale(
-            fixture
-                .broker
-                .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
-                .await
-                .expect_err("a changed policy fingerprint voids the loaded contract"),
-        );
+        fixture
+            .broker
+            .authorize_broker_execution(&fixture.principal, &fixture.run, &session, &execute)
+            .await
+            .expect("a changed policy fingerprint refreshes the loaded binding");
         *fixture
             .authority
             .policy_fingerprint
@@ -7220,19 +7522,32 @@ mod tests {
                 .await,
             Err(AiError::InvalidInput(_))
         ));
+        // A target-policy change shows the principal nothing new: the
+        // cached candidate loads from the current index.
         *fixture.index.0.write().expect("index") = generated_index("target-policy-v2");
-        assert!(matches!(
-            fixture
-                .broker
-                .dispatch_describe(
-                    &fixture.principal,
-                    &fixture.run,
-                    &DiscoveryCacheFixture::session(),
-                    &candidate,
-                )
-                .await,
-            Err(AiError::InvalidInput(_))
-        ));
+        fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &DiscoveryCacheFixture::session(),
+                &candidate,
+            )
+            .await
+            .expect("target-policy change refreshes");
+        // A schema change it can see is drift.
+        *fixture.index.0.write().expect("index") = schema_changed_index();
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &DiscoveryCacheFixture::session(),
+                &candidate,
+            )
+            .await
+            .expect_err("visible drift");
+        assert_input_error(&error, AI_CAPABILITY_STALE);
     }
 
     #[tokio::test]
@@ -7543,17 +7858,7 @@ mod tests {
         });
         // A candidate this run did not broker is a stale selection, even when
         // its search result and reference are at hand.
-        default.record_search(
-            session
-                .candidate_search(&static_entry.id, &static_entry.fingerprint)
-                .expect("recorded search"),
-            session
-                .state()
-                .candidate_references
-                .iter()
-                .cloned()
-                .collect(),
-        );
+        default.record_search(session.issued_search_holding(&static_entry.id));
         assert!(matches!(
             broker
                 .dispatch_describe(&principal, &run, &default, &describe)
@@ -7951,17 +8256,7 @@ mod tests {
         });
         // The same candidate in a session whose rules refuse it is stale,
         // even with its search result and reference at hand.
-        narrow.record_search(
-            session
-                .candidate_search(&archive.id, &archive.fingerprint)
-                .expect("recorded search"),
-            session
-                .state()
-                .candidate_references
-                .iter()
-                .cloned()
-                .collect(),
-        );
+        narrow.record_search(session.issued_search_holding(&archive.id));
         assert!(matches!(
             broker
                 .dispatch_describe(&principal_reference, &run, &narrow, &describe)
@@ -9511,6 +9806,26 @@ mod tests {
             .expect("issuing run");
     }
 
+    impl AiCapabilityBrokerSession {
+        /// The newest retained search that holds `capability_id`, with the
+        /// references it issued.
+        fn issued_search_holding(&self, capability_id: &AiToolId) -> IssuedSearch {
+            self.state()
+                .searches
+                .iter()
+                .rev()
+                .find(|issued| {
+                    issued
+                        .search
+                        .candidates
+                        .iter()
+                        .any(|candidate| &candidate.id == capability_id)
+                })
+                .cloned()
+                .expect("issued search")
+        }
+    }
+
     fn principal_named(user_id: &str) -> AuthPrincipal {
         let mut named = principal();
         if let AuthPrincipal::User(user) = &mut named {
@@ -9753,6 +10068,314 @@ mod tests {
         assert_ne!(again, candidate["candidateReference"]);
     }
 
+    /// The `Record` entity with both roots, `RecordBySubject` described by
+    /// `hidden_description` and, with `note`, one more `Record` field.
+    fn record_roots_index(hidden_description: &str, note: bool) -> Arc<AiCapabilityIndex> {
+        generated_index_with_roots(
+            "generated-read-application",
+            "generated-read",
+            "target-policy-v1",
+            note.then_some("note"),
+            Some(hidden_description),
+        )
+    }
+
+    const HIDDEN_ROOT: &str = "Read one reviewed application record by its subject heading.";
+    const REVISED_HIDDEN_ROOT: &str =
+        "Read one reviewed application record by its revised subject heading.";
+
+    #[tokio::test]
+    async fn hidden_only_revisions_keep_candidate_loaded_and_continuation_references() {
+        let fixture = EntityBrokerFixture::with_principal(
+            principal_named("restricted-user"),
+            record_roots_index(HIDDEN_ROOT, false),
+        );
+        fixture.deny("RecordBySubject");
+        let held = fixture.discover().await["candidates"][0].clone();
+        let (described, first) = first_page(&fixture, "GeneratedRecord").await;
+        let loaded = described.loaded_reference().to_owned();
+        let continuation = fixture
+            .broker
+            .record_continuation(&fixture.session, &first, &more("cursor-1"))
+            .expect("continuation");
+        let before = fixture.index.0.read().expect("index").clone();
+
+        // Only the root this principal is denied changes: every server-side
+        // fingerprint moves, but nothing it was shown does.
+        *fixture.index.0.write().expect("index") = record_roots_index(REVISED_HIDDEN_ROOT, false);
+        let after = fixture.index.0.read().expect("index").clone();
+        assert_ne!(before.fingerprint(), after.fingerprint());
+        let root = fixture.root_id("GeneratedRecord");
+        let old_root = before
+            .entry(&root)
+            .expect("root")
+            .capability_fingerprint
+            .clone();
+        let new_root = after
+            .entry(&root)
+            .expect("root")
+            .capability_fingerprint
+            .clone();
+        assert_ne!(old_root, new_root, "the catalogue-wide fingerprint moved");
+
+        // The held candidate still describes, to the same view.
+        let redescribed = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({
+                    "capabilityId": held["capabilityId"],
+                    "candidateReference": held["candidateReference"],
+                }),
+            )
+            .await
+            .expect("held candidate after a hidden-only revision");
+        assert_eq!(
+            without_references(redescribed.into_model_result()),
+            without_references(described.contract().clone())
+        );
+        // The loaded reference still expands types and executes, against
+        // the exact current root.
+        fixture
+            .broker
+            .dispatch_describe_type(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"loadedReference": loaded, "operation": "GeneratedRecord", "type": "select"}),
+            )
+            .await
+            .expect("describe_type after a hidden-only revision");
+        let executed = fixture
+            .execute(json!({
+                "loadedReference": loaded,
+                "operation": "GeneratedRecord",
+                "arguments": [{"name": "recordId", "value": "record-1"}],
+                "selections": ["subject"],
+            }))
+            .await
+            .expect("execute after a hidden-only revision");
+        assert_eq!(executed.capability_fingerprint(), new_root);
+        assert_eq!(executed.audit_reference(), loaded);
+        // The continuation of the first page continues against it too.
+        let second = fixture
+            .execute(json!({
+                "loadedReference": loaded,
+                "continuation": continuation.handle(),
+            }))
+            .await
+            .expect("continuation after a hidden-only revision");
+        assert_eq!(second.capability_fingerprint(), new_root);
+        assert_eq!(second.plan(), first.plan());
+
+        // A change this principal can see is still stale everywhere.
+        let held = fixture.discover().await["candidates"][0].clone();
+        *fixture.index.0.write().expect("index") = record_roots_index(REVISED_HIDDEN_ROOT, true);
+        let stale = [
+            fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &fixture.run,
+                    &fixture.session,
+                    &json!({
+                        "capabilityId": held["capabilityId"],
+                        "candidateReference": held["candidateReference"],
+                    }),
+                )
+                .await
+                .map(|_| ())
+                .expect_err("visible change at describe"),
+            fixture
+                .execute(json!({
+                    "loadedReference": loaded,
+                    "operation": "GeneratedRecord",
+                    "arguments": [{"name": "recordId", "value": "record-1"}],
+                    "selections": ["subject"],
+                }))
+                .await
+                .map(|_| ())
+                .expect_err("visible change at execute"),
+        ];
+        for error in &stale {
+            assert_input_error(error, AI_CAPABILITY_STALE);
+        }
+
+        // The same revision is visible to a principal that may use the
+        // revised root, so its loaded reference is stale.
+        let full = EntityBrokerFixture::with_principal(
+            principal_named("full-user"),
+            record_roots_index(HIDDEN_ROOT, false),
+        );
+        let described = full.describe().await.expect("describe");
+        *full.index.0.write().expect("index") = record_roots_index(REVISED_HIDDEN_ROOT, false);
+        let error = full
+            .execute(json!({
+                "loadedReference": described.loaded_reference(),
+                "operation": "GeneratedRecord",
+                "arguments": [{"name": "recordId", "value": "record-1"}],
+                "selections": ["subject"],
+            }))
+            .await
+            .expect_err("visible revision");
+        assert_input_error(&error, AI_CAPABILITY_STALE);
+    }
+
+    #[tokio::test]
+    async fn references_resolve_only_against_their_issuing_snapshot() {
+        // Eviction: a session retaining one search drops the first
+        // search's references with it.
+        let mut fixture = EntityBrokerFixture::new();
+        fixture.session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits {
+            maximum_retained_searches: 1,
+            ..AiCapabilityDeliveryLimits::default()
+        })
+        .expect("session");
+        let evicted = fixture.discover().await["candidates"][0].clone();
+        let newest = fixture.discover().await["candidates"][0].clone();
+        let describe = |candidate: &serde_json::Value| {
+            json!({
+                "capabilityId": candidate["capabilityId"],
+                "candidateReference": candidate["candidateReference"],
+            })
+        };
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &describe(&evicted),
+            )
+            .await
+            .expect_err("evicted issuing search");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &describe(&newest),
+            )
+            .await
+            .expect("retained issuing search");
+        // A browse retains its own snapshot and evicts the discovery.
+        let namespace = newest["namespace"].clone();
+        let browsed = fixture
+            .browse(json!({"level": "capabilities", "namespace": namespace}))
+            .await
+            .expect("browse")["capabilities"][0]
+            .clone();
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &describe(&newest),
+            )
+            .await
+            .expect_err("evicted by browse");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &describe(&browsed),
+            )
+            .await
+            .expect("browsed reference");
+
+        // An unrelated target change: references and loaded handles of the
+        // first target stay usable, before and after rediscovery, each
+        // against its own snapshot.
+        let first = generated_index_for("first-application", "first-read", "first-policy-v1");
+        let second = generated_index_for("second-application", "second-read", "second-policy-v1");
+        let first_id = first
+            .entries()
+            .find(|entry| entry.kind == AiCapabilityKind::GeneratedEntity)
+            .expect("first entity")
+            .id
+            .clone();
+        let indexes = Arc::new(CurrentIndexes(RwLock::new(Arc::new(
+            AiCapabilityIndexSet::compile([Arc::clone(&first), second]).expect("set"),
+        ))));
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            indexes.clone(),
+            Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let run = run_binding();
+        let session = DiscoveryCacheFixture::session();
+        let discover = || async {
+            let found = broker
+                .dispatch_discover(
+                    &principal_reference,
+                    &run,
+                    &session,
+                    &json!({"text": "reviewed record", "kind": "generated_entity", "maximumResults": 4}),
+                )
+                .await
+                .expect("discover");
+            found["candidates"]
+                .as_array()
+                .expect("candidates")
+                .iter()
+                .find(|candidate| candidate["capabilityId"] == first_id.as_str())
+                .cloned()
+                .expect("first-target candidate")
+        };
+        let held = discover().await;
+        let loaded = broker
+            .dispatch_describe(&principal_reference, &run, &session, &describe(&held))
+            .await
+            .expect("describe")
+            .loaded_reference()
+            .to_owned();
+        *indexes.0.write().expect("indexes") = Arc::new(
+            AiCapabilityIndexSet::compile([
+                Arc::clone(&first),
+                generated_index_with_schema(
+                    "second-application",
+                    "second-read",
+                    "second-policy-v1",
+                    Some("note"),
+                    false,
+                ),
+            ])
+            .expect("set"),
+        );
+        let rediscovered = discover().await;
+        for candidate in [&held, &rediscovered] {
+            broker
+                .dispatch_describe(&principal_reference, &run, &session, &describe(candidate))
+                .await
+                .expect("first-target reference after an unrelated target change");
+        }
+        broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &json!({"loadedReference": loaded, "selections": ["recordId"]}),
+            )
+            .await
+            .expect("first-target execution after an unrelated target change");
+    }
+
     /// Describes the entity and authorizes one first page of `operation`.
     async fn first_page(
         fixture: &EntityBrokerFixture,
@@ -9976,14 +10599,17 @@ mod tests {
             .await
             .expect("readmitted");
 
-        // A changed policy fingerprint is drift.
+        // A changed policy fingerprint that admits the same view refreshes
+        // the binding, and the page runs.
         *fixture
             .authority
             .policy_fingerprint
             .write()
             .expect("policy") = "current-policy-v2".to_owned();
-        let error = fixture.execute(arguments.clone()).await.expect_err("drift");
-        assert_input_error(&error, AI_CAPABILITY_STALE);
+        fixture
+            .execute(arguments.clone())
+            .await
+            .expect("refreshed under the new policy fingerprint");
         *fixture
             .authority
             .policy_fingerprint

@@ -21,7 +21,16 @@ supersedes: []
   `capability-broker-discover/v4`, `capability-broker-describe/v4` and
   `capability-stale-correction/v3`, and the describe definition fingerprint
   changes. The discovery cache answers only the run its references were
-  issued to. Client-deferred discovery is unchanged.
+  issued to. Each reference resolves only against the exact search snapshot
+  it was issued with, while that search is retained. `capability_stale`
+  reports only a change to what the principal was shown of the capability
+  (its visible fingerprint, built from AI tool profiles 0.34.0 contract
+  fingerprints); a change only to hidden state refreshes the loaded binding
+  under the same reference, and continued pages match on the root's contract
+  fingerprint. `with_maximum_discovery_authorizations` caps the authorized
+  view instead of every match, and policy is decided in batches. A legacy
+  `candidateFingerprint`, `null` included, is `selection_stale`.
+  Client-deferred discovery is unchanged.
 - **Breaking (#551).** Generated mutations can join the fixed capability
   broker. A session opts in with
   `AiCapabilityBrokerSession::with_brokered_mutations`; the classified native

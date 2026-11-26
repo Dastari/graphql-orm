@@ -869,6 +869,7 @@ pub struct AiGraphqlQueryCapability {
     compact_argument_schema: PlanSchema,
     variable_schemas: VariableSchemas,
     fingerprint: String,
+    contract_fingerprint: String,
     schema_fingerprint: String,
     target_id: GraphqlExecutionTargetId,
     // Shared by every capability of one catalogue. A private copy per
@@ -1079,6 +1080,19 @@ impl AiGraphqlQueryCapability {
     /// Returns the complete capability fingerprint.
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Returns the fingerprint of this root's model-facing contract: its
+    /// identity, target, semantic operation, plan schemas and limits.
+    ///
+    /// Unlike [`Self::fingerprint`] it omits the finished-schema and
+    /// semantic-catalogue fingerprints, so an edit that leaves this root's
+    /// own contract unchanged (for example to another root of the same
+    /// catalogue) leaves it unchanged too. It identifies what a model was
+    /// shown, never what may execute: execution still binds
+    /// [`Self::fingerprint`].
+    pub fn contract_fingerprint(&self) -> &str {
+        &self.contract_fingerprint
     }
 
     /// Returns the exact public GraphQL root field.
@@ -2184,6 +2198,17 @@ impl AiGraphqlMutationCapability {
         self.base.fingerprint()
     }
 
+    /// Returns the fingerprint of this root's model-facing contract
+    /// ([`AiGraphqlQueryCapability::contract_fingerprint`]) and its reviewed
+    /// execution classification. Never execution or approval authority.
+    pub fn contract_fingerprint(&self) -> String {
+        sha256_json(&json!({
+            "version": 1,
+            "contract": self.base.contract_fingerprint(),
+            "execution_policy": self.execution_policy,
+        }))
+    }
+
     /// Returns the exact public Mutation root field.
     pub fn field_name(&self) -> &str {
         self.base.field_name()
@@ -2652,6 +2677,12 @@ impl AiGraphqlSubscriptionCapability {
     /// Returns the complete capability fingerprint.
     pub fn fingerprint(&self) -> &str {
         self.base.fingerprint()
+    }
+
+    /// Returns the fingerprint of this root's model-facing contract
+    /// ([`AiGraphqlQueryCapability::contract_fingerprint`]).
+    pub fn contract_fingerprint(&self) -> &str {
+        self.base.contract_fingerprint()
     }
 
     /// Returns the exact public Subscription root field.
@@ -4019,6 +4050,25 @@ fn compile_capability(
         "compact_argument_schema": compact_argument_schema,
         "limits": limits,
     }));
+    // The model-facing contract alone: the catalogue-wide schema and
+    // semantic fingerprints are left out, so an edit elsewhere in the
+    // catalogue does not change it.
+    let contract_fingerprint = sha256_json(&json!({
+        "version": 1,
+        "kind": "contract",
+        "capability_version": match expected_kind {
+            GraphqlOperationKind::Query => AI_GRAPHQL_QUERY_CAPABILITY_VERSION,
+            GraphqlOperationKind::Mutation => AI_GRAPHQL_MUTATION_CAPABILITY_VERSION,
+            GraphqlOperationKind::Subscription => AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION,
+            _ => 0,
+        },
+        "id": id.as_str(),
+        "target": target_id.as_str(),
+        "operation": operation.fingerprint,
+        "argument_schema": argument_schema,
+        "compact_argument_schema": compact_argument_schema,
+        "limits": limits,
+    }));
     Ok(CompiledCapability::Included(Box::new(
         AiGraphqlQueryCapability {
             id,
@@ -4028,6 +4078,7 @@ fn compile_capability(
             compact_argument_schema: PlanSchema::new(compact_argument_schema),
             variable_schemas: VariableSchemas::default(),
             fingerprint,
+            contract_fingerprint,
             schema_fingerprint: schema_fingerprint.to_owned(),
             target_id,
             semantic_catalog: Arc::clone(semantic_catalog),

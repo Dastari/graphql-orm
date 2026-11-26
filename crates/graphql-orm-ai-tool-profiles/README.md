@@ -10,7 +10,12 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
-AI tool profiles 0.33.0 renders compact typed signatures for generated
+AI tool profiles 0.34.0 adds a model-facing contract fingerprint to every
+capability and index entry, which leaves out catalogue-wide fingerprints.
+Capability index, index-set and entry fingerprints change once. See the
+[migration guide](MIGRATION.md#0340-capability-contract-fingerprints).
+
+Version 0.33.0 renders compact typed signatures for generated
 mutations and subscriptions, so the capability broker can describe generated
 mutations. See the
 [migration guide](MIGRATION.md#0330-mutation-and-subscription-signatures).

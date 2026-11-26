@@ -252,18 +252,22 @@ before.
    as browse candidates already did. Describe takes `capabilityId` and
    `candidateReference`, both required; `candidateFingerprint` is gone from
    its definition. A replayed describe call that still sends
-   `candidateFingerprint` is answered `selection_stale`, whatever its value,
+   `candidateFingerprint` is answered `selection_stale`, whatever its value
+   (`null` included) and whether or not it also sends `candidateReference`,
    so the model discovers again. Discover results report disclosure
    contract `capability-broker-discover/v4` and describe results
    `capability-broker-describe/v4`; the `capability_stale` correction names
    `candidateReference` and is `capability-stale-correction/v3`. Update tests
    or parsers that read `indexFingerprint` or `candidateFingerprint` from
    these results. No model-facing staleness signal replaces
-   `indexFingerprint`: a held candidate whose catalogue changed is still
-   answered `capability_stale` at describe.
+   `indexFingerprint`.
 2. **Run-bound references.** A reference resolves only for the principal
    reference, AI session, run, attempt and provider session it was issued
-   to. Every discover issues fresh references.
+   to, and only against the exact search snapshot it was issued with. Every
+   discover issues fresh references. A reference lives as long as its issuing
+   search: once the session evicts that search
+   (`AiCapabilityDeliveryLimits::maximum_retained_searches`) and no
+   discovery cache holds it, the reference is `selection_stale`.
 3. **Discovery cache.** `with_discovery_cache` no longer lets a later run
    describe a candidate an earlier run discovered: its entries answer only
    the run whose references they hold (for example a fresh
@@ -275,6 +279,37 @@ before.
    in this same release as broker version 3. `AI_CAPABILITY_BROKER_VERSION`
    stays 3. Admit the current five broker fingerprints wherever you list
    them by value.
+5. **Staleness follows what the principal is shown.** `capability_stale` at
+   describe, `describe_type`, execute and continued pages now means that
+   something this principal was shown of the capability changed: its
+   model-facing metadata or contract fingerprint, or, for an entity, its
+   admitted roots and theirs (AI tool profiles 0.34.0 adds
+   `contract_fingerprint`, which leaves out catalogue-wide fingerprints).
+   When only state it cannot see changed (a root it is denied, another
+   capability or target, the target policy, or a host-policy fingerprint
+   that admits the same view), the broker loads the capability again from
+   the current index and the call proceeds: describe returns the
+   description, and `describe_type`, execute and continued pages refresh the
+   session's binding under the same `loadedReference` and expiry. Execution
+   always binds the exact current capability. Tests that expected
+   `capability_stale` after a policy-fingerprint-only or target-policy-only
+   change now see the call succeed. Continued pages require the root's
+   contract fingerprint, not its exact capability fingerprint, to match
+   the first page's.
+6. **Discovery ceiling.** `with_maximum_discovery_authorizations` now
+   applies to the authorized view (admitted matches with their admitted
+   grouped roots) instead of every match, so a restricted principal is no
+   longer refused because of matches it may not see. Policy is decided in
+   rank order in batches of at most that bound (and at most
+   `AI_CAPABILITY_BROWSE_POLICY_BATCH`, 256): a host that overrides
+   `authorize_discovery` can receive several batches per discover call. The
+   refusal and the response depend only on what the principal may see;
+   timing is not constant.
+7. **Known limitation: brokered mutation admission.** Rules admit a brokered
+   mutation by its exact capability fingerprint, which covers the whole
+   catalogue's schema and semantic fingerprints. A catalogue edit, even an
+   unrelated or hidden one, changes it, so pinned rules stop admitting the
+   mutation until they are refreshed with the new fingerprint.
 
 Client-deferred discovery is unchanged: it keeps `version: 2`,
 `indexFingerprint` and `candidateFingerprint` under its version 2 contract.
