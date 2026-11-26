@@ -1,5 +1,0 @@
-error: default_sort expects comma-separated columns with optional ASC or DESC
- --> tests/ui/default_sort_extra_tokens.rs:4:75
-  |
-4 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id ASC NULLS LAST")]
-  |                                                                           ^^^^^^^^^^^^^^^^^^^

@@ -144,7 +144,6 @@ async fn non_id_primary_key_orders_repository_and_generated_reads() -> graphql_o
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
-    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .data(graphql_orm::graphql::auth::AuthSubject::new("test-user"))
     .finish();
     let response = schema

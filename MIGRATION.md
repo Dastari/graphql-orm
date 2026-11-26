@@ -10,29 +10,11 @@ supersedes: []
 
 # Migration Guide
 
-## 0.235.0 to 0.236.0: Relation loaders and default sort
+## 0.234.0 to 0.236.0: Optional relation loaders
 
-**Action needed** for schemas that serve generated relations without a target
-loader. Register `graphql::loaders::relation_data_loader::<T, B>(db)`
-in schema data for each target that uses batching. To keep direct queries for
-all generated relations in that schema, register
-`graphql::loaders::DirectRelationQueries` in schema data. Generated
-`schema_builder(database)` registers loaders for its listed entities. Add a
-loader explicitly if a custom field exposes a generated relation to an
-unlisted target.
-
-**Action needed** if an explicit `default_sort` is empty, has an empty term,
-or uses arbitrary SQL, unknown columns, or modifiers other than ASC and DESC.
-Those declarations previously compiled and now produce an error at the
-attribute literal. Use a comma-separated
-list of persisted physical columns, each with an optional case-insensitive ASC or
-DESC. For an expression-based default, persist its sort key in a column or set
-an explicit order on the query. A sort that uses a renamed field must name its
-physical `db_column`. The derive still uses the primary key when the attribute is
-omitted.
-
-Quoting or spacing changes in the rendered sort can change the client
-interpretation fingerprint.
+**No action.** Upgrade ORM and macros together. Generated relation
+resolvers still use authorized direct queries when a compatible loader
+is absent, including in handwritten schemas.
 
 ## 0.233.0 to 0.234.0: internal date-time engine
 

@@ -1410,22 +1410,3 @@ fn repository_conversion_is_distinct_and_preserves_other_fail_closed_diagnostics
         == RuntimeSchemaDiagnosticCode::UnsupportedCapability
         && d.message.contains("policy hooks")));
 }
-
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
-#[test]
-fn static_schema_resolves_the_delimited_default_sort_to_its_field() {
-    #[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
-    #[graphql_entity(table = "sort_records", default_sort = "order DESC")]
-    struct SortRecord {
-        #[primary_key]
-        id: String,
-        #[graphql_orm(db_column = "order")]
-        position: i64,
-    }
-
-    let schema = RuntimeSchema::from_static_entities(&[SortRecord::metadata()]).unwrap();
-    let term = &schema.collections[0].default_order[0];
-    assert_eq!(term.field, FieldId::new("sort_records.order").unwrap());
-    assert_eq!(term.direction, RuntimeOrderDirection::Desc);
-    schema.validate().unwrap();
-}

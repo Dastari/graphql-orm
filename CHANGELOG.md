@@ -16,10 +16,10 @@ for historical context.
 
 ## Unreleased - ORM/macros 0.236.0
 
-- **Changed (refs #542).** Generated relation resolvers report a missing
-  batching loader as a GraphQL error. Explicit `default_sort` declarations
-  are validated against physical columns and rendered for the selected backend.
-  [Migration](MIGRATION.md#02350-to-02360-relation-loaders-and-default-sort)
+- **No action** (refs #542). Generated to-one and to-many resolvers use
+  a checked loader lookup. They batch when eligible and a compatible loader
+  is registered, and otherwise keep using authorized direct queries.
+  [Migration](MIGRATION.md#02340-to-02360-optional-relation-loaders)
 
 ## Unreleased - ORM/macros 0.234.0
 

@@ -17,7 +17,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) plural_name: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) classification: String,
-    pub(crate) default_sort: Option<syn::LitStr>,
+    pub(crate) default_sort: Option<String>,
     pub(crate) exact_string_filters: bool,
     pub(crate) order_expressions: Vec<OrderExpressionMetadata>,
     pub(crate) schema_policy: Option<String>,
@@ -316,7 +316,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     validate_semantic_classification(&lit.value(), lit.span())?;
                     metadata.classification = lit.value();
                 } else if meta.path.is_ident("default_sort") {
-                    metadata.default_sort = Some(meta.value()?.parse()?);
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    metadata.default_sort = Some(lit.value());
                 } else if meta.path.is_ident("schema_policy") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -4390,73 +4392,48 @@ pub(crate) fn default_relation_source_field(parsed_fields: &[ParsedField]) -> St
         .unwrap_or_else(|| "id".to_string())
 }
 
-/// Render physical columns with optional ASC or DESC. Validate every term
-/// before passing it to the dialect's identifier renderer.
-fn render_default_sort(
-    backend: BackendKind,
-    table: &str,
-    literal: &syn::LitStr,
-    columns: &[String],
-) -> syn::Result<String> {
-    use crate::backend::{
-        identifier_path_parts, identifier_path_prefix, same_identifier_part,
-        validate_declared_column_qualifier,
-    };
-
-    let malformed = || {
-        syn::Error::new(
-            literal.span(),
-            "default_sort expects comma-separated columns with optional ASC or DESC",
-        )
-    };
-    let raw = literal.value();
-    let mut rest = raw.trim_start();
+/// `ORDER BY` text for an explicit SQL Server `default_sort` written without
+/// whitespace, such as `a,b`: each comma-separated column is quoted on its
+/// own. A comma inside `[...]`, `"..."` or parentheses belongs to its term,
+/// and a doubled closing delimiter (`]]`, `""`) is an escaped character of the
+/// quoted name, as in the identifier-path parser.
+fn mssql_bare_default_sort(raw: &str) -> String {
     let mut terms = Vec::new();
-    loop {
-        let (column, after_column) = identifier_path_prefix(backend, rest).ok_or_else(malformed)?;
-        let trimmed = after_column.trim_start();
-        let (direction, next) = match trimmed.split_once(',') {
-            Some((term, next)) => (term.trim_end(), Some(next)),
-            None => (trimmed.trim_end(), None),
-        };
-        if !direction.is_empty() {
-            if trimmed.len() == after_column.len() || direction.contains(char::is_whitespace) {
-                return Err(malformed());
+    let mut term = String::new();
+    let mut depth = 0usize;
+    let mut closing = None;
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (closing, ch) {
+            (Some(end), _) if ch == end => {
+                if chars.peek() == Some(&end) {
+                    // Escaped delimiter: keep both characters in the name.
+                    term.push(ch);
+                    chars.next();
+                } else {
+                    closing = None;
+                }
             }
-            if !direction.eq_ignore_ascii_case("ASC") && !direction.eq_ignore_ascii_case("DESC") {
-                return Err(syn::Error::new(
-                    literal.span(),
-                    format!("default_sort direction `{direction}` must be ASC or DESC"),
-                ));
+            (Some(_), _) => {}
+            (None, '[') => closing = Some(']'),
+            (None, '"') => closing = Some('"'),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                terms.push(std::mem::take(&mut term));
+                continue;
             }
+            _ => {}
         }
-
-        let part = identifier_path_parts(backend, column)
-            .last()
-            .unwrap_or(column);
-        let known_column = columns.iter().any(|declared| {
-            identifier_path_parts(backend, declared)
-                .last()
-                .is_some_and(|name| same_identifier_part(backend, name, part))
-        });
-        if !known_column
-            || validate_declared_column_qualifier(backend, table, column, literal.span()).is_err()
-        {
-            return Err(syn::Error::new(
-                literal.span(),
-                format!("default_sort column `{column}` is not a persisted column of this entity"),
-            ));
-        }
-        let mut term = backend_render_identifier_path(backend, column);
-        if !direction.is_empty() {
-            term.push(' ');
-            term.push_str(direction);
-        }
-        terms.push(term);
-        let Some(next) = next else { break };
-        rest = next.trim_start();
+        term.push(ch);
     }
-    Ok(terms.join(", "))
+    terms.push(term);
+    terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .map(|term| backend_quote_identifier_path(BackendKind::Mssql, term))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `ORDER BY` text for an omitted `default_sort`: every primary-key column in
@@ -5121,7 +5098,6 @@ fn generate_entity_tokens(
     let mut managed_version_api_name: Option<String> = None;
     let mut repository_field_policy_defs = Vec::new();
     let mut persisted_field_rust_names = Vec::new();
-    let mut persisted_columns = Vec::new();
     let mut search_relation_field_checks = Vec::new();
     let mut search_relation_traversal_checks = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
@@ -6101,9 +6077,6 @@ fn generate_entity_tokens(
             .db_column
             .clone()
             .unwrap_or_else(|| rust_name.clone());
-        if entity_meta.default_sort.is_some() {
-            persisted_columns.push(db_col.clone());
-        }
         let db_col_sql = backend_render_identifier_path(backend, &db_col);
         let db_col_identity = backend_quote_identifier_path(backend, &db_col);
         let column_part = crate::backend::identifier_path_parts(backend, &db_col_sql)
@@ -6906,8 +6879,11 @@ fn generate_entity_tokens(
     // An omitted default sort orders by every primary-key column, in
     // declaration order. A key that is not named `id` must not fall back to a
     // literal `id` column (#404).
-    let default_sort = match &entity_meta.default_sort {
-        Some(literal) => render_default_sort(backend, raw_table_name, literal, &persisted_columns)?,
+    let default_sort = match entity_meta.default_sort.as_deref() {
+        Some(raw) if backend == BackendKind::Mssql && !raw.chars().any(char::is_whitespace) => {
+            mssql_bare_default_sort(raw)
+        }
+        Some(raw) => raw.to_string(),
         None => primary_key_default_sort(backend, &primary_key_cols),
     };
     let primary_key = primary_key_cols.first().map(String::as_str).unwrap_or("id");
@@ -10674,36 +10650,59 @@ mod default_sort_tests {
     }
 
     #[test]
-    fn explicit_default_sort_renders_each_term_per_backend() {
-        for (backend, literal, expected) in [
-            (
-                BackendKind::Sqlite,
-                r#" "line, no" desc , order ASC, id "#,
-                r#""line, no" desc, "order" ASC, id"#,
-            ),
-            (
-                BackendKind::Postgres,
-                r#" "line, no" desc , order ASC, id "#,
-                r#""line, no" desc, "order" ASC, id"#,
-            ),
-            (
-                BackendKind::Mssql,
-                " [line, no] desc , order ASC, id ",
-                "[line, no] desc, [order] ASC, [id]",
-            ),
-            (
-                BackendKind::Mssql,
-                "[a]],b],records.id",
-                "[a]],b], [records].[id]",
-            ),
-        ] {
-            let literal = syn::LitStr::new(literal, proc_macro2::Span::call_site());
-            let columns = ["line, no", "order", "id", "a],b"].map(str::to_owned);
-            assert_eq!(
-                render_default_sort(backend, "records", &literal, &columns).unwrap(),
-                expected,
-            );
-        }
+    fn bare_sql_server_default_sort_quotes_each_column() {
+        // `a,b` used to become the single identifier `[a,b]`.
+        assert_eq!(mssql_bare_default_sort("a,b"), "[a], [b]");
+        assert_eq!(
+            mssql_bare_default_sort("region,slot,id"),
+            "[region], [slot], [id]"
+        );
+        // One column, a schema-qualified column and quoted names are unchanged.
+        assert_eq!(mssql_bare_default_sort("id"), "[id]");
+        assert_eq!(
+            mssql_bare_default_sort("t.id,t.rank"),
+            "[t].[id], [t].[rank]"
+        );
+        assert_eq!(mssql_bare_default_sort("[a,b],[c]"), "[a,b], [c]");
+        assert_eq!(mssql_bare_default_sort("a,,b,"), "[a], [b]");
+        // A doubled `]` is part of the name, not its end: columns `a],b` and `id`.
+        assert_eq!(mssql_bare_default_sort("[a]],b],id"), "[a]],b], [id]");
+        assert_eq!(mssql_bare_default_sort("[a]],b]"), "[a]],b]");
+        assert_eq!(mssql_bare_default_sort("[x]]],[y]"), "[x]]], [y]");
+        assert_eq!(mssql_bare_default_sort("\"a\"\",b\",c"), "\"a\"\",b\", [c]");
+    }
+
+    #[cfg(feature = "mssql")]
+    #[test]
+    fn explicit_sql_server_default_sort_keeps_every_term() {
+        let entity = |default_sort: &str| -> String {
+            let input: DeriveInput = syn::parse_quote! {
+                #[graphql_entity(backend = "mssql", table = "records", default_sort = #default_sort)]
+                struct Record {
+                    #[primary_key]
+                    a: String,
+                    #[primary_key]
+                    b: String,
+                }
+            };
+            generate_graphql_entity(&input).unwrap().to_string()
+        };
+        let bare = entity("a,b");
+        assert!(
+            bare.contains("const DEFAULT_SORT : & 'static str = \"[a], [b]\""),
+            "{bare}"
+        );
+        let escaped = entity("[a]],b],b");
+        assert!(
+            escaped.contains("const DEFAULT_SORT : & 'static str = \"[a]],b], [b]\""),
+            "{escaped}"
+        );
+        // A declaration with whitespace is still used exactly as written.
+        let spaced = entity("a ASC, b DESC");
+        assert!(
+            spaced.contains("const DEFAULT_SORT : & 'static str = \"a ASC, b DESC\""),
+            "{spaced}"
+        );
     }
 
     #[cfg(feature = "sqlite")]

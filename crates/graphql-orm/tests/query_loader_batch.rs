@@ -9,7 +9,7 @@
     all(feature = "postgres", feature = "mssql"),
 )))]
 
-use graphql_orm::async_graphql::dataloader::Loader;
+use graphql_orm::async_graphql::dataloader::{DataLoader, Loader};
 use graphql_orm::async_graphql::{Context, SimpleObject};
 use graphql_orm::futures::future::BoxFuture;
 use graphql_orm::graphql::loaders::{
@@ -21,6 +21,7 @@ use graphql_orm::prelude::*;
 use graphql_orm::{DefaultBackend, graphql::orm::FilterExpression};
 use std::{
     any::Any,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -35,7 +36,16 @@ mod owned_postgres;
 /// The relation target. Its default order is a numeric position, which
 /// disagrees with the order of its text primary key (`a-10` sorts before
 /// `a-2`). It has no `BatchLoadEntity` implementation.
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[cfg_attr(
     feature = "sqlite",
     graphql_entity(
@@ -67,6 +77,7 @@ mod owned_postgres;
         default_sort = "[position] ASC"
     )
 )]
+#[graphql(complex)]
 struct Step {
     #[primary_key]
     #[sortable]
@@ -84,6 +95,9 @@ struct Step {
     /// that are not UTF-8 on SQLite): that row fails to decode, which is how
     /// one key group's statement is made to fail.
     note: String,
+    #[graphql(skip)]
+    #[relation(target = "List", from = "list_id", to = "id", emit_fk = false)]
+    list: Option<List>,
 }
 
 #[derive(
@@ -745,7 +759,8 @@ async fn sql(db: &Database, statement: &str) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// The generated roots configured to read relations through the direct path.
+/// The generated roots with no `DataLoader` registered: every relation reads
+/// through the direct path.
 fn unbatched_schema(db: &Database) -> AppSchema {
     async_graphql::Schema::build(
         QueryRoot::default(),
@@ -754,7 +769,6 @@ fn unbatched_schema(db: &Database) -> AppSchema {
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
-    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .finish()
 }
 
@@ -764,6 +778,80 @@ fn steps_query(arguments: &str) -> String {
          steps{arguments} {{ edges {{ node {{ id position }} }} \
          pageInfo {{ totalCount hasNextPage hasPreviousPage }} }} }} }} }} }}"
     )
+}
+
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires owned disposable database"
+)]
+async fn generated_relations_batch_only_with_a_registered_loader()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _turn = QUERY_COUNT_LOCK.lock().await;
+    let fixture = Fixture::start("optional-relation-loader").await?;
+    let direct = unbatched_schema(&fixture.db);
+    // Count loader dispatches because the ORM query counter omits point reads.
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let spawn = {
+        let dispatches = dispatches.clone();
+        move |future| {
+            dispatches.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(future)
+        }
+    };
+    let batched = schema_builder(fixture.db.clone())
+        .data(DataLoader::new(
+            RelationLoader::<List, DefaultBackend>::__generated(fixture.db.clone()),
+            spawn.clone(),
+        ))
+        .data(DataLoader::new(
+            RelationLoader::<Step, DefaultBackend>::__generated(fixture.db.clone()),
+            spawn,
+        ))
+        .finish();
+
+    let to_one = r#"{
+        batchSteps(where: {position: {eq: 0}, label: {eq: "shown"}}, orderBy: {id: ASC}) {
+            edges { node { list { id } } }
+        }
+    }"#;
+    let to_many = steps_query("(page: { limit: 1 })");
+    let compare_paths = async |query: &str| {
+        let direct_result = direct.execute(query).await;
+        assert!(
+            direct_result.errors.is_empty(),
+            "{query}: {:?}",
+            direct_result.errors
+        );
+
+        dispatches.store(0, Ordering::Relaxed);
+        let batched_result = batched.execute(query).await;
+        assert!(
+            batched_result.errors.is_empty(),
+            "{query}: {:?}",
+            batched_result.errors
+        );
+        assert_eq!(direct_result.data, batched_result.data, "{query}");
+        assert!(
+            dispatches.load(Ordering::Relaxed) > 0,
+            "{query}: expected a loader dispatch"
+        );
+        direct_result
+    };
+    let lists = compare_paths(to_one).await.data.into_json()?;
+    let ids: Vec<_> = lists["batchSteps"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["node"]["list"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, PARENTS);
+    let first_steps = pages(compare_paths(&to_many).await);
+    for parent in PARENTS {
+        assert_eq!(first_steps[parent].0, [format!("{parent}-0")]);
+    }
+    assert!(first_steps["empty"].0.is_empty());
+    fixture.finish()
 }
 
 /// Per parent: the step ids, total count and page flags of one response.

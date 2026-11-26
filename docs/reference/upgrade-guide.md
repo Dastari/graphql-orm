@@ -72,7 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.234.0**; **`graphql-orm-macros` 0.234.0**; `graphql-orm-operation-catalog` 0.16.0; **`graphql-orm-storage` 0.20.0**; **`graphql-orm-backup` 0.33.0**; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; **`graphql-orm-router-protocol` 0.4.0**; **`graphql-orm-router` 0.22.0**.
 
-- **Action needed** — ORM/macros 0.236.0 validate explicit `default_sort` declarations and require handwritten schemas to configure relation loading (#542). [Migration](../../MIGRATION.md#02350-to-02360-relation-loaders-and-default-sort)
+- **No action** — ORM/macros 0.236.0 use checked loader lookups and keep the authorized direct-query fallback for generated relations (#542). [Migration](../../MIGRATION.md#02340-to-02360-optional-relation-loaders)
 - **No action** — ORM/macros 0.234.0 use `time` internally and preserve existing date-time behavior (#768). [Migration](../../MIGRATION.md#02330-to-02340-internal-date-time-engine)
 - **No action** — storage, backup, router protocol and router update build-time lint coverage and public API docs (#510, #545). [backup 0.33.0](../../crates/graphql-orm-backup/MIGRATION.md#0320-to-0330) · [router 0.22.0](../../crates/graphql-orm-router/MIGRATION.md#0210-to-0220) · [router-protocol 0.4.0](../../crates/graphql-orm-router-protocol/MIGRATION.md#031-to-040) · [storage 0.20.0](../../crates/graphql-orm-storage/MIGRATION.md#0190-to-0200)
 - **No action** — storage 0.20.0 adds a message to the discarded-stream warning for Rust 1.99 Clippy compatibility (#107). [Storage migration](../../crates/graphql-orm-storage/MIGRATION.md#0190-to-0200)

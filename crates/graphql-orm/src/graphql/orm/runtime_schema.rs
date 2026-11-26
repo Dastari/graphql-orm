@@ -3479,16 +3479,6 @@ fn parse_default_sort(
                 Some(entity.default_sort),
             ));
         }
-        // Portable field IDs use the physical column name inside SQL delimiters.
-        let column = column
-            .strip_prefix(entity.table_name)
-            .and_then(|suffix| suffix.strip_prefix('.'))
-            .unwrap_or(column);
-        let column = [('"', '"'), ('[', ']'), ('`', '`')]
-            .into_iter()
-            .find_map(|(open, close)| column.strip_prefix(open)?.strip_suffix(close))
-            .filter(|name| valid_physical_name(name))
-            .unwrap_or(column);
         terms.push(RuntimeOrderTerm {
             field: FieldId::new(format!("{}.{column}", entity.table_name))?,
             direction,

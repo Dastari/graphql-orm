@@ -875,7 +875,6 @@ async fn execute(api: &Api, user: &str, query: &str) -> async_graphql::Response 
     if api.direct {
         AppSchema::build(QueryRoot::default(), Default::default(), Default::default())
             .data(api.db.clone())
-            .data(graphql_orm::graphql::loaders::DirectRelationQueries)
             .data(graphql_orm::graphql::orm::DeclaredPageMaximum(
                 GRAPHQL_ORM_MAX_PAGE_LIMIT,
             ))

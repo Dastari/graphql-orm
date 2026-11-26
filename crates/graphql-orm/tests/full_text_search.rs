@@ -943,29 +943,29 @@ async fn native_search_sort_collisions(graphql: bool) -> Result<(), Box<dyn std:
 #[cfg_attr(
     feature = "sqlite",
     graphql_entity(
-        table = "sorted_articles",
+        table = "expression_articles",
         backend = "sqlite",
         auth = "none",
-        default_sort = "author_name ASC, date ASC"
+        default_sort = "(SELECT name FROM sort_authors WHERE sort_authors.id = author_id) ASC, date('2024-01-01') ASC"
     )
 )]
 #[cfg_attr(
     feature = "postgres",
     graphql_entity(
-        table = "sorted_articles",
+        table = "expression_articles",
         backend = "postgres",
         auth = "none",
-        default_sort = "author_name ASC, date ASC"
+        default_sort = "(SELECT name FROM sort_authors WHERE sort_authors.id = author_id) ASC, date '2024-01-01' ASC"
     )
 )]
 #[graphql_orm(search(index = true, fallback = "disabled"))]
-struct SortedArticle {
+struct ExpressionArticle {
     #[primary_key]
     id: String,
     #[sortable]
     name: String,
     date: String,
-    author_name: String,
+    author_id: i64,
     #[graphql_orm(searchable(weight = "A"))]
     title: String,
 }
@@ -983,11 +983,11 @@ async fn search_fixture() -> Result<(Database, SearchFixtureOwner), Box<dyn std:
     );
     #[cfg(feature = "postgres")]
     let (pool, owner) = {
-        let owner = SearchFixtureOwner::start("native-search-order")?;
+        let owner = SearchFixtureOwner::start("native-search-expressions")?;
         (sqlx::PgPool::connect(&owner.url).await?, owner)
     };
     let target =
-        SchemaModel::from_entities(&[SortedArticle::metadata(), SortCollision::metadata()]);
+        SchemaModel::from_entities(&[ExpressionArticle::metadata(), SortCollision::metadata()]);
     let plan = build_migration_plan(
         DefaultBackend::DIALECT,
         &SchemaModel {
@@ -1004,21 +1004,28 @@ async fn search_fixture() -> Result<(Database, SearchFixtureOwner), Box<dyn std:
 
 #[tokio::test]
 #[cfg_attr(feature = "postgres", ignore = "owned PostgreSQL lane")]
-async fn native_search_preserves_default_sort() -> Result<(), Box<dyn std::error::Error>> {
+async fn native_search_preserves_default_sort_expressions() -> Result<(), Box<dyn std::error::Error>>
+{
     let (db, _owner) = search_fixture().await?;
-    for (name, author_name) in [("Alpha", "Zulu"), ("Zulu", "Alpha")] {
-        SortedArticle::insert(
+    sqlx::query("CREATE TABLE sort_authors (id BIGINT PRIMARY KEY, name TEXT NOT NULL)")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("INSERT INTO sort_authors VALUES (1, 'Zulu'), (2, 'Alpha')")
+        .execute(db.pool())
+        .await?;
+    for (name, author_id) in [("Alpha", 1), ("Zulu", 2)] {
+        ExpressionArticle::insert(
             &db,
-            CreateSortedArticleInput {
+            CreateExpressionArticleInput {
                 name: name.into(),
                 date: "2020-01-01".into(),
-                author_name: author_name.into(),
+                author_id,
                 title: "identical search text".into(),
             },
         )
         .await?;
     }
-    let listed = EntityQuery::<SortedArticle>::new()
+    let listed = EntityQuery::<ExpressionArticle>::new()
         .default_order()
         .fetch_all(&db)
         .await?;
@@ -1029,7 +1036,7 @@ async fn native_search_preserves_default_sort() -> Result<(), Box<dyn std::error
             .collect::<Vec<_>>(),
         vec!["Zulu", "Alpha"]
     );
-    let searched = SortedArticle::search_db(
+    let searched = ExpressionArticle::search_db(
         &db,
         SearchInput {
             query: "identical".into(),

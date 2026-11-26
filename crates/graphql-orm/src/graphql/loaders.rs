@@ -1935,27 +1935,6 @@ where
         .collect())
 }
 
-/// Register this marker in schema data to use direct SQL queries for generated
-/// relation fields. The direct path applies the same relation read policies.
-#[derive(Clone, Copy, Debug)]
-pub struct DirectRelationQueries;
-
-/// Retrieve the loader for a relation that is using the batched path.
-#[doc(hidden)]
-pub fn request_relation_loader<'ctx, T, B>(
-    ctx: &async_graphql::Context<'ctx>,
-) -> async_graphql::Result<&'ctx async_graphql::dataloader::DataLoader<RelationLoader<T, B>>>
-where
-    T: RelationTarget<B>,
-    B: OrmBackend,
-{
-    ctx.data().map_err(|_| {
-        async_graphql::Error::new(
-            "graphql-orm Relation loader not registered; build the schema with schema_builder(database)",
-        )
-    })
-}
-
 /// The relation data loader that generated relation resolvers use.
 ///
 /// It loads [`RelationQueryKey`], [`CompositeRelationQueryKey`] and

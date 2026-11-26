@@ -272,9 +272,7 @@ async fn preloaded_and_loader_relation_failures_are_sanitized()
                 >(db.clone()))
                 .finish()
         } else {
-            builder
-                .data(graphql_orm::graphql::loaders::DirectRelationQueries)
-                .finish()
+            builder.finish()
         };
         for query in [
             "{ source { parent { id label } } }",
@@ -413,9 +411,7 @@ async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() 
                 >(db))
                 .finish()
         } else {
-            builder
-                .data(graphql_orm::graphql::loaders::DirectRelationQueries)
-                .finish()
+            builder.finish()
         };
         for query in [
             "{ source { parent { id } } }",
