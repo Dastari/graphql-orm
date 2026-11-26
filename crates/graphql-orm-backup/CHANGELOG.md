@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.32.0
+
+- Run the backup integration tests from the core, local, SQLite,
+  PostgreSQL and SMB test binaries. ([#771](https://github.com/Dastari/graphql-orm/issues/771))
+
 ## Unreleased - 0.31.0
 
 - The optional PostgreSQL ORM adapter can use canonical change-journal keys

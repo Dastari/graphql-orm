@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.18.3 to 0.19.0: integration test binaries
+
+**No action.** The integration test binaries are grouped by lane.
+
 ## 0.18.2 to 0.18.3: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

@@ -1,7 +1,7 @@
 #![cfg(all(feature = "local", not(windows)))]
 //! Resumable multipart uploads on local storage.
 
-#[path = "support/multipart_conformance.rs"]
+#[path = "../support/multipart_conformance.rs"]
 mod multipart_conformance;
 
 use std::sync::Arc;

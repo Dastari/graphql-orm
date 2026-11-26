@@ -57,7 +57,8 @@ S3_TEST_REGION=us-east-1 \
 S3_TEST_ACCESS_KEY=minioadmin \
 S3_TEST_SECRET_KEY=minioadmin \
 S3_TEST_PATH_STYLE=true \
-cargo test -p graphql-orm-storage --features s3 --no-default-features --test s3_integration
+cargo test -p graphql-orm-storage --features s3 --no-default-features \
+  --test storage_s3 s3_integration::s3_blob_store_round_trip_when_env_is_configured -- --exact
 ```
 
 Use a dedicated throwaway bucket or prefix. The test writes and deletes objects
@@ -73,7 +74,7 @@ conflict, part-size and part-number boundaries, concurrent uploads of one part
 and completion racing an abort. Local storage runs it by default:
 
 ```bash
-cargo test -p graphql-orm-storage --test local_multipart
+cargo test -p graphql-orm-storage --test storage_local local_multipart::
 ```
 
 The S3 run starts its own digest-pinned RustFS container with random
@@ -82,7 +83,7 @@ refuses ambient `S3_TEST_*` configuration, and `scripts/run-owned-s3-security-te
 runs it in CI and release validation:
 
 ```bash
-cargo test -p graphql-orm-storage --no-default-features --features s3 --test s3_multipart -- --ignored
+cargo test -p graphql-orm-storage --no-default-features --features s3 --test storage_s3 s3_multipart:: -- --ignored
 ```
 
 ## Managed SMB fixture ownership
@@ -159,7 +160,7 @@ when the harness permits pulling missing images.
 
 ## Owned HTTPS transport fixture
 
-The [HTTPS fixture test](../tests/s3_https_transport.rs) uses OpenSSL and Python
+The [HTTPS fixture test](../tests/storage_s3/s3_https_transport.rs) uses OpenSSL and Python
 only for test-owned infrastructure. It creates temporary CA/server certificates,
 starts the [loopback-only server](../tests/s3/owned_https_fixture.py) on an assigned
 port, and verifies both a trusted CA and rejection of an unrelated CA. Each
@@ -171,12 +172,12 @@ Run it explicitly on a host with `openssl` and `python3`:
 
 ```bash
 cargo test -p graphql-orm-storage --no-default-features --features s3 \
-  --test s3_https_transport -- --ignored --exact owned_https_transport_fixture
+  --test storage_s3 s3_https_transport::owned_https_transport_fixture -- --ignored --exact
 ```
 
 The child entry point is an implementation detail; invoke the parent fixture
 above. No Docker, cloud account, external endpoint or application secret is used.
-The regular HTTP loopback regression runs with `--test s3_integration`.
+The HTTP loopback regressions run from the `s3_integration` module in `storage_s3`.
 
 The all-targets provider Clippy command above enables local defaults and Azure
 so its local example and Azure placeholder test helpers are compiled in their
