@@ -39,6 +39,40 @@ for historical context.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
 
+## Unreleased - ORM/macros 0.234.0
+
+- **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time
+  normalization, calendar arithmetic, and database codecs. **No action.**
+  [Migration](MIGRATION.md#02330-to-02340-internal-date-time-engine)
+
+## Unreleased - ORM/macros 0.233.0
+
+- **No action** — Nested closure read predicates over built-in column tests
+  share the inner walk's SQL across the governed and reached rows on SQLite,
+  PostgreSQL and SQL Server (#785). The byte and weighted-relation budgets
+  are measured on the smaller shared rendering, so some nested compositions
+  previously refused with `AUTHORIZATION_MISCONFIGURED` now build.
+  [Migration](MIGRATION.md#02320-to-02330-nested-closure-sql)
+
+## Unreleased - ORM/macros 0.232.0
+
+- **No action** — ORM receiver-admission tests share the workspace's
+  jsonwebtoken 11 dependency. The full-stack macro fixture builds only its
+  selected database driver and uses the ORM's TLS settings (#498).
+  [Migration](MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
+
+## Unreleased - ORM/macros 0.231.0
+
+- **Changed (#724).** Generated GraphQL create, update, upsert, delete, bulk
+  and nested-create mutations call a shared runtime write pipeline for request
+  admission, entity admission, target admission and hook dispatch. The checks
+  and their order are unchanged, as are the SDL and catalogues; generated code
+  is smaller. A mutation hook receives the originating request's authority
+  only with an authority that pipeline's admission issued. The hidden
+  macro-internal `MutationContext::__run_generated_mutation_hook` is removed,
+  which is a source break for host code that called it.
+  [Migration](MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
 ## Unreleased - ORM/macros 0.230.0
 
 - Generated list and aggregate execution moved to shared runtime helpers; no

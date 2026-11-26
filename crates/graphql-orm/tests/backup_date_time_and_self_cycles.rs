@@ -284,6 +284,34 @@ async fn date_times_round_trip_exactly_and_independently_of_the_session_time_zon
 }
 
 #[tokio::test]
+async fn date_time_boundary_row_hash_matches_chrono() {
+    use graphql_orm::chrono::{DateTime, SecondsFormat};
+
+    let ddl = events_ddl();
+    let source = open("dt-boundary-hash", &[&ddl]).await;
+    let raw = "9999-12-31T23:58:59.999999-00:01";
+    exec(
+        &source.db,
+        &format!("INSERT INTO dt_events (id, created_at, label) VALUES (1, '{raw}', 'a')"),
+    )
+    .await
+    .unwrap();
+    let rows = export(&source.db, &events()).await.unwrap();
+    let row = &rows["dt_events"][0];
+    let expected = DateTime::parse_from_rfc3339(raw)
+        .unwrap()
+        .to_utc()
+        .to_rfc3339_opts(SecondsFormat::Micros, true);
+    let values = BTreeMap::from([
+        ("id".to_owned(), BackupValue::Integer(1)),
+        ("created_at".to_owned(), BackupValue::String(expected)),
+        ("updated_at".to_owned(), BackupValue::Null),
+        ("label".to_owned(), BackupValue::String("a".to_owned())),
+    ]);
+    assert_eq!(row.row_hash, canonical_row_hash("dt_events", &values));
+}
+
+#[tokio::test]
 async fn unportable_stored_date_times_fail_the_export() {
     let ddl = events_ddl();
     let source = open("dt-unportable", &[&ddl]).await;
@@ -296,6 +324,14 @@ async fn unportable_stored_date_times_fail_the_export() {
         "'0001-01-01T00:00:00+01:00'",
         "'9999-12-31T23:59:59-01:00'",
         "'9999-12-31T23:59:59.9999995Z'",
+        "'-9999-01-01T00:00:00Z'",
+        "'+9999-01-01T00:00:00Z'",
+        "'-10000-01-01T00:00:00Z'",
+        "'+10000-01-01T00:00:00Z'",
+        "'-262142-01-01T00:00:00Z'",
+        "'-262143-01-01T00:00:00Z'",
+        "'+262142-01-01T00:00:00Z'",
+        "'+262143-01-01T00:00:00Z'",
     ];
     // PostgreSQL infinities and years outside the portable range must fail cleanly, before
     // chrono's binary decode can overflow. PostgreSQL's 1 BC is astronomical year zero.
@@ -305,6 +341,8 @@ async fn unportable_stored_date_times_fail_the_export() {
         "'-infinity'",
         "'0001-01-01 00:00:00 BC'",
         "'10000-01-01 00:00:00+00'",
+        "'262142-01-01 00:00:00+00'",
+        "'262143-01-01 00:00:00+00'",
         // PostgreSQL normalizes the boundary leap literal into year 10000.
         "'9999-12-31T23:59:60.000000Z'",
     ];

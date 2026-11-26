@@ -10,6 +10,29 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.22.0
+
+- Check public API documentation in the library and retain its unsafe Rust
+  prohibition. Package-wide lint inheritance is deferred while the outbound
+  proxy integration test sets process environment variables.
+
+## Unreleased - 0.21.0
+
+- **Test reliability (#545).** Router tests wait on explicit signals instead
+  of fixed sleeps: loopback fixtures use a blocking accept, slow upstream
+  responses are held and released explicitly, and background refreshes and
+  poll rounds are awaited through observable state. Runtime behaviour is
+  unchanged.
+
+## Unreleased - 0.20.0
+
+- **No action (#923).** Downstream GraphQL errors from queries and mutations
+  produce structured, rate-limited logs. The response keeps its existing
+  masking by default. Hosts can opt into disclosing messages by code or for
+  every error from a downstream fetch. The router refuses a non-empty
+  error-code allowlist without `allowlist-by-code`, and `allowlist-by-code` without any
+  code.
+
 ## Unreleased - 0.19.0
 
 - **Test coverage (#668).** The WebSocket gateway smoke test exercises

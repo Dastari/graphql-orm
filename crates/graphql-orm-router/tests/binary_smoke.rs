@@ -7,8 +7,9 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -348,6 +349,8 @@ fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
                 "router did not exit within {TIMEOUT:?} after SIGTERM\nstdout: {stdout}\nstderr: {stderr}"
             );
         }
+        // Kept: a child process offers no exit notification short of a
+        // blocking wait, so this polls it against the deadline above.
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -362,6 +365,8 @@ fn wait_until_ready(address: SocketAddr, child: &mut Child) {
             panic!("router exited before readiness with {status}");
         }
         assert!(Instant::now() < deadline, "router readiness timed out");
+        // Kept: readiness is only observable through the probe, polled
+        // against the deadline above.
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -562,37 +567,38 @@ fn decode_chunked(mut input: &[u8]) -> std::io::Result<Vec<u8>> {
 struct FixtureSubgraph {
     address: SocketAddr,
     stopping: Arc<AtomicBool>,
+    /// Dropping it answers the held first GraphQL request.
+    release_held: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl FixtureSubgraph {
     fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stopping = Arc::new(AtomicBool::new(false));
         let graphql_requests = Arc::new(AtomicUsize::new(0));
+        let (release_held, held) = mpsc::channel::<()>();
+        let held = Arc::new(Mutex::new(Some(held)));
         let thread_stopping = stopping.clone();
         let thread_graphql_requests = graphql_requests.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let requests = thread_graphql_requests.clone();
-                        // A deliberately timed-out request must not serialize the
-                        // following independent request behind the fixture listener.
-                        thread::spawn(move || handle_fixture_request(stream, address, requests));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    break;
                 }
+                let requests = thread_graphql_requests.clone();
+                let held = held.clone();
+                // A deliberately timed-out request must not serialize the
+                // following independent request behind the fixture listener.
+                thread::spawn(move || handle_fixture_request(stream, address, requests, held));
             }
         });
         Self {
             address,
             stopping,
+            release_held: Some(release_held),
             thread: Some(thread),
         }
     }
@@ -605,6 +611,9 @@ impl FixtureSubgraph {
 impl Drop for FixtureSubgraph {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        drop(self.release_held.take());
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -615,6 +624,7 @@ fn handle_fixture_request(
     mut stream: TcpStream,
     address: SocketAddr,
     graphql_requests: Arc<AtomicUsize>,
+    held: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let Ok(request) = read_http_head(&mut stream) else {
@@ -635,7 +645,12 @@ fn handle_fixture_request(
         ("application/json", descriptor_document(address))
     } else if request.starts_with("POST /graphql ") {
         if graphql_requests.fetch_add(1, Ordering::AcqRel) == 0 {
-            thread::sleep(Duration::from_millis(250));
+            // The first answer is held until the fixture drops, so the
+            // router's subgraph timeout fires whatever the machine load.
+            let held = held.lock().unwrap().take();
+            if let Some(held) = held {
+                let _ = held.recv();
+            }
         }
         (
             "application/json",

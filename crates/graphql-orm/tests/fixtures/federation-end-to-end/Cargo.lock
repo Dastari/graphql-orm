@@ -2526,6 +2526,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tiberius",
+ "time",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2558,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.19.0"
+version = "0.22.0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -2585,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router-protocol"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -8020,6 +8021,7 @@ dependencies = [
  "pretty-hex",
  "rust_decimal",
  "thiserror 1.0.69",
+ "time",
  "tokio",
  "tokio-util",
  "tracing",

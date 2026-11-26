@@ -445,7 +445,9 @@ events. `on_mutation` gets the GraphQL context if there is one, a transaction-bo
 and a `MutationEvent` holding `phase`, `action`, `entity_name`, `id`, `changes` and the typed rows from
 `event.before::<T>()` and `event.after::<T>()`.
 
-A generated write runs in this order, after its entity and row policy checks:
+A generated write runs in this order, after its entity and row policy checks (the
+[generated write pipeline](strict-authorization.md#the-generated-write-pipeline) fixes the order of
+those):
 
 1. `WriteInputTransform`, for creates, updates and upserts. Deletes have no transform.
 2. The `Before` hook, inside the transaction.

@@ -1,3 +1,5 @@
+#![cfg_attr(not(all(windows, feature = "local")), forbid(unsafe_code))]
+#![cfg_attr(all(windows, feature = "local"), deny(unsafe_code))]
 #![warn(missing_docs)]
 
 //! Provider-neutral object storage primitives for applications using

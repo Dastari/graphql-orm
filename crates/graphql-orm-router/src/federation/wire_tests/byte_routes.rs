@@ -387,7 +387,6 @@ impl ByteUpstream {
 
     fn start_mode(unavailable: bool) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("byte upstream bind");
-        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new(SlowGate::default());
@@ -395,24 +394,20 @@ impl ByteUpstream {
         let (thread_requests, thread_gate, thread_stopping) =
             (requests.clone(), gate.clone(), stopping.clone());
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let (requests, gate) = (thread_requests.clone(), thread_gate.clone());
-                        thread::spawn(move || {
-                            if unavailable {
-                                // The peer may already have closed this connection.
-                                let _ = stream.shutdown(std::net::Shutdown::Both);
-                            } else {
-                                serve_bytes(stream, &requests, &gate);
-                            }
-                        });
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
                 }
+                let (requests, gate) = (thread_requests.clone(), thread_gate.clone());
+                thread::spawn(move || {
+                    if unavailable {
+                        // The peer may already have closed this connection.
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    } else {
+                        serve_bytes(stream, &requests, &gate);
+                    }
+                });
             }
         });
         Self {
@@ -441,6 +436,8 @@ impl Drop for ByteUpstream {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         self.gate.release();
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -517,6 +514,8 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
                     return;
                 }
                 remaining -= length;
+                // Kept: paces the chunks so the body arrives as a stream, not
+                // as one segment. Nothing waits on it.
                 thread::sleep(Duration::from_millis(2));
             }
             // This fixture permits the router to close the connection early.
@@ -604,7 +603,8 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             let _ = stream.write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n");
         }
         "/files/slow-headers" => {
-            thread::sleep(Duration::from_secs(2));
+            // Answer only after the router gives up and closes the connection.
+            hold_until_peer_closes(&mut stream);
             fixed(&mut stream, "200 OK", "", b"late");
         }
         "/files/slow-body" => {
@@ -614,7 +614,8 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
             );
             // This fixture permits the router to close the connection early.
             let _ = stream.flush();
-            thread::sleep(Duration::from_secs(2));
+            // Stall the body until the router aborts and closes the connection.
+            hold_until_peer_closes(&mut stream);
         }
         "/files/drip" => {
             // This fixture permits the router to close the connection early.
@@ -625,6 +626,7 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
                 if stream.write_all(b"1\r\nx\r\n").is_err() || stream.flush().is_err() {
                     return;
                 }
+                // Kept: the steady drip under test, always inside the idle timeout.
                 thread::sleep(Duration::from_millis(100));
             }
             // This fixture permits the router to close the connection early.
@@ -632,6 +634,13 @@ fn serve_bytes(mut stream: TcpStream, requests: &Mutex<Vec<String>>, gate: &Slow
         }
         _ => fixed(&mut stream, "404 Not Found", "", b"missing"),
     }
+}
+
+/// Blocks until the peer closes the connection, or the read timeout set by
+/// `serve_bytes` ends the wait for a router that never gives up.
+fn hold_until_peer_closes(stream: &mut TcpStream) {
+    let mut discard = [0_u8; 256];
+    while matches!(stream.read(&mut discard), Ok(count) if count > 0) {}
 }
 
 fn received_header<'a>(head: &'a str, name: &str) -> Option<&'a str> {

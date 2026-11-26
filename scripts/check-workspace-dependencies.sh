@@ -275,3 +275,29 @@ if ! cargo tree \
   echo "workspace-dependencies: graphql-orm router-protocol feature does not resolve the protocol package" >&2
   exit 1
 fi
+
+# SQLx's PostgreSQL macros prefer time over chrono when both are enabled.
+orm_sqlx_features=$(cargo tree \
+  --manifest-path "${repository_root}/Cargo.toml" \
+  -p graphql-orm \
+  --features postgres,mssql \
+  --edges features \
+  --invert sqlx \
+  --locked)
+if grep -q 'sqlx feature "time"' <<<"${orm_sqlx_features}"; then
+  echo "workspace-dependencies: graphql-orm changes PostgreSQL macro types by enabling sqlx/time" >&2
+  exit 1
+fi
+
+# Keep the ORM from changing consumers' signed-year parsing through feature unification.
+orm_time_features=$(cargo tree \
+  --manifest-path "${repository_root}/Cargo.toml" \
+  -p graphql-orm \
+  --features postgres,mssql \
+  --edges features \
+  --invert time \
+  --locked)
+if grep -q 'time feature "large-dates"' <<<"${orm_time_features}"; then
+  echo "workspace-dependencies: graphql-orm changes consumer time parsing by enabling time/large-dates" >&2
+  exit 1
+fi

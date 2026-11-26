@@ -3,7 +3,8 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -80,8 +81,10 @@ struct JwksFixture {
     body: Arc<Mutex<String>>,
     status: Arc<AtomicU16>,
     requests: Arc<AtomicUsize>,
-    /// Delays only the next accepted request's response, in milliseconds.
-    delay_next_ms: Arc<AtomicU64>,
+    /// Holds only the next accepted request's response until
+    /// [`JwksFixture::release_held_response`] or the fixture drops.
+    hold_next: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+    release_held: Mutex<Option<mpsc::Sender<()>>>,
     #[cfg(feature = "auth-agql")]
     last_request: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
@@ -91,65 +94,60 @@ struct JwksFixture {
 impl JwksFixture {
     fn start(body: String) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let body = Arc::new(Mutex::new(body));
         let status = Arc::new(AtomicU16::new(200));
         let requests = Arc::new(AtomicUsize::new(0));
-        let delay_next_ms = Arc::new(AtomicU64::new(0));
+        let hold_next = Arc::new(Mutex::new(None::<mpsc::Receiver<()>>));
         #[cfg(feature = "auth-agql")]
         let last_request = Arc::new(Mutex::new(String::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_body = body.clone();
         let thread_status = status.clone();
         let thread_requests = requests.clone();
-        let thread_delay = delay_next_ms.clone();
+        let thread_hold = hold_next.clone();
         #[cfg(feature = "auth-agql")]
         let thread_last_request = last_request.clone();
         let thread_stop = stop.clone();
         let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        thread_requests.fetch_add(1, Ordering::Relaxed);
-                        // The response is chosen when the request arrives, so
-                        // a delayed response carries the then-current body.
-                        let body = thread_body.lock().unwrap().clone();
-                        let status = thread_status.load(Ordering::Relaxed);
-                        let delay = Duration::from_millis(thread_delay.swap(0, Ordering::AcqRel));
-                        #[cfg(feature = "auth-agql")]
-                        let last_request = thread_last_request.clone();
-                        thread::spawn(move || {
-                            if stream.set_nonblocking(false).is_err() {
-                                tracing::debug!("could not configure the JWKS fixture socket");
-                            }
-                            let mut request = [0_u8; 2048];
-                            #[cfg(feature = "auth-agql")]
-                            let bytes_read = stream.read(&mut request).unwrap_or_default();
-                            #[cfg(not(feature = "auth-agql"))]
-                            // The client may close this test connection early.
-                            let _ = stream.read(&mut request);
-                            #[cfg(feature = "auth-agql")]
-                            {
-                                *last_request.lock().unwrap() =
-                                    String::from_utf8_lossy(&request[..bytes_read]).into_owned();
-                            }
-                            thread::sleep(delay);
-                            let reason = if status == 200 { "OK" } else { "Unavailable" };
-                            let response = format!(
-                                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            );
-                            // A bounded client may close immediately after rejecting Content-Length.
-                            // The client may close this test connection early.
-                            let _ = stream.write_all(response.as_bytes());
-                        });
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stop` and connects once to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stop.load(Ordering::Acquire) {
+                    return;
                 }
+                thread_requests.fetch_add(1, Ordering::Relaxed);
+                // The response is chosen when the request arrives, so a held
+                // response carries the then-current body.
+                let body = thread_body.lock().unwrap().clone();
+                let status = thread_status.load(Ordering::Relaxed);
+                let hold = thread_hold.lock().unwrap().take();
+                #[cfg(feature = "auth-agql")]
+                let last_request = thread_last_request.clone();
+                thread::spawn(move || {
+                    let mut request = [0_u8; 2048];
+                    #[cfg(feature = "auth-agql")]
+                    let bytes_read = stream.read(&mut request).unwrap_or_default();
+                    #[cfg(not(feature = "auth-agql"))]
+                    // The client may close this test connection early.
+                    let _ = stream.read(&mut request);
+                    #[cfg(feature = "auth-agql")]
+                    {
+                        *last_request.lock().unwrap() =
+                            String::from_utf8_lossy(&request[..bytes_read]).into_owned();
+                    }
+                    if let Some(hold) = hold {
+                        // Released explicitly, or by the fixture dropping its sender.
+                        let _ = hold.recv();
+                    }
+                    let reason = if status == 200 { "OK" } else { "Unavailable" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    // A bounded client may close immediately after rejecting Content-Length.
+                    // The client may close this test connection early.
+                    let _ = stream.write_all(response.as_bytes());
+                });
             }
         });
         Self {
@@ -157,7 +155,8 @@ impl JwksFixture {
             body,
             status,
             requests,
-            delay_next_ms,
+            hold_next,
+            release_held: Mutex::new(None),
             #[cfg(feature = "auth-agql")]
             last_request,
             stop,
@@ -173,9 +172,16 @@ impl JwksFixture {
         *self.body.lock().unwrap() = body;
     }
 
-    fn delay_next_response(&self, delay: Duration) {
-        self.delay_next_ms
-            .store(delay.as_millis() as u64, Ordering::Release);
+    /// Holds the next accepted request's response until
+    /// [`Self::release_held_response`] or until the fixture drops.
+    fn hold_next_response(&self) {
+        let (release, hold) = mpsc::channel();
+        *self.hold_next.lock().unwrap() = Some(hold);
+        *self.release_held.lock().unwrap() = Some(release);
+    }
+
+    fn release_held_response(&self) {
+        drop(self.release_held.lock().unwrap().take());
     }
 
     fn set_status(&self, status: u16) {
@@ -185,8 +191,9 @@ impl JwksFixture {
 
 impl Drop for JwksFixture {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        // Wake the listener if it is still accepting connections.
+        self.stop.store(true, Ordering::Release);
+        self.release_held_response();
+        // Wake the blocking listener so it observes `stop`.
         let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
@@ -1137,16 +1144,13 @@ fn first_role_catalogue_fetch_is_lazy_and_retried_on_demand() {
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             let result = provider_for_request.authenticate_bearer(&credential_for_request);
-            for _ in 0..100 {
-                if request_count_for_wait.load(Ordering::Relaxed) >= 1
+            settle_until("the role-scope catalogue refresh to finish", || {
+                request_count_for_wait.load(Ordering::Relaxed) >= 1
                     && !provider_for_request
                         .role_scope_refresh_in_flight
                         .load(Ordering::Acquire)
-                {
-                    break;
-                }
-                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            })
+            .await;
             result
         });
     assert_eq!(
@@ -1189,22 +1193,25 @@ fn failed_lazy_catalogue_fetch_observes_retry_backoff() {
                     .authenticate_bearer(&credential_for_request)
                     .is_err()
             );
-            for _ in 0..100 {
-                if request_count.load(Ordering::Relaxed) >= 1
+            settle_until("the role-scope catalogue refresh to finish", || {
+                request_count.load(Ordering::Relaxed) >= 1
                     && !provider_for_request
                         .role_scope_refresh_in_flight
                         .load(Ordering::Acquire)
-                {
-                    break;
-                }
-                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            })
+            .await;
             assert!(
                 provider_for_request
                     .authenticate_bearer(&credential_for_request)
                     .is_err()
             );
-            hive_router::tokio::time::sleep(Duration::from_millis(5)).await;
+            // A refresh sets this flag before the call returns, so the backoff
+            // is observed without waiting for a request that must not happen.
+            assert!(
+                !provider_for_request
+                    .role_scope_refresh_in_flight
+                    .load(Ordering::Acquire)
+            );
         });
     assert_eq!(catalogue.requests.load(Ordering::Relaxed), 1);
 
@@ -1222,16 +1229,13 @@ fn failed_lazy_catalogue_fetch_observes_retry_backoff() {
                     .authenticate_bearer(&credential_for_request)
                     .is_err()
             );
-            for _ in 0..100 {
-                if request_count.load(Ordering::Relaxed) >= 2
+            settle_until("the role-scope catalogue refresh to finish", || {
+                request_count.load(Ordering::Relaxed) >= 2
                     && !provider_for_request
                         .role_scope_refresh_in_flight
                         .load(Ordering::Acquire)
-                {
-                    break;
-                }
-                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            })
+            .await;
         });
     assert_eq!(catalogue.requests.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -1313,16 +1317,13 @@ fn unknown_authorization_role_fails_instead_of_dropping_inherited_scopes() {
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             let result = provider_for_request.authenticate_bearer(&credential_for_request);
-            for _ in 0..100 {
-                if request_count_for_wait.load(Ordering::Relaxed) >= 2
+            settle_until("the role-scope catalogue refresh to finish", || {
+                request_count_for_wait.load(Ordering::Relaxed) >= 2
                     && !provider_for_request
                         .role_scope_refresh_in_flight
                         .load(Ordering::Acquire)
-                {
-                    break;
-                }
-                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
-            }
+            })
+            .await;
             result
         });
     assert_eq!(
@@ -1433,29 +1434,38 @@ fn rsa_jwk(kid: &str) -> JsonValue {
     serde_json::from_str::<JsonValue>(&jwks(kid)).unwrap()["keys"][0].clone()
 }
 
-/// Waits inside a runtime so a background JWKS refresh can run to completion.
+/// Upper bound for a wait on an observable condition. It only bounds a hang;
+/// passing tests return as soon as the condition holds.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Polls `condition` inside the current runtime, yielding to background
+/// tasks between checks, and fails once [`SETTLE_TIMEOUT`] passes.
+async fn settle_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Authenticates inside a runtime and waits for any background JWKS refresh
+/// it started to finish. The refresh flag is set before `authenticate_bearer`
+/// returns and cleared when the task ends, after it publishes its keys.
 fn authenticate_then_settle(
     provider: &JwksAuthenticationProvider,
-    fixture: &JwksFixture,
     token: &str,
-    expected_requests: usize,
 ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
     let provider = provider.clone();
     let token = token.to_owned();
-    let requests = fixture.requests.clone();
     ntex::rt::System::build()
         .name("jwks-unknown-key-test")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             let result = provider.authenticate_bearer(&token);
-            for _ in 0..250 {
-                if requests.load(Ordering::Relaxed) >= expected_requests {
-                    break;
-                }
-                hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-            // Let the refresh publish its keys, or an unrequested one show up.
-            hive_router::tokio::time::sleep(Duration::from_millis(50)).await;
+            settle_until("the unknown-key JWKS refresh to finish", || {
+                !provider.key_refresh_in_flight.load(Ordering::Acquire)
+            })
+            .await;
             result
         })
 }
@@ -1541,7 +1551,7 @@ fn unknown_key_id_requests_a_rate_limited_jwks_refresh() {
     fixture.replace(json!({"keys": [rsa_jwk("key-a"), rsa_jwk("key-b")]}).to_string());
     let rotated = token("key-b", claims(3_000));
     assert_eq!(
-        authenticate_then_settle(&provider, &fixture, &rotated, 2)
+        authenticate_then_settle(&provider, &rotated)
             .unwrap_err()
             .kind(),
         AuthenticationErrorKind::InvalidCredential
@@ -1553,7 +1563,7 @@ fn unknown_key_id_requests_a_rate_limited_jwks_refresh() {
     let forged = token("forged-key", claims(3_000));
     for _ in 0..3 {
         assert_eq!(
-            authenticate_then_settle(&provider, &fixture, &forged, 2)
+            authenticate_then_settle(&provider, &forged)
                 .unwrap_err()
                 .kind(),
             AuthenticationErrorKind::InvalidCredential
@@ -1563,7 +1573,7 @@ fn unknown_key_id_requests_a_rate_limited_jwks_refresh() {
 
     // After the default 30-second cooldown one more unknown ID may refresh.
     clock.set(2_030);
-    assert!(authenticate_then_settle(&provider, &fixture, &forged, 3).is_err());
+    assert!(authenticate_then_settle(&provider, &forged).is_err());
     assert_eq!(fixture.requests.load(Ordering::Relaxed), 3);
 }
 
@@ -1600,7 +1610,7 @@ fn unknown_key_refresh_cooldown_is_bounded_and_overflow_is_never_due() {
     *provider.last_unknown_key_refresh.write().unwrap() =
         SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(i64::MAX as u64 - 60));
     let forged = token("forged-key", claims(3_000));
-    assert!(authenticate_then_settle(&provider, &fixture, &forged, 2).is_err());
+    assert!(authenticate_then_settle(&provider, &forged).is_err());
     assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
 }
 
@@ -1614,17 +1624,27 @@ fn a_slow_older_jwks_fetch_never_replaces_a_newer_key_set() {
     // The first refresh is answered slowly with the key set current when it
     // arrived; a second refresh starts while it is still in flight.
     fixture.replace(jwks("key-old"));
-    fixture.delay_next_response(Duration::from_millis(400));
+    fixture.hold_next_response();
     let slow = provider.clone();
     let first = thread::spawn(move || refresh(&slow));
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
     while fixture.requests.load(Ordering::Relaxed) < 2 {
-        assert!(std::time::Instant::now() < deadline);
+        assert!(
+            Instant::now() < deadline,
+            "the slow JWKS fetch never arrived"
+        );
         thread::sleep(Duration::from_millis(2));
     }
     fixture.replace(jwks("key-new"));
-    refresh(&provider).unwrap();
+    let newer = provider.clone();
+    let second = thread::spawn(move || refresh(&newer));
+    // Kept on purpose: the second refresh queues behind the first without a
+    // visible signal. Without serialisation it would commit in this window and
+    // the older answer, released next, would then overwrite it.
+    thread::sleep(Duration::from_millis(400));
+    fixture.release_held_response();
     first.join().unwrap().unwrap();
+    second.join().unwrap().unwrap();
 
     provider
         .authenticate_bearer(&token("key-new", claims(3_000)))
@@ -1645,7 +1665,8 @@ fn a_dropped_unknown_key_refresh_task_clears_its_in_flight_flag() {
     let provider = provider(&fixture, clock, LegacyScopeClaims::Reject);
     initialize(&provider).unwrap();
 
-    fixture.delay_next_response(Duration::from_secs(2));
+    // Never released while the runtime runs: the fixture's drop releases it.
+    fixture.hold_next_response();
     let in_runtime = provider.clone();
     ntex::rt::System::build()
         .name("jwks-dropped-refresh-test")

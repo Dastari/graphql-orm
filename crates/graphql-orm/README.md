@@ -18,6 +18,20 @@ In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
 fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
+chrono fields and stored date-time formats carry forward without migration.
+See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).
+
+Version 0.233.0 shares the SQL of nested closure read predicates built from
+column tests. [Migration](../../MIGRATION.md#02320-to-02330-nested-closure-sql).
+
+Version 0.232.0 aligns the receiver-admission test suite with the workspace's
+jsonwebtoken 11 dependency. [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
+
+Version 0.231.0 moves the authorization sequence of generated GraphQL writes
+into shared runtime functions, with unchanged checks and order.
+[Migration](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
 Version 0.230.0 shares offset list and aggregate execution across generated
 resolvers.
 See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).

@@ -52,7 +52,7 @@ Later exceptions carry their own accepted date.
 | 2026-11-15 | `RUSTSEC-2026-0459:libsqlite3-sys:0.30.1` | Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical. |
 | 2026-11-17 | `RUSTSEC-2026-0543:chrono:0.4.45` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
 | 2026-11-17 | `RUSTSEC-2026-0555:chrono-tz:0.10.4` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability. Re-check when upstream adopts a maintained successor or a security advisory appears. |
-| 2026-11-17 | `RUSTSEC-2026-0542:humantime:2.4.0` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; humantime wraps chrono. Re-check when upstream adopts a maintained successor or a security advisory appears. |
+| 2026-11-17 | `RUSTSEC-2026-0542:humantime:2.4.0` | Informational 'unmaintained' notice (chronotope/chrono#1768), no vulnerability; the workspace reaches humantime through the Hive Router dependency tree. Re-check when upstream adopts a maintained successor or a security advisory appears. |
 | 2026-11-19 | `RUSTSEC-2026-0574:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `FindMutView::pop`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
 | 2026-11-19 | `RUSTSEC-2026-0575:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound spsc queue `peek` ordering, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
 | 2026-11-19 | `RUSTSEC-2026-0576:heapless:{0.6.1,0.7.17,0.8.0}` | Unsound `IndexMap::truncate`, not called: rstar uses only `binary_heap::BinaryHeap`; 0.6.1/0.7.17 are lockfile-only (geo-types weak `serde` features). No geo/geo-types release accepts heapless 0.9. |
@@ -330,7 +330,7 @@ locks receive the same compatible rustix patch where present.
 
 | Retained identity | Owning path and disposition |
 | --- | --- |
-| crypto-bigint 0.5.5 / RUSTSEC-2026-0387 | agql-auth and router → jsonwebtoken 11, plus ORM test jsonwebtoken 10 → p256/p384 → elliptic-curve. Existing conditional acceptance above. |
+| crypto-bigint 0.5.5 / RUSTSEC-2026-0387 | agql-auth, router, and ORM tests → jsonwebtoken 11 → p256/p384 → elliptic-curve. Existing conditional acceptance above. |
 | libsqlite3-sys 0.30.1 / RUSTSEC-2026-0459 | Exploitation requires opening an attacker-written database file together with its -wal; backup restore is logical, not file-level, so the risk is theoretical. |
 | quick-xml 0.39.4 / RUSTSEC-2026-0194, RUSTSEC-2026-0195 | hive-router → object_store 0.13. Fixed object_store owner crosses Hive's range. Router XML initialization conditions above apply. |
 | rsa 0.9.10 / RUSTSEC-2023-0071 | JWT RustCrypto and optional SMB crypto owners; no compatible fixed release. RSA operations and credentials conditions above apply. |
@@ -342,16 +342,20 @@ locks receive the same compatible rustix patch where present.
 
 ### Duplicate crypto and HTTP stacks (#498)
 
-No compatible lockfile-only unification is available across the major-version
-requirements: ORM and pinned agql-auth require jsonwebtoken 10, while the workspace
-router requires 11; Hive/object_store/SSPI retain reqwest 0.12 while project AI
-and router use 0.13. Moving either external pin or a public dependency contract
-is outside this batch. Keep both until the owning requirements converge.
-Rustls ring and aws-lc-rs are selected by different owners; removing one requires
-review of the unified provider/backend configuration. Native TLS/OpenSSL is
-required by the pinned Tiberius transport and optional SDK owners; changing it
-would overlap #516. These duplicates remain explicit follow-ups, not resolved
-by updating the lockfile.
+As of 2026-11-26, the router, pinned agql-auth v0.27.0 and ORM tests resolve
+jsonwebtoken 11. The full-stack fixture follows the ORM backend feature
+selection. Its SQLite build excludes the PostgreSQL driver and its TLS stack.
+CI checks both fixture backends and each ORM backend with `auth-agql`.
+
+| Remaining stack | Resolved owners and constraint |
+| --- | --- |
+| reqwest 0.12 and 0.13 | AI, router and the federation fixture use 0.13 with default features disabled. Hive directly requires 0.12 and also brings it in through its HTTP middleware and object_store. Hive telemetry uses 0.13. Cargo also locks SSPI's optional 0.12 dependency for SMB. |
+| rustls with ring and AWS-LC | Hive enables both via its direct rustls/hyper-rustls dependencies and reqwest 0.12. The router's own reqwest 0.13 `rustls` feature also selects AWS-LC. S3 and the standard AI HTTP features select AWS-LC. PostgreSQL uses SQLx 0.8's ring provider with WebPKI roots. SQLx 0.8's `verify-ca` verifier relies on an unambiguous or host-installed process-wide provider. Switching PostgreSQL to AWS-LC would introduce a panic risk for hosts that explicitly pair PostgreSQL with AI's ring provider. AI's explicit ring option uses the platform verifier. AI tests also build ring through rcgen for the loopback ring test. |
+| Native TLS/OpenSSL on Linux | The pinned Tiberius driver selects native TLS for SQL Server. Its rustls alternative uses tokio-rustls 0.24, adding a second rustls version. Switching transports requires the driver and certificate coverage tracked in #516. AI also offers native TLS as an explicit host choice. |
+
+PostgreSQL and AI HTTP can share ring as their only rustls provider when the
+host selects AI's `provider-*-core` adapters and `provider-tls-ring`. Hive or
+S3 in the same application can still add AWS-LC through Cargo feature unification.
 
 ### Remaining repository/test hygiene (#545)
 
