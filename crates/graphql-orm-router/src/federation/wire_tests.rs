@@ -371,6 +371,8 @@ fn router_child_entrypoint() {
                                 fs::write(&staged, result).unwrap();
                                 fs::rename(&staged, format!("{control}.result")).unwrap();
                             }
+                            // Kept: the parent signals through a file, which has no
+                            // cross-process notification, so the child polls for it.
                             hive_router::tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }).await.unwrap();
@@ -378,9 +380,17 @@ fn router_child_entrypoint() {
                 }
 
                 if mode == "graceful" {
+                    // Shut down once the parent closes stdin, after its request.
+                    let (closed, stdin_closed) = futures::channel::oneshot::channel::<()>();
+                    std::thread::spawn(move || {
+                        // EOF or a read error both mean the parent let go of stdin.
+                        let _ = io::copy(&mut io::stdin(), &mut io::sink());
+                        let _ = closed.send(());
+                    });
                     prepared
-                        .run_until_shutdown(async {
-                            hive_router::tokio::time::sleep(Duration::from_secs(1)).await;
+                        .run_until_shutdown(async move {
+                            // A dropped sender also means stdin is gone.
+                            let _ = stdin_closed.await;
                         })
                         .await
                         .expect("static public router should shut down gracefully");
@@ -2134,21 +2144,22 @@ fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
     // been able to bind at all.
     let public_ip_metrics = std::net::SocketAddr::new(router.address.ip(), metrics.port());
     assert_eq!(public_guard.local_addr().unwrap(), public_ip_metrics);
-    public_guard.set_nonblocking(true).unwrap();
     let stop_guard = Arc::new(AtomicBool::new(false));
     let guard_thread = {
         let stop_guard = Arc::clone(&stop_guard);
         thread::spawn(move || {
-            while !stop_guard.load(Ordering::SeqCst) {
-                match public_guard.accept() {
-                    Ok((connection, _)) => drop(connection),
-                    Err(_) => thread::sleep(Duration::from_millis(5)),
+            // Blocking accept; the connection below wakes it once `stop_guard` is set.
+            while let Ok((connection, _)) = public_guard.accept() {
+                drop(connection);
+                if stop_guard.load(Ordering::SeqCst) {
+                    return;
                 }
             }
         })
     };
     let public_ip_scrape = raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None);
     stop_guard.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(public_ip_metrics);
     guard_thread.join().unwrap();
     assert!(
         public_ip_scrape.is_err(),
@@ -2178,11 +2189,13 @@ fn prepared_router_gracefully_drains_and_releases_its_listener() {
         &[],
     );
     assert_eq!(response["data"]["product"]["name"], "desk");
-    let status = lock_child(&router.child)
-        .as_mut()
-        .unwrap()
-        .wait()
-        .expect("graceful child should exit");
+    let status = {
+        let mut child = lock_child(&router.child);
+        let child = child.as_mut().unwrap();
+        // Closing stdin is the child's shutdown signal.
+        drop(child.stdin.take());
+        child.wait().expect("graceful child should exit")
+    };
     assert!(status.success());
     lock_child(&router.child).take();
     assert!(TcpStream::connect_timeout(&router.address, Duration::from_millis(100)).is_err());
@@ -2228,12 +2241,14 @@ fn public_polling_router_atomically_reloads_and_preserves_executable_lkg() {
         .expect("slow request thread should not panic");
     assert_eq!(slow_result["data"]["product"]["id"], "slow");
 
-    let before_rejection = products_sdl.fetches();
     products_sdl.set(CONFLICTING_REVIEWS, "products-invalid", 200);
-    wait_until("incompatible schema poll", || {
-        products_sdl.fetches() > before_rejection
+    // Every fetch counted after this read serves the incompatible SDL. The
+    // poller is serial, so the second such fetch starts only after the round
+    // that fetched the first has finished composing it.
+    let before_rejection = products_sdl.fetches();
+    wait_until("incompatible schema poll round", || {
+        products_sdl.fetches() > before_rejection + 1
     });
-    thread::sleep(Duration::from_millis(50));
     let retained_after_rejection =
         router.graphql_at("/api/graphql", json!({"query": "query { version }"}), &[]);
     assert_eq!(retained_after_rejection["data"]["version"], "v2");
@@ -3892,7 +3907,8 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
     oversized.connection_init_bearer("product-events");
     oversized.send_oversized_text_frame();
     oversized.wait_for_disconnect_without_close_code(1011);
-    thread::sleep(Duration::from_millis(50));
+    // No wait for its permit: even if the dropped socket still holds one,
+    // `failing` and later `expiring` fit within the two-connection budget.
 
     let mut failing = TestWebSocket::connect_at(router.address, "/api/graphql");
     failing.connection_init_bearer("product-events");
@@ -3951,8 +3967,8 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "rename-after-failure"
     );
     failing.complete("live-events");
+    // `close` waits for the router's reply, sent after it frees the permit.
     failing.close();
-    thread::sleep(Duration::from_millis(50));
 
     let healthy_after_failure = router.graphql_at(
         "/api/graphql",
@@ -4499,8 +4515,13 @@ fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot()
 
     products_sdl.set(PRODUCTS_V2, "products-sdl-v2", 200);
     // Publish the matching policy descriptor separately. A poll that observes
-    // only one side is an incomplete candidate and must retain v1.
-    thread::sleep(Duration::from_millis(120));
+    // only one side is an incomplete candidate and must retain v1. The poller
+    // is serial, so a second SDL fetch after this read means one complete
+    // round saw the new SDL with the old descriptor.
+    let before_partial = products_sdl.fetches();
+    wait_until("a poll round that sees only the new SDL", || {
+        products_sdl.fetches() > before_partial + 1
+    });
     products_protocol.set(
         protocol_descriptor(
             "products",
@@ -5243,6 +5264,7 @@ fn websocket_frame_read_retains_partial_bytes_across_poll_timeouts() {
         // Timeouts in either the header or payload must preserve bytes already read.
         for part in [&[0x81][..], &[2][..], b"o", b"k"] {
             server.write_all(part).unwrap();
+            // Kept: the gap must outlast the reader's 20 ms poll timeout.
             thread::sleep(Duration::from_millis(100));
         }
     });
@@ -5466,6 +5488,12 @@ impl TestRouter {
             .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
+            // The graceful child shuts down when the parent closes this pipe.
+            .stdin(if mode == "graceful" {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -5654,6 +5682,7 @@ impl TestRouter {
                 Instant::now() < deadline,
                 "router did not become ready within {TEST_TIMEOUT:?}"
             );
+            // Kept: readiness is only observable through the health probe.
             thread::sleep(Duration::from_millis(25));
         }
     }
@@ -5866,9 +5895,6 @@ struct SubgraphHandlerState {
 impl LoopbackSubgraph {
     fn start(kind: SubgraphKind) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback subgraph bind");
-        listener
-            .set_nonblocking(true)
-            .expect("subgraph listener nonblocking");
         let address = listener.local_addr().expect("subgraph address");
         let opens = Arc::new(AtomicUsize::new(0));
         let saw_approved_header = Arc::new(AtomicBool::new(false));
@@ -5887,17 +5913,13 @@ impl LoopbackSubgraph {
             stopping: stopping.clone(),
         };
         let thread = thread::spawn(move || {
-            while !thread_state.stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let state = thread_state.clone();
-                        thread::spawn(move || handle_subgraph(stream, kind, state));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((stream, _)) = listener.accept() {
+                if thread_state.stopping.load(Ordering::Acquire) {
+                    return;
                 }
+                let state = thread_state.clone();
+                thread::spawn(move || handle_subgraph(stream, kind, state));
             }
         });
         Self {
@@ -5946,6 +5968,8 @@ impl Drop for LoopbackSubgraph {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         self.slow_gate.release();
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -5973,9 +5997,6 @@ struct LoopbackEndpointState {
 impl LoopbackSdl {
     fn start(sdl: &str) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback SDL bind");
-        listener
-            .set_nonblocking(true)
-            .expect("SDL listener nonblocking");
         let address = listener.local_addr().expect("SDL listener address");
         let state = Arc::new(Mutex::new(LoopbackEndpointState {
             body: sdl.to_owned(),
@@ -5991,61 +6012,52 @@ impl LoopbackSdl {
         let thread_conditional_fetches = conditional_fetches.clone();
         let thread_stopping = stopping.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let Ok((head, _)) = read_head_and_body(&mut stream) else {
-                            continue;
-                        };
-                        if !has_header(&head, "authorization", "Bearer schema-secret") {
-                            // The client may close this fixture connection early.
-                            let _ = write_http_response(stream, 401, b"{}");
-                            continue;
-                        }
-                        thread_fetches.fetch_add(1, Ordering::AcqRel);
-                        let snapshot = thread_state
-                            .lock()
-                            .expect("loopback SDL endpoint state")
-                            .clone();
-                        if let Some(location) = &snapshot.redirect {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status, location
-                            );
-                        } else if snapshot.status != 200 {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status
-                            );
-                        } else if has_header(
-                            &head,
-                            "if-none-match",
-                            &format!("\"{}\"", snapshot.etag),
-                        ) {
-                            thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
-                            // The client may close this fixture connection early.
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
-                            );
-                        } else {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                snapshot.etag,
-                                snapshot.body.len(),
-                                snapshot.body
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok((head, _)) = read_head_and_body(&mut stream) else {
+                    continue;
+                };
+                if !has_header(&head, "authorization", "Bearer schema-secret") {
+                    // The client may close this fixture connection early.
+                    let _ = write_http_response(stream, 401, b"{}");
+                    continue;
+                }
+                thread_fetches.fetch_add(1, Ordering::AcqRel);
+                let snapshot = thread_state
+                    .lock()
+                    .expect("loopback SDL endpoint state")
+                    .clone();
+                if let Some(location) = &snapshot.redirect {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status, location
+                    );
+                } else if snapshot.status != 200 {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status
+                    );
+                } else if has_header(&head, "if-none-match", &format!("\"{}\"", snapshot.etag)) {
+                    thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                    // The client may close this fixture connection early.
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n");
+                } else {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        snapshot.etag,
+                        snapshot.body.len(),
+                        snapshot.body
+                    );
                 }
             }
         });
@@ -6083,6 +6095,8 @@ impl LoopbackSdl {
 impl Drop for LoopbackSdl {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -6103,9 +6117,6 @@ impl LoopbackProtocol {
     fn start(descriptor: SubgraphDescriptor) -> Self {
         let body = serde_json::to_string(&descriptor).expect("protocol descriptor JSON");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback protocol bind");
-        listener
-            .set_nonblocking(true)
-            .expect("protocol listener nonblocking");
         let address = listener.local_addr().expect("protocol listener address");
         let state = Arc::new(Mutex::new(LoopbackEndpointState {
             body,
@@ -6121,61 +6132,52 @@ impl LoopbackProtocol {
         let thread_conditional_fetches = conditional_fetches.clone();
         let thread_stopping = stopping.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let Ok((head, _)) = read_head_and_body(&mut stream) else {
-                            continue;
-                        };
-                        if !has_header(&head, "authorization", "Bearer schema-secret") {
-                            // The client may close this fixture connection early.
-                            let _ = write_http_response(stream, 401, b"{}");
-                            continue;
-                        }
-                        thread_fetches.fetch_add(1, Ordering::AcqRel);
-                        let snapshot = thread_state
-                            .lock()
-                            .expect("loopback protocol endpoint state")
-                            .clone();
-                        if let Some(location) = &snapshot.redirect {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status, location
-                            );
-                        } else if snapshot.status != 200 {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status
-                            );
-                        } else if has_header(
-                            &head,
-                            "if-none-match",
-                            &format!("\"{}\"", snapshot.etag),
-                        ) {
-                            thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
-                            // The client may close this fixture connection early.
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
-                            );
-                        } else {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                snapshot.etag,
-                                snapshot.body.len(),
-                                snapshot.body
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok((head, _)) = read_head_and_body(&mut stream) else {
+                    continue;
+                };
+                if !has_header(&head, "authorization", "Bearer schema-secret") {
+                    // The client may close this fixture connection early.
+                    let _ = write_http_response(stream, 401, b"{}");
+                    continue;
+                }
+                thread_fetches.fetch_add(1, Ordering::AcqRel);
+                let snapshot = thread_state
+                    .lock()
+                    .expect("loopback protocol endpoint state")
+                    .clone();
+                if let Some(location) = &snapshot.redirect {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status, location
+                    );
+                } else if snapshot.status != 200 {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status
+                    );
+                } else if has_header(&head, "if-none-match", &format!("\"{}\"", snapshot.etag)) {
+                    thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                    // The client may close this fixture connection early.
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n");
+                } else {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        snapshot.etag,
+                        snapshot.body.len(),
+                        snapshot.body
+                    );
                 }
             }
         });
@@ -6229,6 +6231,8 @@ impl LoopbackProtocol {
 impl Drop for LoopbackProtocol {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -6451,6 +6455,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 // The client may close this fixture connection early.
                 let _ = stream.flush();
                 while !state.stopping.load(Ordering::Acquire) {
+                    // Kept: heartbeat interval; a failed write ends the stream.
                     thread::sleep(Duration::from_millis(25));
                     if stream
                         .write_all(b": heartbeat\n\n")
@@ -6815,6 +6820,7 @@ fn write_sse_subscription(
     // retired, or until fixture shutdown. Heartbeats make that cancellation
     // observable without relying on an unbounded parked worker thread.
     while !stopping.load(Ordering::Acquire) {
+        // Kept: heartbeat interval; a failed write ends the stream.
         thread::sleep(Duration::from_millis(25));
         if stream.write_all(b": heartbeat\n\n").is_err() {
             break;
@@ -7077,6 +7083,7 @@ fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) {
             Instant::now() < deadline,
             "timed out waiting for {description}"
         );
+        // Kept: polling interval for a bounded wait on an observable condition.
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -7096,6 +7103,7 @@ fn wait_for_graphql(mut request: impl FnMut() -> Value) -> Value {
             Instant::now() < deadline,
             "timed out waiting for the replacement GraphQL schema: {response}"
         );
+        // Kept: polling interval; the schema swap is only visible to requests.
         thread::sleep(Duration::from_millis(20));
     }
 }
