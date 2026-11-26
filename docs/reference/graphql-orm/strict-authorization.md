@@ -311,7 +311,8 @@ ORM source), which fixes the order of the checks in one place:
    resolves its key between steps 1 and 2.
 3. **Target admission.** A single-row update or delete locks its row through
    the write-target prefilter and classifies it with the row read and write
-   decisions; a bulk write does the same for every row its filter selects. See
+   decisions; a bulk write does the same for every row its filter selects, and
+   an upsert asks the row write decision on the row its key found. See
    [row policy on generated writes](#row-policy-on-generated-writes).
 4. **Hook dispatch.** Each `Before` and `After` hook invocation, the hook's
    [request authority](#hook-writes-on-the-originating-requests-authority) and
@@ -342,25 +343,51 @@ deferred actions and `notify_with`.
 ### What the pipeline does and does not enforce
 
 A mutation hook's transaction presents the originating request only when the
-hook dispatch is given a `GeneratedWriteAuthority` for the event's entity.
-That type has no public constructor. It is issued only by the pipeline's
-entity admission, which can only start from a completed request admission.
-An authority issued for one entity attaches nothing to a hook event of
-another.
+hook dispatch is given the `GeneratedWriteAuthority` of that dispatch. The
+type has no public constructor: only the pipeline's own admission produces
+one.
 
-That is the whole boundary. It is not a seal against host Rust code:
+- **Admission is derived from the entity.** Request admission is told which
+  entity and which operation (create, update, bulk update, delete, bulk
+  delete or upsert). It reads the authentication mode, the scope requirement
+  and the operation's coordinate from the configuration `GraphQLOperations`
+  generates for that entity. Its caller supplies only the request's values
+  of the scalar arguments a scope template names.
+- **The authority is issued when admission is complete.** A create has no
+  target, so entity admission issues it. For an update, a delete, an upsert
+  and a bulk write, target admission issues it. A target that is absent or
+  refused, and the unlocked read of a `dependent_deletes` root, issue
+  nothing.
+- **The authority is bound to what it was earned under:**
+  - one request: the request itself and the root field being resolved. The
+    synthetic child-field contexts of a nested create share both with their
+    root;
+  - one operation: the operation, the entity and the field whose context was
+    admitted, which is the root field or a nested child's own create field.
+    A single-row authority covers one row, so each nested child row needs
+    its own admission;
+  - one `Database`: the handle the entity was admitted on, which must be the
+    handle of the transaction that dispatches the hook.
+- **A mismatch is refused.** Entity admission, target admission, the bulk
+  entry points and hook dispatch fail when they are given a request,
+  admission or authority that does not match the call, before any hook runs.
+  The refusal is an uncoded internal error with the text
+  `generated write admission does not match this request, operation or database`.
+  Generated code always presents the authority of its own admission, so no
+  generated mutation produces it.
 
-- The pipeline's functions are macro-internal and hidden from the API
-  documentation, but they are `pub`, because generated code compiles in the
-  host's crate. Host Rust code is trusted and can call them.
-- Request admission takes the authentication mode, the scopes and the
-  assurance coordinate from its caller. A generated resolver passes the
-  entity's declarations. Host code that calls it passes its own.
-- The authority is issued at entity admission, before any target row is
-  admitted.
-- The authority is not bound to the request, operation or `Database` it was
-  issued under. The entity write decision is asked again, for the request
-  presented at dispatch, before each hook invocation that attaches authority.
+When the authority matches, the entity write decision is still asked once
+more, for the request presented at dispatch, before each hook invocation that
+attaches it.
+
+This is not a seal against host Rust code. The pipeline's functions are
+macro-internal and hidden from the API documentation, but they are `pub`,
+because generated code compiles in the host's crate. Host Rust code is
+trusted and can run the whole pipeline itself, in order, for an entity and
+operation the macros generated. It cannot choose that admission's
+authentication mode, scopes or coordinate, obtain an authority before the
+admission is complete, or present one under another request, operation or
+`Database`.
 
 Do not treat these functions as an authorization API. A custom resolver
 declares its own [authorization](resolver-operation-metadata.md) and writes
@@ -756,14 +783,14 @@ The authority belongs to the hook's transaction, and to nothing else:
 - **It is attached only with a pipeline admission,** and only when the request is admitted to
   write the event's entity: the entity decision is asked once more, on the `GraphqlMutation`
   surface, before each hook invocation that attaches it. The hook dispatch of the
-  [write pipeline](#the-generated-write-pipeline) takes the request only together with a
-  `GeneratedWriteAuthority` for that entity, which only the pipeline's request and entity
-  admission issue. A generated GraphQL mutation runs that admission with the entity's declared
-  authentication, scopes and assurance. `MutationContext::run_mutation_hook`, the dispatcher
-  for host code, runs the hook without request authority.
-  This does not constrain host Rust code, which is trusted: the admission functions are
-  macro-internal but callable, take their caller's arguments, and issue an authority that is
-  not bound to one request. See
+  [write pipeline](#the-generated-write-pipeline) takes the request only together with the
+  `GeneratedWriteAuthority` of that dispatch, which only the pipeline's admission issues, bound
+  to the request, operation and `Database` it was earned under. A generated GraphQL mutation
+  runs that admission with the entity's declared authentication, scopes and assurance.
+  `MutationContext::run_mutation_hook`, the dispatcher for host code, runs the hook without
+  request authority.
+  Host Rust code is trusted and can still run the macro-internal admission itself; it cannot
+  choose its inputs or present its authority anywhere else. See
   [what the pipeline does and does not enforce](#what-the-pipeline-does-and-does-not-enforce).
 - **It ends with the hook invocation,** including on an error or a dropped future, and every read
   of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.235.0 generates each entity's write configuration, which the ORM's
+write pipeline reads to admit a generated write and to
+[bind its authority](../../MIGRATION.md#02340-to-02350-bound-generated-write-authority).
+
 Version 0.234.0 aligns with the ORM's internal date-time engine update.
 See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).
 

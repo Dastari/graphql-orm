@@ -54,9 +54,10 @@ impl HostMutation {
     /// through the public dispatcher or the generated-write one. A
     /// `GeneratedWriteAuthority` has no public constructor: only the runtime
     /// write pipeline's admission issues one. With `admitted`, this resolver
-    /// runs that macro-internal admission itself for the named entity, as
-    /// trusted host code can, and presents the authority it gets. Returns
-    /// whether the hook's cleanup was admitted; nothing is committed.
+    /// runs that macro-internal admission itself for a delete of the named
+    /// entity, including its target admission, as trusted host code can, and
+    /// presents the authority it gets. Returns whether the dispatch ran and
+    /// the hook's cleanup was admitted; nothing is committed.
     async fn host_dispatch(
         &self,
         ctx: &Context<'_>,
@@ -64,40 +65,58 @@ impl HostMutation {
         admitted: Option<String>,
     ) -> graphql_orm::async_graphql::Result<bool> {
         use graphql_orm::graphql::orm::{
-            __admit_generated_write_request, GeneratedWriteAssurance, GeneratedWriteEntity,
+            __admit_generated_write_request, EntityQuery, GeneratedWriteAssurance,
+            GeneratedWriteEntity, GeneratedWriteKind, SqlValue,
         };
-        let orders = GeneratedWriteEntity::new("HookOrder", "hook_orders", HookOrder::metadata);
-        let no_scopes = || Ok(());
-        let admission = match admitted.as_deref() {
-            Some("HookOrder") => Some(
-                __admit_generated_write_request::<HookOrder, graphql_orm::SqliteBackend>(
-                    ctx,
-                    None,
-                    &no_scopes,
-                    GeneratedWriteAssurance::Resolver,
-                )?
-                .__admit_entity::<graphql_orm::SqliteBackend>(ctx, orders)
-                .await?,
-            ),
-            Some(_) => Some(
-                __admit_generated_write_request::<HookLine, graphql_orm::SqliteBackend>(
-                    ctx,
-                    None,
-                    &no_scopes,
-                    GeneratedWriteAssurance::Resolver,
-                )?
-                .__admit_entity::<graphql_orm::SqliteBackend>(
-                    ctx,
-                    GeneratedWriteEntity::new("HookLine", "hook_lines", HookLine::metadata),
-                )
-                .await?,
-            ),
-            None => None,
-        };
+        type Sqlite = graphql_orm::SqliteBackend;
+        let orders = GeneratedWriteEntity::of::<HookOrder>();
         let db = ctx.data::<Database>()?;
         let mut tx = MutationContext::begin(db, TransactionMode::Default)
             .await
             .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+        let admission = match admitted.as_deref() {
+            Some("HookOrder") => {
+                let admission = __admit_generated_write_request::<HookOrder, Sqlite>(
+                    ctx,
+                    GeneratedWriteKind::Delete,
+                    GeneratedWriteAssurance::Resolver,
+                    &[],
+                )?
+                .__admit_entity::<Sqlite>(ctx)
+                .await?;
+                let target = admission
+                    .__lock_target(
+                        ctx,
+                        &mut tx,
+                        EntityQuery::<HookOrder, Sqlite>::new()
+                            .where_clause("id = ?", SqlValue::String("o1".into())),
+                    )
+                    .await?;
+                assert!(target.is_some());
+                Some(admission)
+            }
+            Some(_) => {
+                let admission = __admit_generated_write_request::<HookLine, Sqlite>(
+                    ctx,
+                    GeneratedWriteKind::Delete,
+                    GeneratedWriteAssurance::Resolver,
+                    &[],
+                )?
+                .__admit_entity::<Sqlite>(ctx)
+                .await?;
+                let target = admission
+                    .__lock_target(
+                        ctx,
+                        &mut tx,
+                        EntityQuery::<HookLine, Sqlite>::new()
+                            .where_clause("id = ?", SqlValue::String("l1".into())),
+                    )
+                    .await?;
+                assert!(target.is_some());
+                Some(admission)
+            }
+            None => None,
+        };
         let event = MutationEvent {
             phase: MutationPhase::Before,
             action: ChangeAction::Deleted,
@@ -1084,18 +1103,18 @@ async fn the_public_dispatcher_issues_no_request_authority() {
 }
 
 #[tokio::test]
-async fn an_authority_for_one_entity_attaches_nothing_for_another() {
+async fn an_authority_for_one_entity_is_refused_for_another() {
     // The caller is admitted to write both entities and the database opted
-    // in. An authority the pipeline issued for lines is presented with an
-    // order event: the dispatch attaches nothing, so the hook's cleanup is
-    // refused as for a call with no authority.
+    // in. An authority the pipeline issued for a line delete is presented
+    // with an order event: the dispatch is refused before the hook runs
+    // (#921; `write_authority_binding` covers every other mismatch).
     let both = || subject(&["orders.write", "lines.write"]);
     let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
     assert!(!host_dispatch_admitted(&fixture.db, both(), true, Some("HookLine")).await);
     assert_untouched(&fixture.db).await;
     // The authority for the event's own entity does attach it. Host Rust
-    // code is trusted: it can run the macro-internal admission itself, with
-    // its own arguments. The boundary is the entity, not the caller.
+    // code is trusted: it can run the macro-internal admission itself, in
+    // order, for an operation the macros generated.
     assert!(host_dispatch_admitted(&fixture.db, both(), true, Some("HookOrder")).await);
     // Admission is still the pipeline's: a caller the entity policy refuses
     // gets no authority to present.

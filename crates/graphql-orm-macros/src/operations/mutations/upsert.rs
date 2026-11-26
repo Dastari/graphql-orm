@@ -11,8 +11,7 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) input_arg_description: &'a str,
     pub(in crate::operations) graphql_create_input: &'a syn::Ident,
     pub(in crate::operations) upsert_result_type: &'a syn::Ident,
-    pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) upsert_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) upsert_scope_arguments: &'a TokenStream,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
@@ -29,7 +28,6 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) upsert_change_binds_graphql: &'a [TokenStream],
     pub(in crate::operations) upsert_change_field_literals: &'a [syn::LitStr],
     pub(in crate::operations) create_mutation_field_literals: &'a [syn::LitStr],
-    pub(in crate::operations) table_name: &'a str,
     pub(in crate::operations) graphql_post_image_check: &'a TokenStream,
     pub(in crate::operations) notify_on_created: &'a TokenStream,
     pub(in crate::operations) notify_on_updated: &'a TokenStream,
@@ -67,8 +65,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         input_arg_description,
         graphql_create_input,
         upsert_result_type,
-        resolver_auth_mode,
-        upsert_scope_enforcement,
+        upsert_scope_arguments,
         backend_marker,
         entity_name_lit,
         struct_name,
@@ -85,7 +82,6 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         upsert_change_binds_graphql,
         upsert_change_field_literals,
         create_mutation_field_literals,
-        table_name,
         graphql_post_image_check,
         notify_on_created,
         notify_on_updated,
@@ -132,13 +128,13 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
     } else {
         (quote! {}, quote! { __gom_before_hook?; })
     };
-    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let entity = write_entity(struct_name);
     let request = admitted_request();
     let admit = admit_request(
         struct_name,
         backend_marker,
-        resolver_auth_mode,
-        upsert_scope_enforcement,
+        "Upsert",
+        upsert_scope_arguments,
         Assurance::Resolver,
     );
     let before_hook = Hook {
@@ -182,7 +178,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 // before the entity policy, the transaction and any read or
                 // write; a failed binding refuses the mutation.
                 #principal_key_resolution
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx, __gom_entity).await?;
+                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();
@@ -211,15 +207,9 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 // Before any policy callback, hook or statement.
                 #principal_key_preimage_check
-                if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
-                    db.ensure_writable_row(
-                        ::std::option::Option::Some(ctx),
-                        #entity_name_lit,
-                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                        current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
-                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                }
+                // Target admission: the row write decision on the row the
+                // key found, if any.
+                __gom_write.__admit_upsert_target(ctx, &mut hook_ctx, current_entity.as_ref()).await?;
                 // Update candidates whose write the policy denied and the host
                 // chose to ignore: they stay out of the conflict update.
                 #[allow(unused_mut)]

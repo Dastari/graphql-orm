@@ -798,6 +798,73 @@ fn scope_enforcement_tokens(
     })
 }
 
+/// The scope requirement of a generated write as the runtime write pipeline
+/// takes it: the entity's `GeneratedWriteScopes`, and the request's values of
+/// the scalar arguments its templates name. `scope_enforcement_tokens`
+/// validates the same declaration.
+fn write_scope_tokens(
+    authorization: Option<&FixedOperationAuthorization>,
+    arguments: &[ScopeTemplateArgumentSpec],
+) -> syn::Result<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
+    let no_arguments = quote! { &[] };
+    let alternatives = |alternatives: Vec<&[syn::LitStr]>| {
+        let alternatives = alternatives
+            .into_iter()
+            .map(|alternative| quote! { &[#(#alternative),*] });
+        quote! { &[#(#alternatives),*] }
+    };
+    let Some(authorization) = authorization else {
+        return Ok((
+            quote! { ::graphql_orm::graphql::orm::GeneratedWriteScopes::None },
+            no_arguments,
+        ));
+    };
+    let Some(templates) = authorization.template_alternatives() else {
+        let scopes = alternatives(match authorization {
+            FixedOperationAuthorization::AllScopes(scopes) => vec![scopes],
+            FixedOperationAuthorization::AnyScopes(alternatives) => {
+                alternatives.iter().map(Vec::as_slice).collect()
+            }
+            FixedOperationAuthorization::AllScopeTemplates(_)
+            | FixedOperationAuthorization::AnyScopeTemplates(_) => {
+                unreachable!("templates are handled above")
+            }
+        });
+        return Ok((
+            quote! { ::graphql_orm::graphql::orm::GeneratedWriteScopes::Fixed(#scopes) },
+            no_arguments,
+        ));
+    };
+    let mut values = Vec::new();
+    let mut referenced: Vec<String> = Vec::new();
+    for template in templates.iter().flat_map(|alternative| *alternative) {
+        for reference in scope_template_references(template)? {
+            if referenced.contains(&reference) {
+                continue;
+            }
+            let Some(rust_ident) = arguments
+                .iter()
+                .find(|argument| argument.graphql_name == reference)
+                .and_then(|argument| argument.rust_ident.as_ref())
+            else {
+                return Err(syn::Error::new_spanned(
+                    template,
+                    format!("scope template references unknown scalar argument `{reference}`"),
+                ));
+            };
+            values.push(quote! {
+                (#reference, ::std::string::ToString::to_string(&#rust_ident).as_str())
+            });
+            referenced.push(reference);
+        }
+    }
+    let templates = alternatives(templates);
+    Ok((
+        quote! { ::graphql_orm::graphql::orm::GeneratedWriteScopes::Templates(#templates) },
+        quote! { &[#(#values),*] },
+    ))
+}
+
 #[derive(Copy, Clone)]
 enum PropagationValueKind {
     String,
@@ -2160,7 +2227,7 @@ fn generate_graphql_operations_unfiltered(
         notify_bulk(quote! { ::graphql_orm::graphql::orm::ChangeAction::Deleted });
     let entity_name_lit = struct_name_str.clone();
     // The entity the shared bulk writes name to the runtime write pipeline.
-    let bulk_write_entity = mutations::write_entity(&entity_name_lit, table_name, struct_name);
+    let bulk_write_entity = mutations::write_entity(struct_name);
 
     if entity_meta.repository_mutations {
         let declared_keys = fields
@@ -2971,79 +3038,135 @@ fn generate_graphql_operations_unfiltered(
             let key = id;
         }
     };
-    let scope_enforcement = |category: &str| {
-        let arguments = match category {
-            "list" => vec![
-                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(order_by_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
-            ],
-            "aggregate" => vec![
-                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(group_by_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(metrics_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(group_limit_arg_name.clone()),
-            ],
-            "search" => vec![
-                ScopeTemplateArgumentSpec::complex(search_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
-            ],
-            "keyset_list" => vec![
-                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
-            ],
-            "single_read" => single_query_argument_specs
-                .iter()
-                .map(|(rust_ident, rust_type, graphql_name)| {
-                    ScopeTemplateArgumentSpec::scalar(
-                        graphql_name.clone(),
-                        rust_ident.clone(),
-                        rust_type.clone(),
-                    )
-                })
-                .collect(),
-            "create" | "upsert" => {
-                vec![ScopeTemplateArgumentSpec::complex(input_arg_name.clone())]
-            }
-            "update" => vec![
+    let scope_arguments = |category: &str| match category {
+        "list" => vec![
+            ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(order_by_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+        ],
+        "aggregate" => vec![
+            ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(group_by_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(metrics_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(group_limit_arg_name.clone()),
+        ],
+        "search" => vec![
+            ScopeTemplateArgumentSpec::complex(search_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+        ],
+        "keyset_list" => vec![
+            ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(page_arg_name.clone()),
+        ],
+        "single_read" => single_query_argument_specs
+            .iter()
+            .map(|(rust_ident, rust_type, graphql_name)| {
                 ScopeTemplateArgumentSpec::scalar(
-                    id_arg_name.clone(),
-                    syn::Ident::new("id", proc_macro2::Span::call_site()),
-                    pk_type_ty.clone(),
-                ),
-                ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
-            ],
-            "update_many" => vec![
-                ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
-                ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
-            ],
-            "delete" => vec![ScopeTemplateArgumentSpec::scalar(
+                    graphql_name.clone(),
+                    rust_ident.clone(),
+                    rust_type.clone(),
+                )
+            })
+            .collect(),
+        "create" | "upsert" => {
+            vec![ScopeTemplateArgumentSpec::complex(input_arg_name.clone())]
+        }
+        "update" => vec![
+            ScopeTemplateArgumentSpec::scalar(
                 id_arg_name.clone(),
                 syn::Ident::new("id", proc_macro2::Span::call_site()),
                 pk_type_ty.clone(),
-            )],
-            "delete_many" => {
-                vec![ScopeTemplateArgumentSpec::complex(where_arg_name.clone())]
-            }
-            "subscription" => {
-                vec![ScopeTemplateArgumentSpec::complex(filter_arg_name.clone())]
-            }
-            _ => unreachable!("validated generated operation category"),
-        };
-        scope_enforcement_tokens(category, operation_authorizations.get(category), &arguments)
+            ),
+            ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
+        ],
+        "update_many" => vec![
+            ScopeTemplateArgumentSpec::complex(where_arg_name.clone()),
+            ScopeTemplateArgumentSpec::complex(input_arg_name.clone()),
+        ],
+        "delete" => vec![ScopeTemplateArgumentSpec::scalar(
+            id_arg_name.clone(),
+            syn::Ident::new("id", proc_macro2::Span::call_site()),
+            pk_type_ty.clone(),
+        )],
+        "delete_many" => {
+            vec![ScopeTemplateArgumentSpec::complex(where_arg_name.clone())]
+        }
+        "subscription" => {
+            vec![ScopeTemplateArgumentSpec::complex(filter_arg_name.clone())]
+        }
+        _ => unreachable!("validated generated operation category"),
+    };
+    let scope_enforcement = |category: &str| {
+        scope_enforcement_tokens(
+            category,
+            operation_authorizations.get(category),
+            &scope_arguments(category),
+        )
+    };
+    // A generated write hands its scope requirement to the runtime write
+    // pipeline as configuration; `scope_enforcement_tokens` validates it.
+    let write_scopes = |category: &str| {
+        scope_enforcement(category)?;
+        write_scope_tokens(
+            operation_authorizations.get(category),
+            &scope_arguments(category),
+        )
     };
     let list_scope_enforcement = scope_enforcement("list")?;
     let aggregate_scope_enforcement = scope_enforcement("aggregate")?;
     let search_scope_enforcement = scope_enforcement("search")?;
     let keyset_list_scope_enforcement = scope_enforcement("keyset_list")?;
     let single_read_scope_enforcement = scope_enforcement("single_read")?;
-    let create_scope_enforcement = scope_enforcement("create")?;
-    let upsert_scope_enforcement = scope_enforcement("upsert")?;
-    let update_scope_enforcement = scope_enforcement("update")?;
-    let update_many_scope_enforcement = scope_enforcement("update_many")?;
-    let delete_scope_enforcement = scope_enforcement("delete")?;
-    let delete_many_scope_enforcement = scope_enforcement("delete_many")?;
+    let (create_scopes, create_scope_arguments) = write_scopes("create")?;
+    let (upsert_scopes, upsert_scope_arguments) = write_scopes("upsert")?;
+    let (update_scopes, update_scope_arguments) = write_scopes("update")?;
+    let (update_many_scopes, update_many_scope_arguments) = write_scopes("update_many")?;
+    let (delete_scopes, delete_scope_arguments) = write_scopes("delete")?;
+    let (delete_many_scopes, delete_many_scope_arguments) = write_scopes("delete_many")?;
+    // The entity's generated write configuration: what request admission
+    // reads instead of taking it from each resolver.
+    let generated_write_config = {
+        let operation = |kind: &str, field_name: &str, scopes: &proc_macro2::TokenStream| {
+            let kind = quote::format_ident!("{}", kind);
+            quote! {
+                ::graphql_orm::graphql::orm::GeneratedWriteKind::#kind => {
+                    ::graphql_orm::graphql::orm::GeneratedWriteOperation::__new(
+                        #field_name,
+                        #resolver_auth_mode,
+                        #scopes,
+                    )
+                }
+            }
+        };
+        let operations = [
+            operation("Create", &create_mutation_name, &create_scopes),
+            operation("Upsert", &upsert_mutation_name, &upsert_scopes),
+            operation("Update", &update_mutation_name, &update_scopes),
+            operation(
+                "UpdateMany",
+                &update_many_mutation_name,
+                &update_many_scopes,
+            ),
+            operation("Delete", &delete_mutation_name, &delete_scopes),
+            operation(
+                "DeleteMany",
+                &delete_many_mutation_name,
+                &delete_many_scopes,
+            ),
+        ];
+        quote! {
+            impl ::graphql_orm::graphql::orm::GeneratedWriteConfig for #struct_name {
+                fn __gom_write_operation(
+                    kind: ::graphql_orm::graphql::orm::GeneratedWriteKind,
+                ) -> ::graphql_orm::graphql::orm::GeneratedWriteOperation {
+                    match kind {
+                        #(#operations)*
+                    }
+                }
+            }
+        }
+    };
     let reject_unplanned_delete_effects = if entity_meta.dependent_deletes {
         quote! {}
     } else {
@@ -5847,8 +5970,7 @@ fn generate_graphql_operations_unfiltered(
         input_arg_description: &input_arg_description,
         graphql_create_input: &graphql_create_input,
         upsert_result_type: &upsert_result_type,
-        resolver_auth_mode: &resolver_auth_mode,
-        upsert_scope_enforcement: &upsert_scope_enforcement,
+        upsert_scope_arguments: &upsert_scope_arguments,
         backend_marker: &backend_marker,
         entity_name_lit: &entity_name_lit,
         struct_name,
@@ -5865,7 +5987,6 @@ fn generate_graphql_operations_unfiltered(
         upsert_change_binds_graphql: &upsert_change_binds_graphql,
         upsert_change_field_literals: &upsert_change_field_literals,
         create_mutation_field_literals: &create_mutation_field_literals,
-        table_name,
         graphql_post_image_check: &graphql_post_image_check,
         notify_on_created: &notify_on_created,
         notify_on_updated: &notify_on_updated,
@@ -6603,8 +6724,7 @@ fn generate_graphql_operations_unfiltered(
             input_arg_name: &input_arg_name,
             input_arg_description: &create_input_arg_description,
             result_type: &result_type,
-            resolver_auth_mode: &resolver_auth_mode,
-            create_scope_enforcement: &create_scope_enforcement,
+            create_scope_arguments: &create_scope_arguments,
             backend_marker: &backend_marker,
             entity_name_lit: &entity_name_lit,
             struct_name,
@@ -8720,6 +8840,8 @@ fn generate_graphql_operations_unfiltered(
             pub const __GOM_SUBSCRIPTIONS_OPTED_OUT: bool = #subscriptions_opted_out;
         }
 
+        #generated_write_config
+
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
             ) -> &'static [::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor] {
@@ -8934,8 +9056,7 @@ fn generate_graphql_operations_unfiltered(
             expected_version_param: &update_expected_version_param,
             result_type: &result_type,
             expected_version_binding: &update_expected_version_binding,
-            resolver_auth_mode: &resolver_auth_mode,
-            update_scope_enforcement: &update_scope_enforcement,
+            update_scope_arguments: &update_scope_arguments,
             update_assurance: entity_meta.update_assurance.as_ref(),
             backend_marker: &backend_marker,
             entity_name_lit: &entity_name_lit,
@@ -8948,7 +9069,6 @@ fn generate_graphql_operations_unfiltered(
             update_assignments_graphql_call: &update_assignments_graphql_call,
             updated_at_assignment: &graphql_updated_at,
             version_assignment: &graphql_version_assignment,
-            table_name,
             pk_id_for_id: &pk_id_for_id,
             sql_table_name: &sql_table_name,
             graphql_post_image_check: &graphql_post_image_check,
@@ -8963,7 +9083,7 @@ fn generate_graphql_operations_unfiltered(
             where_arg_description: &where_arg_description,
             where_input: &where_input,
             update_many_result_type: &update_many_result_type,
-            update_many_scope_enforcement: &update_many_scope_enforcement,
+            update_many_scope_arguments: &update_many_scope_arguments,
             notify_bulk_updated: &notify_bulk_updated,
             generates_public_update: mutations_disabled.is_none() && generates_public_update,
         });
@@ -9015,14 +9135,11 @@ fn generate_graphql_operations_unfiltered(
         result_type: &result_type,
         expected_version_binding: &expected_version_binding,
         reject_unplanned_delete_effects: &reject_unplanned_delete_effects,
-        resolver_auth_mode: &resolver_auth_mode,
-        delete_scope_enforcement: &delete_scope_enforcement,
+        delete_scope_arguments: &delete_scope_arguments,
         backend_marker: &backend_marker,
-        entity_name_lit: &entity_name_lit,
         struct_name,
         sql_dialect: &sql_dialect,
         pk_bind_value: &pk_bind_value,
-        table_name,
         pk_id_for_entity: &pk_id_for_entity,
         sql_table_name: &sql_table_name,
         notify_on_deleted: &notify_on_deleted,
@@ -9037,12 +9154,9 @@ fn generate_graphql_operations_unfiltered(
         where_input: &where_input,
         delete_many_result_type: &delete_many_result_type,
         reject_unplanned_delete_effects: &reject_unplanned_delete_effects,
-        resolver_auth_mode: &resolver_auth_mode,
-        delete_many_scope_enforcement: &delete_many_scope_enforcement,
+        delete_many_scope_arguments: &delete_many_scope_arguments,
         backend_marker: &backend_marker,
-        entity_name_lit: &entity_name_lit,
         struct_name,
-        table_name,
         notify_bulk_deleted: &notify_bulk_deleted,
     });
     let mutation_result_impl = if mutations_disabled.is_some() {
@@ -10250,7 +10364,7 @@ fn generate_graphql_operations_unfiltered(
                 // targets only; a repository write keeps the unbounded read.
                 let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
-                    graphql_ctx,
+                    __gom_request,
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),
@@ -10679,7 +10793,7 @@ fn generate_graphql_operations_unfiltered(
                 // targets only; a repository write keeps the unbounded read.
                 let matched_entities = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::bulk_write_targets::<Self, #backend_marker>(
                     db,
-                    graphql_ctx,
+                    __gom_request,
                     &mut hook_ctx,
                     EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input),

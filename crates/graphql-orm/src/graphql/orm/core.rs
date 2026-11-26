@@ -3077,6 +3077,12 @@ where
         }));
     }
 
+    /// The `Database` handle this transaction was begun on, whatever scope
+    /// is active.
+    pub(super) fn __base_database(&self) -> &crate::db::Database<B> {
+        self.db
+    }
+
     /// Keep every queued event in the transaction until commit, including
     /// events queued by a hook that explicitly drains the queue.
     #[doc(hidden)]
@@ -3219,16 +3225,22 @@ where
     /// **Macro-internal.** Host code uses [`Self::run_mutation_hook`].
     ///
     /// `request` is the originating GraphQL request and the authority its
-    /// admission issued; a repository write passes `None`. On a database that
-    /// propagates request authority to hooks, the hook's operations on this
-    /// transaction present that request when the authority was issued for
-    /// `entity` and the request is still admitted to write it on the
-    /// `GraphqlMutation` surface: the entity decision is asked again here. A
-    /// nested invocation keeps the authority already presented.
+    /// admission issued; a repository write passes `None`.
+    ///
+    /// A request is refused, before the hook runs, unless its authority is
+    /// issued and was earned for `entity` and an operation that reports
+    /// `action`, under this request and field, on this transaction's
+    /// `Database`; a single-row authority dispatches each phase once.
+    ///
+    /// On a database that propagates request authority to hooks, the hook's
+    /// operations on this transaction then present that request when it is
+    /// still admitted to write the entity on the `GraphqlMutation` surface:
+    /// the entity decision is asked again here. A nested invocation keeps the
+    /// authority already presented.
     ///
     /// A [`GeneratedWriteAuthority`](super::GeneratedWriteAuthority) has no
-    /// public constructor. It is issued only by the pipeline's request and
-    /// entity admission, so a caller that did not run them attaches nothing.
+    /// public constructor. Only the pipeline's admission issues one, so a
+    /// caller that did not run it has no request to present.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub async fn __run_generated_write_hook(
@@ -3253,15 +3265,17 @@ where
             before_state,
             after_state,
         };
+        if let Some((ctx, admitted)) = request {
+            admitted.__require_dispatch(entity, ctx, self.db, &event.phase, event.action)?;
+        }
         let ctx = request.map(|(ctx, _)| ctx);
         let presented = self
             .hook_request
             .as_ref()
             .is_some_and(|request| request.is_live());
         let authority = match request {
-            Some((ctx, admitted))
-                if admitted.covers(entity)
-                    && self.db.propagates_request_authority_to_hooks()
+            Some((ctx, _))
+                if self.db.propagates_request_authority_to_hooks()
                     && !presented
                     && self.db.mutation_hook().is_some()
                     && matches!(

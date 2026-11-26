@@ -10,6 +10,43 @@ supersedes: []
 
 # Migration Guide
 
+## 0.234.0 to 0.235.0: Bound generated write authority
+
+**No action** for supported callers: hosts that use the derives, the
+repository API, `Database::transaction` and
+`MutationContext::run_mutation_hook`. Upgrade ORM and macros together. The
+checks of a generated GraphQL write, their order, the refusals, the SDL and
+the catalogues are unchanged (#921).
+
+The hidden write pipeline now derives a generated write's authentication
+mode, scopes and assurance coordinate from the entity's generated
+configuration. It issues the `GeneratedWriteAuthority` only when the
+admission the operation needs is complete, which for an update, a delete, an
+upsert and a bulk write means after target admission. It binds the authority
+to one request, one operation and one `Database`.
+
+**Action needed** only for host code that calls the hidden, macro-internal
+pipeline functions directly, against their documentation. Their signatures
+changed, so that code no longer compiles:
+
+- `__admit_generated_write_request` takes a `GeneratedWriteKind` and the
+  scope template argument values. It no longer takes an authentication mode,
+  a scope closure or an assurance coordinate.
+- `GeneratedWriteEntity::new` is replaced by `GeneratedWriteEntity::of::<T>()`.
+- `__admit_entity` and `__admit_entity_bulk` take no entity, and
+  `__admit_entity_on` is removed.
+- `__lock_generated_write_target` and `__read_generated_write_target` are
+  replaced by methods of the admission.
+- `bulk_write_targets` takes the request with its authority instead of the
+  GraphQL context.
+
+A hook dispatch whose authority does not match its request, operation,
+entity or `Database` is now refused with an error. Before, it ran the hook
+without request authority. These functions are still not a supported API.
+Dispatch a hook from host code with `MutationContext::run_mutation_hook`.
+See
+[what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
+
 ## 0.233.0 to 0.234.0: internal date-time engine
 
 **No action.** Upgrade ORM and macros together. The internal engine uses

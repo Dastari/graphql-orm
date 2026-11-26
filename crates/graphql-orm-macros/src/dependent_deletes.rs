@@ -227,28 +227,6 @@ pub(crate) fn generate(
                     error("dependent_deletes requires delete and update mutation shapes")
                 }
             })?;
-        let operation_name = method
-            .attrs
-            .iter()
-            .filter(|a| a.path().is_ident("graphql"))
-            .filter_map(|a| {
-                a.parse_args_with(
-                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-                )
-                .ok()
-            })
-            .flatten()
-            .find_map(|meta| match meta {
-                syn::Meta::NameValue(value) if value.path.is_ident("name") => match value.value {
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(name),
-                        ..
-                    }) => Some(name),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .ok_or_else(|| error("missing generated mutation coordinate"))?;
         // Generated roots wrap their body in an outcome tracker; the seams
         // below work on the body itself.
         let mut body = outcome_body(&method.block)
@@ -258,7 +236,7 @@ pub(crate) fn generate(
         // Internal writes must classify their own generated operation instead.
         // The runtime's request admission enforces the assurance it is told
         // to: name this write's own operation instead of the resolved field.
-        struct ExplicitAssurance(syn::LitStr, bool);
+        struct ExplicitAssurance(bool);
         impl VisitMut for ExplicitAssurance {
             fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
                 if let syn::Expr::Path(path) = expr
@@ -270,21 +248,22 @@ pub(crate) fn generate(
                         "Resolver",
                     ])
                 {
-                    let coordinate = &self.0;
+                    // The runtime reads the operation's coordinate from
+                    // the entity's generated write configuration.
                     *expr = syn::parse_quote! {
-                        ::graphql_orm::graphql::orm::GeneratedWriteAssurance::Operation(#coordinate)
+                        ::graphql_orm::graphql::orm::GeneratedWriteAssurance::Operation
                     };
-                    self.1 = true;
+                    self.0 = true;
                     return;
                 }
                 syn::visit_mut::visit_expr_mut(self, expr);
             }
         }
-        let mut explicit_assurance = ExplicitAssurance(operation_name, false);
+        let mut explicit_assurance = ExplicitAssurance(false);
         explicit_assurance.visit_block_mut(&mut body);
         // A body without the request admission would keep the caller's
         // requirement: refuse to emit it.
-        if !explicit_assurance.1 {
+        if !explicit_assurance.0 {
             return Err(error("missing generated write admission"));
         }
         // Both paths share the same generated checks, transforms and hooks. Only
@@ -536,17 +515,20 @@ pub(crate) fn generate(
             // locks and re-admits every row it writes.
             struct UnlockedAdmission(bool);
             impl VisitMut for UnlockedAdmission {
-                fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
-                    if let syn::Expr::Path(path) = call.func.as_mut()
-                        && let Some(last) = path.path.segments.last_mut()
-                        && last.ident == "__lock_generated_write_target"
-                        && call.args.len() == 5
-                    {
-                        last.ident = format_ident!("__read_generated_write_target");
-                        call.args[2] = syn::parse_quote! { __gom_write.auth_context() };
+                fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
+                    if call.method == "__lock_target" && call.args.len() == 3 {
+                        call.method = format_ident!("__read_target");
+                        // `(ctx, &mut hook_ctx, query)` becomes `(ctx, query)`.
+                        call.args = call
+                            .args
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| *index != 1)
+                            .map(|(_, argument)| argument.clone())
+                            .collect();
                         self.0 = true;
                     }
-                    syn::visit_mut::visit_expr_call_mut(self, call);
+                    syn::visit_mut::visit_expr_method_call_mut(self, call);
                 }
             }
             let mut unlocked = UnlockedAdmission(false);
