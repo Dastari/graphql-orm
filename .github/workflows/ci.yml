@@ -79,6 +79,8 @@ jobs:
         run: python3 scripts/check-documentation.py --base "${BASE_SHA}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
+      - name: Check dependency stacks
+        run: python3 scripts/check-dependency-stacks.py
       - name: Check Git-only release metadata
         run: |
           python3 scripts/check-release-state.py
