@@ -90,12 +90,24 @@ subscription fingerprints. This completes the #551 broker scope.
 6. **Rollback.** Earlier builds cannot read a `formatVersion` 2 wait request
    and fail closed on it. Drain or cancel brokered waits before rolling back.
 7. **Model-facing: unreachable loaded references are `selection_stale`.**
-   Broker session clones share loaded state. Execute through a session that
-   does not reach the loaded capability's family (a subscription or mutation
-   it does not broker, or a static tool not in its list) now returns
-   `selection_stale`, exactly as for an unknown reference, instead of
-   `Forbidden`, with or without a continuation. Tests that expected
-   `Forbidden` for that case must expect `AI_CAPABILITY_SELECTION_STALE`.
+   Broker session clones share loaded state. Execute of a loaded reference
+   the session does not reach now returns `selection_stale`, exactly as for
+   an unknown reference, instead of `Forbidden`, with or without a
+   continuation. That covers:
+   - a subscription or mutation family it does not broker;
+   - a static tool not in its list;
+   - a generated mutation its bound rules do not admit at the reviewed
+     approval it was loaded with: no bound rules, rules that admit other
+     fingerprints, or rules revoked since describe;
+   - an entry the current index no longer lets it reach, for example a
+     mutation whose reviewed approval changed or an index that lost its
+     in-process proof.
+
+   The rule decision is made from the loaded binding before any index
+   lookup, so it does not depend on catalogue state. Host capability policy
+   denial and identity substitution are still `Forbidden`. Tests that
+   expected `Forbidden` for the cases above must expect
+   `AI_CAPABILITY_SELECTION_STALE`.
 
 No schema module change, no GraphQL SDL change and no data migration.
 Restore and recovery are unchanged: a portable-restored wait is still

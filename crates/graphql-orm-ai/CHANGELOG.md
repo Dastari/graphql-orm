@@ -61,10 +61,15 @@ supersedes: []
   that refusal at resumption as `capability_stale`, not as a generic
   checkpoint-adoption code, so alerts keyed on it fire.
 - **Breaking (#551).** Broker execute of a loaded reference the session does
-  not reach (a subscription or mutation it does not broker, or a static tool
-  outside its list, loaded through another clone sharing its state) returns
-  `selection_stale`, the same as an unknown reference, instead of
-  `Forbidden`, so a clone cannot tell that another clone loaded it.
+  not reach returns `selection_stale`, the same as an unknown reference,
+  instead of `Forbidden`, with or without a continuation. That covers a
+  subscription or mutation family it does not broker, a static tool outside
+  its list, a generated mutation its bound rules do not admit (decided from
+  the loaded binding's reviewed approval before any index lookup), and an
+  entry the current index no longer lets it reach. A clone sharing loaded
+  state, or a run whose rules refuse the mutation, therefore cannot tell a
+  hidden capability from an unknown one. Host policy denial and
+  substitution stay `Forbidden`.
 - **Fixed (#551).** The wait service checked hierarchical rules against the
   per-plan compiled descriptor fingerprint instead of the subscription's
   capability fingerprint, so a rule allowlist could never admit a direct

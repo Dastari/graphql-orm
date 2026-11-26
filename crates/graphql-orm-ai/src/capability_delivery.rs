@@ -1130,6 +1130,10 @@ pub struct AiLoadedCapabilityBinding {
     capability_id: AiToolId,
     capability_kind: AiCapabilityKind,
     capability_fingerprint: String,
+    /// The entry's reviewed approval rule at load. A session decides from it
+    /// whether its bound rules reach a loaded generated mutation before any
+    /// other check, so a refused mutation is an unknown reference to it.
+    approval: AiApprovalRule,
     entry_fingerprint: String,
     index_set_fingerprint: String,
     index_fingerprint: String,
@@ -1708,6 +1712,7 @@ impl AiCapabilityDiscoveryBroker {
             capability_id: entry.id.clone(),
             capability_kind: entry.kind,
             capability_fingerprint: entry.capability_fingerprint.clone(),
+            approval: entry.approval,
             entry_fingerprint: entry.fingerprint.clone(),
             index_set_fingerprint: indexes.fingerprint().to_owned(),
             index_fingerprint: index.fingerprint().to_owned(),
@@ -1879,8 +1884,14 @@ impl AiCapabilityDiscoveryBroker {
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
             .ok_or_else(stale_capability)?;
-        if entry.kind != loaded.capability_kind || !session.brokers_entry(index, entry) {
+        if entry.kind != loaded.capability_kind {
             return Err(AiError::Forbidden);
+        }
+        // An entry this session no longer reaches (its bound rules refuse a
+        // mutation, or the index lost its in-process proof) is the same
+        // stale selection as an unknown reference.
+        if !session.brokers_entry(index, entry) {
+            return Err(stale_selection());
         }
         let mut current = self
             .load_entry(&principal, run, &indexes, index, entry)
@@ -2524,19 +2535,25 @@ impl AiCapabilityBrokerSession {
             .is_some_and(|loaded| loaded.capability_kind == AiCapabilityKind::GeneratedMutation)
     }
 
-    /// Whether this session's own configuration reaches a loaded binding's
-    /// capability family: a generated read, a brokered static tool of this
-    /// exact fingerprint, or a mutation or subscription when the session
-    /// brokers that family. Rules and policy are applied later; this only
-    /// keeps a binding loaded through another clone indistinguishable from
-    /// an unknown reference.
+    /// Whether this session's own configuration reaches a loaded binding: a
+    /// generated read, a brokered static tool of this exact fingerprint, a
+    /// mutation its bound rules admit at the reviewed approval it was loaded
+    /// with, or a subscription when the session brokers subscriptions.
+    ///
+    /// It is decided from the binding and the session alone, before any
+    /// index lookup or continuation, so a binding loaded through another
+    /// clone sharing this state, or one this session's rules refuse, is
+    /// indistinguishable from an unknown reference. Current index, policy
+    /// and rules are applied again afterwards.
     fn reaches_loaded_kind(&self, loaded: &AiLoadedCapabilityBinding) -> bool {
         match loaded.capability_kind {
             AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery => true,
             AiCapabilityKind::ReviewedStatic => self
                 .brokered_static_tools
                 .contains(&loaded.capability_fingerprint),
-            AiCapabilityKind::GeneratedMutation => self.brokered_mutations,
+            AiCapabilityKind::GeneratedMutation => {
+                self.brokers_mutation(&loaded.capability_fingerprint, loaded.approval)
+            }
             AiCapabilityKind::GeneratedSubscription => self.brokered_subscriptions,
         }
     }
@@ -8596,26 +8613,69 @@ mod tests {
             mutation_rules: Some(Arc::new(mutation_rules(Some(BTreeSet::new())))),
             brokered_subscriptions: false,
         };
-        assert!(matches!(
-            broker
-                .authorize_broker_execution(&principal_reference, &run, &revoked_rules, &execute)
-                .await,
-            Err(AiError::Forbidden)
-        ));
         // An unbound clone sharing this run's broker state still describes
-        // no mutation, and executes none of its loaded references.
+        // no mutation.
         assert!(matches!(
             broker
                 .dispatch_describe(&principal_reference, &run, &opted, &describe)
                 .await,
             Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
         ));
-        assert!(matches!(
-            broker
-                .authorize_broker_execution(&principal_reference, &run, &opted, &execute)
-                .await,
-            Err(AiError::Forbidden)
-        ));
+        // A session whose rules do not admit the loaded mutation (revoked
+        // rules, rules admitting only other fingerprints, no bound rules, or
+        // no mutation brokering at all) answers exactly as for an unknown
+        // reference, with or without a continuation.
+        let unknown = "f".repeat(64);
+        assert_ne!(unknown, loaded_reference);
+        let calls = |reference: &str| {
+            [
+                json!({
+                    "loadedReference": reference,
+                    "arguments": [{"name": "recordId", "value": "record-7"}],
+                    "selections": ["recordId", "subject"]
+                }),
+                json!({"loadedReference": reference, "continuation": "a".repeat(64)}),
+            ]
+        };
+        // Every refusing session below shares this run's loaded state, so
+        // each holds the reference.
+        let narrow_shared = AiCapabilityBrokerSession {
+            mutation_rules: Some(Arc::new(mutation_rules(Some(BTreeSet::from([
+                fixed_broker_definitions()[0].fingerprint.clone(),
+            ]))))),
+            ..session.clone()
+        };
+        let default_shared = AiCapabilityBrokerSession {
+            brokered_mutations: false,
+            mutation_rules: None,
+            ..session.clone()
+        };
+        assert!(Arc::ptr_eq(&opted.inner, &session.inner));
+        for (label, refusing) in [
+            ("revoked rules", &revoked_rules),
+            ("narrow rules", &narrow_shared),
+            ("unbound rules", &opted),
+            ("default session", &default_shared),
+        ] {
+            assert!(refusing.loaded(&loaded_reference).is_some(), "{label}");
+            for (held, unknown_call) in calls(&loaded_reference).into_iter().zip(calls(&unknown)) {
+                let held = broker
+                    .authorize_broker_execution(&principal_reference, &run, refusing, &held)
+                    .await;
+                let unknown = broker
+                    .authorize_broker_execution(&principal_reference, &run, refusing, &unknown_call)
+                    .await;
+                assert!(
+                    matches!(&held, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+                    "{label}: {held:?}"
+                );
+                assert_eq!(
+                    format!("{:?}", held.err()),
+                    format!("{:?}", unknown.err()),
+                    "{label}"
+                );
+            }
+        }
         // Host policy revoked between describe and execute refuses.
         authority.allowed.store(false, Ordering::SeqCst);
         assert!(matches!(
@@ -9010,12 +9070,24 @@ mod tests {
             .await
             .expect("discovery using serialized metadata");
         assert!(discovery["candidates"].as_array().unwrap().is_empty());
+        // A held reference the session no longer reaches there is exactly an
+        // unknown reference.
+        let held = broker
+            .authorize_broker_execution(&principal_reference, &run, &session, &execute)
+            .await;
+        let unknown = broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &json!({"loadedReference": "f".repeat(64), "selections": ["id"], "observation": observation}),
+            )
+            .await;
         assert!(
-            broker
-                .authorize_broker_execution(&principal_reference, &run, &session, &execute)
-                .await
-                .is_err()
+            matches!(&held, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+            "{held:?}"
         );
+        assert_eq!(format!("{:?}", held.err()), format!("{:?}", unknown.err()));
     }
 
     #[test]
