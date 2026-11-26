@@ -14,6 +14,28 @@ supersedes: []
 
 Upgrade ORM and macros together to the next breaking ORM/macros release.
 
+### Validate default sorts against persisted columns (#542)
+
+**Action needed.** Review each entity's `default_sort`. Use a comma-separated
+list of persisted physical column names, each with optional `ASC` or `DESC`.
+A column may be qualified with the entity's own table. Delimit names that
+contain punctuation or whitespace using the database's identifier syntax.
+
+Expressions such as `(SELECT …) ASC`, `pk + 0 DESC` and `column DESC NULLS LAST`
+no longer compile. Sort by `pk DESC` directly for the arithmetic example.
+Move derived values or null ranks into declared database columns and order
+by those columns, or use an explicit backend-specific query for ordering
+that needs SQL expressions.
+
+The rendered sort contributes to the client interpretation fingerprint.
+Fingerprints change for entities whose sort SQL changes. Regenerate affected
+catalogues and refresh pinned fingerprints before deploying.
+
+Handwritten `DatabaseEntity` implementations that use runtime schema
+conversion must supply `DEFAULT_SORT_TERMS` for a nonempty `DEFAULT_SORT`.
+When constructing `EntityMetadata` directly, set `default_sort_terms` to the
+corresponding column declarations and directions.
+
 ### 1. Match transaction modes with a wildcard (#833)
 
 **Action needed.** Add a wildcard arm to exhaustive matches on

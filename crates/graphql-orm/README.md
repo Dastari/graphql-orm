@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Runtime schema conversion uses structured default order terms emitted by the
+entity derives.
+See the [migration guide](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+
 SQL Server index introspection and migration plans distinguish covering
 indexes from their plain-key equivalents.
 See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).

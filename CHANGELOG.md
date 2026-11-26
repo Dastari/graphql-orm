@@ -14,7 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.231.0 (breaking release)
+## Unreleased - ORM/macros 0.235.0 (breaking release)
+
+- **Breaking (#542):** Entity derives validate `default_sort` against persisted
+  columns and render identifiers for the selected backend. Runtime schema
+  conversion uses structured sort terms. Changes to rendered sort SQL change
+  client interpretation fingerprints.
+  See the [migration guide](MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
 
 - **Breaking (#905):** Generated relation search documents reject statically
   unreadable target fields unless the target field opts in with

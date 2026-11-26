@@ -1242,6 +1242,10 @@ fn legacy_identifier_shapes_fail_validation_not_silently_convert() {
     entity.primary_keys = Box::new(["JobId"]);
     entity.primary_key = "JobId";
     entity.default_sort = "JobId ASC";
+    entity.default_sort_terms = &[graphql_orm::graphql::orm::DefaultSortTerm {
+        column: "JobId",
+        descending: false,
+    }];
 
     let schema = RuntimeSchema::from_static_entities(&[&entity]).expect("conversion itself works");
     let codes: Vec<_> = schema

@@ -50,7 +50,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `description` | nonempty string | at most 1,024 bytes; no control characters |
 | `classification` | `"public"`, `"internal"`, `"confidential"`, `"restricted"`, or `"secret"` | `"internal"`; inherited by ordinary public fields |
 | `backend` | `"sqlite"`, `"postgres"`, or `"mssql"` | inferred only when exactly one backend feature is enabled |
-| `default_sort` | trusted backend SQL `ORDER BY` text | every primary-key column in declaration order (physical `db_column` names); `id` when keyed by `id` |
+| `default_sort` | comma-separated persisted physical columns with optional `ASC` or `DESC` per column | every primary-key column in declaration order (physical `db_column` names); `id` when keyed by `id` |
 | `schema_policy` | `"managed"`, `"external_read_only"`, `"external_writable"`, `"validate_only"`, or `"plan_only"` | no declared policy |
 | `auth` | `"required"`, `"optional"`, or `"none"` | schema-root mode, otherwise runtime compatibility default |
 | `schema_only`, `append_only`, `repository_mutations`, `aggregate`, `backup` | boolean | `false`, except `backup` has no explicit declaration; `aggregate = true` opts into a bounded generated GraphQL aggregate root |
@@ -298,7 +298,7 @@ fn duration_order_parameters(
 }
 ```
 
-Expressions are backend-specific and trusted like `default_sort`; the public
+Expressions are backend-specific trusted SQL. The public
 input never accepts an expression, identifier, fragment, bind value, or other
 client-provided SQL. The macro rewrites only declared `:name` tokens outside
 SQL literals and identifiers, rejects raw backend placeholders, and fails the

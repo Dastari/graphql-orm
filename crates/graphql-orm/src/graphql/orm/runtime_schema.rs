@@ -3397,7 +3397,7 @@ impl RuntimeSchema {
                 composite_unique.push(fields);
             }
 
-            let default_order = match parse_default_sort(entity, &cid) {
+            let default_order = match static_default_order(entity, &cid) {
                 Ok(order) => order,
                 Err(diagnostic) => {
                     diagnostics.push(diagnostic);
@@ -3443,46 +3443,30 @@ impl RuntimeSchema {
     }
 }
 
-fn parse_default_sort(
+fn static_default_order(
     entity: &EntityMetadata,
     cid: &CollectionId,
 ) -> Result<Vec<RuntimeOrderTerm>, RuntimeSchemaDiagnostic> {
-    let raw = entity.default_sort.trim();
-    if raw.is_empty() {
-        return Ok(Vec::new());
+    if entity.default_sort_terms.is_empty() && !entity.default_sort.trim().is_empty() {
+        return Err(RuntimeSchemaDiagnostic::scoped(
+            RuntimeSchemaDiagnosticCode::InvalidDefaultOrder,
+            "default_sort requires structured column and direction metadata".to_string(),
+            cid,
+            None,
+        ));
     }
-    let mut terms = Vec::new();
-    for part in raw.split(',') {
-        let mut tokens = part.split_whitespace();
-        let column = tokens.next().unwrap_or_default();
-        let direction = match tokens.next() {
-            None => RuntimeOrderDirection::Asc,
-            Some(token) if token.eq_ignore_ascii_case("asc") => RuntimeOrderDirection::Asc,
-            Some(token) if token.eq_ignore_ascii_case("desc") => RuntimeOrderDirection::Desc,
-            Some(other) => {
-                return Err(RuntimeSchemaDiagnostic::scoped(
-                    RuntimeSchemaDiagnosticCode::InvalidDefaultOrder,
-                    format!("default_sort direction `{other}` is not ASC or DESC"),
-                    cid,
-                    Some(entity.default_sort),
-                ));
-            }
-        };
-        if column.is_empty() || tokens.next().is_some() {
-            return Err(RuntimeSchemaDiagnostic::scoped(
-                RuntimeSchemaDiagnosticCode::InvalidDefaultOrder,
-                format!(
-                    "default_sort `{}` is not `column [ASC|DESC]` terms",
-                    entity.default_sort
-                ),
-                cid,
-                Some(entity.default_sort),
-            ));
-        }
-        terms.push(RuntimeOrderTerm {
-            field: FieldId::new(format!("{}.{column}", entity.table_name))?,
-            direction,
-        });
-    }
-    Ok(terms)
+    entity
+        .default_sort_terms
+        .iter()
+        .map(|term| {
+            Ok(RuntimeOrderTerm {
+                field: FieldId::new(format!("{}.{}", entity.table_name, term.column))?,
+                direction: if term.descending {
+                    RuntimeOrderDirection::Desc
+                } else {
+                    RuntimeOrderDirection::Asc
+                },
+            })
+        })
+        .collect()
 }

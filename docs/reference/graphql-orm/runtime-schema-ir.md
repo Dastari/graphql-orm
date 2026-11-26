@@ -520,8 +520,10 @@ Conversion notes:
 - Single `uuid` primary keys are auto-marked `generated` by the derive; composite keys are not.
 - To-many relations require the explicit `multiple` relation flag; cardinality is not inferred
   from `Vec<T>`.
-- `default_sort` strings must be `column [ASC|DESC]` terms to convert; anything else is an
-  `InvalidDefaultOrder` diagnostic.
+- Entity derives supply structured columns and directions for the runtime default order.
+  Handwritten entities with a nonempty `DEFAULT_SORT` must supply matching
+  `DEFAULT_SORT_TERMS` for conversion. Missing terms produce an `InvalidDefaultOrder`
+  diagnostic.
 - Legacy identifier shapes (schema-qualified MSSQL tables like `dbo.Jobs`, PascalCase columns)
   convert into the IR but fail its portable-identifier validation. The IR targets managed
   lowercase schemas; external/legacy read-only schemas are out of its scope and are reported,

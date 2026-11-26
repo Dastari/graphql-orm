@@ -1,0 +1,41 @@
+error: default_sort expects comma-separated columns with optional ASC or DESC
+ --> tests/ui/default_sort_malformed.rs:4:75
+  |
+4 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id; DROP TABLE x")]
+  |                                                                           ^^^^^^^^^^^^^^^^^^
+
+error: default_sort expects comma-separated columns with optional ASC or DESC
+  --> tests/ui/default_sort_malformed.rs:11:75
+   |
+11 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id--")]
+   |                                                                           ^^^^^^
+
+error: default_sort expects comma-separated columns with optional ASC or DESC
+  --> tests/ui/default_sort_malformed.rs:18:75
+   |
+18 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id/**/ASC")]
+   |                                                                           ^^^^^^^^^^^
+
+error: default_sort expects comma-separated columns with optional ASC or DESC
+  --> tests/ui/default_sort_malformed.rs:25:75
+   |
+25 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "")]
+   |                                                                           ^^
+
+error: default_sort expects comma-separated columns with optional ASC or DESC
+  --> tests/ui/default_sort_malformed.rs:32:75
+   |
+32 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id,")]
+   |                                                                           ^^^^^
+
+error: default_sort column `other_table.id` is not a persisted column of this entity
+  --> tests/ui/default_sort_malformed.rs:39:75
+   |
+39 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "other_table.id")]
+   |                                                                           ^^^^^^^^^^^^^^^^
+
+error: default_sort expects comma-separated columns with optional ASC or DESC
+  --> tests/ui/default_sort_malformed.rs:46:75
+   |
+46 | #[repository_entity(backend = "sqlite", table = "records", default_sort = r#""a"""#)]
+   |                                                                           ^^^^^^^^^

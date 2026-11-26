@@ -12,6 +12,7 @@ mod composite_relations_ui;
 mod composite_write_unavailable_ui;
 mod conditional_index_ui;
 mod contract_removals_ui;
+mod default_sort_ui;
 mod dependent_delete_ui;
 mod empty_order_ui;
 mod federation_entity_keys_ui;

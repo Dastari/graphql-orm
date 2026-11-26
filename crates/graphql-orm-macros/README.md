@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Entity derives validate `default_sort` against persisted columns and render
+identifiers for the selected backend.
+See the [migration guide](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+
 Generated relation search documents reject statically unreadable target
 fields unless the target field explicitly opts in.
 See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).

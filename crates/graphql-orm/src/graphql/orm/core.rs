@@ -5846,6 +5846,8 @@ pub struct EntityMetadata {
     pub primary_keys: Box<[&'static str]>,
     pub schema_policy: Option<SchemaPolicy>,
     pub default_sort: &'static str,
+    /// Structured terms for runtime schema conversion.
+    pub default_sort_terms: &'static [super::DefaultSortTerm],
     pub backup_enabled: bool,
     pub backup_export_order: Option<i32>,
     pub backup_restore_order: Option<i32>,
@@ -5918,6 +5920,7 @@ impl EntityMetadata {
             primary_keys: T::PRIMARY_KEYS.to_vec().into_boxed_slice(),
             schema_policy: T::SCHEMA_POLICY,
             default_sort: T::DEFAULT_SORT,
+            default_sort_terms: T::DEFAULT_SORT_TERMS,
             backup_enabled,
             backup_export_order,
             backup_restore_order,

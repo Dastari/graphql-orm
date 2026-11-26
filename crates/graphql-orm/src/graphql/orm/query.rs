@@ -17,6 +17,15 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// One default order term for conversion of a static entity to a runtime schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DefaultSortTerm {
+    /// The column declaration as recorded in `FieldMetadata::name`.
+    pub column: &'static str,
+    /// Whether the values sort in descending order.
+    pub descending: bool,
+}
+
 pub trait DatabaseEntity {
     const TABLE_NAME: &'static str;
     const PLURAL_NAME: &'static str;
@@ -26,6 +35,9 @@ pub trait DatabaseEntity {
     const PRIMARY_KEYS: &'static [&'static str] = &[Self::PRIMARY_KEY];
     const SCHEMA_POLICY: Option<SchemaPolicy> = None;
     const DEFAULT_SORT: &'static str;
+    /// Structured counterparts of the SQL terms in `DEFAULT_SORT`.
+    /// Handwritten entities with a default order supply these for runtime conversion.
+    const DEFAULT_SORT_TERMS: &'static [DefaultSortTerm] = &[];
 
     /// Explicit SQL Server column types keyed by rendered column name.
     #[doc(hidden)]
