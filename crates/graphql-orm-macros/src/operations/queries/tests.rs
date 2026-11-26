@@ -67,23 +67,26 @@ fn assert_resolver(file: &syn::File, name: &str) {
 }
 
 fn assert_resolver_on(file: &syn::File, root: &str, name: &str) {
-    let resolver = file.items.iter().find_map(|item| {
-        let Item::Impl(item) = item else { return None };
-        let Type::Path(target) = item.self_ty.as_ref() else {
-            return None;
-        };
-        if !target.path.is_ident(root) {
-            return None;
-        }
-        item.items.iter().find_map(|item| match item {
-            ImplItem::Fn(method) if method.sig.ident == name => Some(method),
-            _ => None,
+    assert_qualified(resolver(file, root, name).to_token_stream());
+}
+
+fn resolver<'a>(file: &'a syn::File, root: &str, name: &str) -> &'a syn::ImplItemFn {
+    file.items
+        .iter()
+        .find_map(|item| {
+            let Item::Impl(item) = item else { return None };
+            let Type::Path(target) = item.self_ty.as_ref() else {
+                return None;
+            };
+            if !target.path.is_ident(root) {
+                return None;
+            }
+            item.items.iter().find_map(|item| match item {
+                ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            })
         })
-    });
-    let tokens = resolver
         .expect("generated query resolver")
-        .to_token_stream();
-    assert_qualified(tokens);
 }
 
 #[test]
@@ -97,6 +100,43 @@ fn list_resolver_uses_qualified_standard_library_names() {
 fn point_resolver_uses_qualified_standard_library_names() {
     for composite in [false, true] {
         assert_resolver(&generated(composite), "get_by_id");
+    }
+}
+
+#[test]
+fn generated_list_and_aggregate_delegate_execution_after_input_authorization() {
+    let cases = [
+        (
+            false,
+            "list",
+            "__gom_fetch_list",
+            "fetch_connection_selected_with_auth",
+        ),
+        (
+            true,
+            "list",
+            "__gom_fetch_list",
+            "fetch_connection_selected_with_auth",
+        ),
+        (
+            false,
+            "aggregate",
+            "__gom_fetch_aggregate",
+            "fetch_with_graphql_context",
+        ),
+    ];
+    for (composite, method, helper, expanded_execution) in cases {
+        let file = generated(composite);
+        let body = resolver(&file, "RecordQueries", method)
+            .block
+            .to_token_stream()
+            .to_string();
+        let authorization = body
+            .rfind("authorize_read_fields")
+            .expect("input authorization");
+        let execution = body.find(helper).expect("shared query execution");
+        assert!(authorization < execution);
+        assert!(!body.contains(expanded_execution));
     }
 }
 

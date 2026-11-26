@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.230.0 shares offset list and aggregate execution across generated
+resolvers.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
 Version 0.228.0 redacts validation messages for generated transient mutation
 arguments. [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 
