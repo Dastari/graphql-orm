@@ -1139,8 +1139,6 @@ struct AiLoadedCapabilityOperation {
     operation_name: String,
     capability_id: AiToolId,
     capability_fingerprint: String,
-    entry_fingerprint: String,
-    policy_fingerprint: String,
 }
 
 /// The exact executable root a broker call resolved from a loaded binding.
@@ -1663,8 +1661,6 @@ impl AiCapabilityDiscoveryBroker {
                         operation_name: member.operation_name.clone(),
                         capability_id: root.id.clone(),
                         capability_fingerprint: root.capability_fingerprint.clone(),
-                        entry_fingerprint: root.fingerprint.clone(),
-                        policy_fingerprint: member_decision.policy_fingerprint,
                     });
                 }
             }
