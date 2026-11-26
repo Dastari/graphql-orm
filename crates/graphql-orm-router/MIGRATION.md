@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.20.0 to 0.21.0: deterministic test waits
+
+**No action.** Only the crate's tests changed: they wait on explicit
+signals instead of fixed sleeps.
+
 ## 0.19.0 to 0.20.0
 
 **No action.** The existing downstream error response is unchanged by

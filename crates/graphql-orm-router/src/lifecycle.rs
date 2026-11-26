@@ -1324,13 +1324,18 @@ mod tests {
     use reqwest::redirect::Policy;
     use std::{
         io::{Read, Write},
-        net::{SocketAddr, TcpListener},
+        net::{SocketAddr, TcpListener, TcpStream},
         sync::{
             Mutex as StdMutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
         },
         thread::{self, JoinHandle},
     };
+
+    /// Upper bound for a wait on an observable condition. It only bounds a
+    /// hang; passing tests return as soon as the condition holds.
+    const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
     const PRODUCT: &str = r#"
         extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
@@ -1743,15 +1748,26 @@ mod tests {
         let lifecycle = lifecycle(&[config], 1).await;
         let handle = RouterHandle::new(lifecycle.clone());
 
-        endpoint.set_delay(Duration::from_millis(200));
+        // Cancel the refresh exactly while its SDL fetch is held in flight.
+        endpoint.hold_next_response();
         endpoint.set("type Query { one: String, cancelled: String }", "v2", 200);
-        let cancelled =
-            hive_router::tokio::time::timeout(Duration::from_millis(30), handle.refresh()).await;
-        assert!(cancelled.is_err());
+        let request_target = endpoint.requests() + 1;
+        match futures::future::select(
+            Box::pin(handle.refresh()),
+            Box::pin(endpoint.wait_for_requests(request_target)),
+        )
+        .await
+        {
+            futures::future::Either::Left(_) => panic!("the held refresh must not complete"),
+            futures::future::Either::Right(((), refresh)) => drop(refresh),
+        }
+        endpoint.release_held_response();
         assert_eq!(handle.status().await.active_graph().version(), 1);
-        hive_router::tokio::time::sleep(Duration::from_millis(220)).await;
 
         endpoint.set("type Query { one: String, two: String }", "v3", 200);
+        // Kept on purpose: the second refresh queues behind this one without a
+        // visible signal. Without serialisation it would publish v4 inside this
+        // window and the slower v3 answer would then overwrite it.
         endpoint.set_delay(Duration::from_millis(150));
         let request_target = endpoint.requests() + 1;
         let (tx, rx) = futures::channel::oneshot::channel();
@@ -1789,7 +1805,7 @@ mod tests {
             "reviews-v2",
             200,
         );
-        reviews.set_delay(Duration::from_millis(700));
+        reviews.hold_next_response();
         let request_target = reviews.requests() + 1;
         let (tx, rx) = futures::channel::oneshot::channel();
         let refreshing = handle.clone();
@@ -1799,18 +1815,20 @@ mod tests {
         });
         reviews.wait_for_requests(request_target).await;
 
-        let quick = Duration::from_millis(200);
-        hive_router::tokio::time::timeout(quick, handle.status())
+        // The SDL fetch is held until released below, so these bounds only
+        // turn a blocked call into a failure instead of a hang.
+        let bound = SETTLE_TIMEOUT;
+        hive_router::tokio::time::timeout(bound, handle.status())
             .await
             .expect("status must not wait for schema-refresh network I/O");
         hive_router::tokio::time::timeout(
-            quick,
+            bound,
             lifecycle.validate_execution_target("products", "http://products.test/graphql"),
         )
         .await
         .expect("subgraph execution must not wait for schema-refresh network I/O")
         .unwrap();
-        let removed = hive_router::tokio::time::timeout(quick, handle.remove_subgraph("reviews"))
+        let removed = hive_router::tokio::time::timeout(bound, handle.remove_subgraph("reviews"))
             .await
             .expect("removal must not wait for schema-refresh network I/O")
             .unwrap();
@@ -1818,6 +1836,7 @@ mod tests {
 
         // The in-flight round observed `reviews` before its removal and must
         // not resurrect it or publish over the removal.
+        reviews.release_held_response();
         assert_eq!(rx.await.unwrap().unwrap(), SchemaRefreshOutcome::Unchanged);
         let status = handle.status().await;
         assert_eq!(status.active_graph(), &removed);
@@ -1865,6 +1884,9 @@ mod tests {
         state: Arc<StdMutex<EndpointState>>,
         requests: Arc<AtomicUsize>,
         conditional_requests: Arc<AtomicUsize>,
+        /// Holds only the next request's response until released or dropped.
+        hold_next: Arc<StdMutex<Option<mpsc::Receiver<()>>>>,
+        release_held: StdMutex<Option<mpsc::Sender<()>>>,
         stopping: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
@@ -1880,7 +1902,6 @@ mod tests {
     impl MutableEndpoint {
         fn new(body: &str, etag: &str) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-            listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
             let state = Arc::new(StdMutex::new(EndpointState {
                 body: body.to_owned(),
@@ -1890,28 +1911,27 @@ mod tests {
             }));
             let requests = Arc::new(AtomicUsize::new(0));
             let conditional_requests = Arc::new(AtomicUsize::new(0));
+            let hold_next = Arc::new(StdMutex::new(None::<mpsc::Receiver<()>>));
             let stopping = Arc::new(AtomicBool::new(false));
             let thread_state = state.clone();
             let thread_requests = requests.clone();
             let thread_conditional = conditional_requests.clone();
+            let thread_hold = hold_next.clone();
             let thread_stopping = stopping.clone();
             let thread = thread::spawn(move || {
-                while !thread_stopping.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let state = thread_state.clone();
-                            let requests = thread_requests.clone();
-                            let conditional = thread_conditional.clone();
-                            thread::spawn(move || {
-                                // The client may leave before the fixture can write its response.
-                                let _ = serve_endpoint(stream, state, requests, conditional);
-                            });
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(_) => return,
+                // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+                while let Ok((stream, _)) = listener.accept() {
+                    if thread_stopping.load(Ordering::Acquire) {
+                        return;
                     }
+                    let state = thread_state.clone();
+                    let requests = thread_requests.clone();
+                    let conditional = thread_conditional.clone();
+                    let hold = thread_hold.clone();
+                    thread::spawn(move || {
+                        // The client may leave before the fixture can write its response.
+                        let _ = serve_endpoint(stream, state, requests, conditional, hold);
+                    });
                 }
             });
             Self {
@@ -1919,6 +1939,8 @@ mod tests {
                 state,
                 requests,
                 conditional_requests,
+                hold_next,
+                release_held: StdMutex::new(None),
                 stopping,
                 thread: Some(thread),
             }
@@ -1939,6 +1961,18 @@ mod tests {
             self.state.lock().unwrap().delay = delay;
         }
 
+        /// Holds the next request's response until [`Self::release_held_response`]
+        /// or until the endpoint drops.
+        fn hold_next_response(&self) {
+            let (release, hold) = mpsc::channel();
+            *self.hold_next.lock().unwrap() = Some(hold);
+            *self.release_held.lock().unwrap() = Some(release);
+        }
+
+        fn release_held_response(&self) {
+            drop(self.release_held.lock().unwrap().take());
+        }
+
         fn requests(&self) -> usize {
             self.requests.load(Ordering::Acquire)
         }
@@ -1948,9 +1982,12 @@ mod tests {
         }
 
         async fn wait_for_requests(&self, target: usize) {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
             while self.requests() < target {
-                assert!(std::time::Instant::now() < deadline);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for SDL request {target}"
+                );
                 hive_router::tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
@@ -1959,6 +1996,9 @@ mod tests {
     impl Drop for MutableEndpoint {
         fn drop(&mut self) {
             self.stopping.store(true, Ordering::Release);
+            self.release_held_response();
+            // Wake the blocking listener so it observes `stopping`.
+            let _ = TcpStream::connect(self.address);
             if let Some(thread) = self.thread.take() {
                 // Join the fixture worker during best-effort teardown.
                 let _ = thread.join();
@@ -1971,6 +2011,7 @@ mod tests {
         state: Arc<StdMutex<EndpointState>>,
         requests: Arc<AtomicUsize>,
         conditional_requests: Arc<AtomicUsize>,
+        hold_next: Arc<StdMutex<Option<mpsc::Receiver<()>>>>,
     ) -> std::io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut request = Vec::new();
@@ -1984,8 +2025,14 @@ mod tests {
         }
         let request = String::from_utf8_lossy(&request);
         let snapshot = state.lock().unwrap().clone();
+        let hold = hold_next.lock().unwrap().take();
         requests.fetch_add(1, Ordering::AcqRel);
+        if let Some(hold) = hold {
+            // Released explicitly, or by the endpoint dropping its sender.
+            let _ = hold.recv();
+        }
         if !snapshot.delay.is_zero() {
+            // A fixed slow response, for overlaps that have no visible signal.
             thread::sleep(snapshot.delay);
         }
         let conditional = request.lines().any(|line| {
