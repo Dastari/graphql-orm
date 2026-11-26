@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.226.0
+
+- **Added (#353).** Generated creates can opt into typed child lists on
+  collection relations. The ORM binds the relation keys, authorizes each row,
+  and commits the parent and up to 50 children in one transaction. When the
+  call includes children, a field-write denial on any row refuses the whole
+  create, even when the field policy allows legacy omission on a standalone
+  create.
+  [Migration](MIGRATION.md#02250-to-02260-generated-nested-create)
+
 ## Unreleased - ORM/macros 0.225.0
 
 - **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters

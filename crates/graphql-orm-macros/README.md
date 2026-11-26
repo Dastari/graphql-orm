@@ -1026,6 +1026,10 @@ decisions use backend write locks, predicate mutations materialize typed
 primary keys before exact-key DML, and absent-key upserts require the runtime's
 state-machine isolation mode. Consumers do not provide SQL or lock clauses.
 
+Collection relations can opt into
+[generated nested create](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows)
+with `nested_create` and a matching child `nested_create_keys` declaration.
+
 Generated to-many relation resolvers accept one nullable `OrderByInput`
 object, while generated root list resolvers retain their nullable list of
 non-null ordering objects. The macro derives relation resolver signatures and

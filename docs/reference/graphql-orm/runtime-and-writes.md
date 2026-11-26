@@ -143,11 +143,102 @@ helpers lock an existing authoritative preimage and keep their normal source sig
 
 ### Creating a parent with child rows
 
-No generated mutation creates a parent together with typed child rows
-([#353](https://github.com/Dastari/graphql-orm/issues/353) asks for one). Write a custom root
-field that opens `Database::transaction` and inserts every row with `tx.insert`. Entity write
-access, row and field policies, hooks and input transforms apply to each row, and an error from
-any insert rolls the whole call back: no row is kept and no `Changed` event is released.
+Use `nested_create` on an unconditional collection relation and opt the child
+entity in with `nested_create_keys`. For example, an `Order` can declare this
+relation to `Line`:
+
+```rust,ignore
+#[relation(
+    target = "Line",
+    from = ["id", "tenant"],
+    to = ["order_id", "tenant"],
+    multiple,
+    nested_create,
+    emit_fk = false
+)]
+lines: Vec<Line>,
+
+// On Line's entity declaration, alongside its table and other settings:
+#[graphql_entity(nested_create_keys = ["order_id", "tenant"])]
+```
+
+The generated `createOrder` takes `CreateOrderWithChildrenInput!`. It contains
+the ordinary parent fields and an optional `lines: [NestedCreateLineInput!]`.
+The child input excludes all bound columns. The standalone `createLine` keeps
+its ordinary input. When the relation target is imported from another module,
+include its generated nested input type in the import. Under default naming,
+a call looks like this:
+
+```graphql
+mutation {
+  createOrder(input: {
+    id: "order-1"
+    tenant: "west"
+    lines: [{ id: "line-1" }, { id: "line-2" }]
+  }) {
+    success
+  }
+}
+```
+
+Bind the parent's primary key and every stored tenant or owner field needed to
+keep children in the parent's scope. `from` uses the parent's Rust field names.
+`to` uses the child's physical column names in the same order.
+`nested_create_keys` uses the child's corresponding Rust field names.
+Declared INSERT RLS tenant and owner columns must participate, and where both
+entities declare a tenant or owner column the bindings must pair them.
+The ORM checks that input transforms and database writes preserve these
+bindings. The normal row policies still evaluate every written row.
+
+There is a total limit of 50 child rows across the lists in a single create.
+Omitted, null and empty lists produce no child writes. Invalid typed input,
+a count over the limit, and repeated typed child primary keys for the same
+table fail before any row is written. The database also enforces its own
+constraints and collation rules inside the transaction.
+
+The ORM prepares the parent and then each child in relation declaration order
+and list order. Each row goes through its own generated create authentication,
+scopes, assurance coordinate, entity and field authorization and input
+transforms. Child policies and hooks see the child's create coordinate and
+its inputs, with the bound relation values supplied by the server and the
+original request principal and data. When the host enables
+`propagate_request_authority_to_hooks`, the parent and child hooks can present
+that request to entity and row policies for their own transaction operations.
+A field write denial refuses a call with children even if the host permits
+legacy omission on a standalone create. The write transaction
+runs each row's Before hook, inserts the row, checks the stored image and its
+row policy, runs the After hook and queues its Changed events with ordinary
+propagation. The parent row goes first, followed by the children in preparation
+order. A failure before commit rolls back the writes and drops the queued
+events and deferred actions without advancing Changed replay. On success,
+the transaction releases Changed
+events in queue order, then executes deferred actions in registration order.
+Use transactional writes or `MutationContext::defer` for hook side effects.
+Input transforms run during preparation and should only prepare or validate input.
+
+The catalogue and the parent mutation's `@requiresScopes` and
+`@authenticated` directives describe the parent only, so router prechecks and
+host extensions that filter by root field can see weaker requirements than
+the ORM enforces for the children at runtime. An opted-in parent can create a
+child whose own create root is excluded from the schema.
+
+Nested create requires writable, single-primary-key GraphQL entities with
+generated create enabled. Bound fields are non-nullable writable relation
+keys. Child bindings must be ordinary public create fields other than the
+primary key, and the typed child input needs at least one remaining public
+field. Append-only and dependent-delete entities are rejected. Parent upsert
+and AI create policies are incompatible with the expanded input.
+Principal-bound upsert keys are incompatible with either nested-create
+declaration. Participants
+use transactional mutation hooks and deferred actions in place of
+`notify_with`. External SQL Server tables require the usual
+`external_writable` policy. The parent and child must use the same database
+backend. A mixed-backend declaration can report a Rust type mismatch on the
+generated database or mutation context argument. Nesting creates one level of
+children.
+
+A custom root remains available for other transaction shapes. It can open
+`Database::transaction` and insert rows with `tx.insert`:
 
 ```rust,ignore
 #[Object]

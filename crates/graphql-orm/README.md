@@ -1158,6 +1158,8 @@ README remains project-neutral.
 - **Generated operations:** `GraphQLOperations` emits potential root fields;
   `schema_roots!` chooses which generated mutations are exposed and creates the
   schema builders plus discovery catalog.
+- **Nested create:** opt a collection relation and its child entity into
+  [atomic typed child creation](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
 - **Authorization:** generated resolver authentication is `required`,
   `optional`, or `none`; row, field, repository, and database policy remain
   separate authoritative checks.

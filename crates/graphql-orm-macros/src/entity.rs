@@ -29,6 +29,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) repository_mutations: bool,
     pub(crate) aggregate: bool,
     pub(crate) dependent_deletes: bool,
+    pub(crate) nested_create_keys: Option<(Vec<String>, proc_macro2::Span)>,
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
@@ -338,6 +339,15 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("nested_create_keys") {
+                    if attribute_name != "graphql_entity" || metadata.nested_create_keys.is_some() {
+                        return Err(meta.error("nested_create_keys requires a single declaration on a GraphQL entity"));
+                    }
+                    let names = parse_relation_columns(meta.value()?)?;
+                    if names.is_empty() || names.iter().enumerate().any(|(index, name)| names[..index].contains(name)) {
+                        return Err(meta.error("nested_create_keys requires distinct field names"));
+                    }
+                    metadata.nested_create_keys = Some((names, meta.path.span()));
                 } else if meta.path.is_ident("dependent_deletes") {
                     metadata.dependent_deletes = true;
                 } else if meta.path.is_ident("mutation_error_codes") {
@@ -2408,6 +2418,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from_fields: Option<Vec<String>>,
     pub(crate) relation_to_fields: Option<Vec<String>>,
     pub(crate) relation_multiple: bool,
+    pub(crate) relation_nested_create: bool,
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
@@ -2605,6 +2616,7 @@ impl Default for FieldMetadata {
             relation_from_fields: None,
             relation_to_fields: None,
             relation_multiple: false,
+            relation_nested_create: false,
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
@@ -3621,6 +3633,11 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                     )
                                 })?,
                             });
+                        } else if nested.path.is_ident("nested_create") {
+                            if meta.relation_nested_create {
+                                return Err(nested.error("duplicate nested_create option"));
+                            }
+                            meta.relation_nested_create = true;
                         } else if nested.path.is_ident("server_only_key") {
                             let span = nested.path.span();
                             let mut from = None;

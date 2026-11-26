@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.225.0 to 0.226.0: Generated nested create
+
+**No action** unless opting in (#353). Add `nested_create` to the parent
+collection relation and declare the child's `nested_create_keys`. For an
+opted-in parent, regenerate the SDL and catalogues and update clients using
+GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
+The standalone child create keeps its shape. See
+[creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
+
 ## 0.224.0 to 0.225.0: Opaque partial-index predicates
 
 **Action needed.** Review schema validation and migration plans before applying

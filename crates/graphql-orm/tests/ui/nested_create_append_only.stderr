@@ -1,0 +1,5 @@
+error: nested_create requires ordinary writable entities and is incompatible with schema_only, append_only and dependent_deletes
+ --> tests/ui/nested_create_append_only.rs:8:5
+  |
+8 |     id: String,
+  |     ^^
