@@ -1,3 +1,5 @@
+//! Round trips and failure handling for compressed backup payloads.
+
 use bytes::Bytes;
 use graphql_orm_backup::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupRepository, BackupSnapshotManifest,

@@ -139,6 +139,9 @@ Version 0.7.5 retains the SMB 0.10.2 dependency family with a narrow,
 owner-local directory-stream backport. See the [native SMB reference](docs/native-smb.md#client-selection)
 and [migration guide](MIGRATION.md) before updating a consuming lockfile.
 
+The library forbids unsafe Rust except for the Windows local provider’s
+atomic no-replace rename.
+
 ## Install
 
 Find the package manifest in the

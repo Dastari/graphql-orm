@@ -15,6 +15,9 @@ supersedes: []
 - Explain why the stream returned by `StorageByteStream::into_inner` must be
   used. The message preserves the discarded-stream warning and satisfies Rust
   1.99 Clippy.
+- Forbid unsafe Rust in library builds except with the Windows local provider,
+  where the existing atomic no-replace rename is the only permitted unsafe
+  operation. The library continues to check public API documentation.
 
 ## Unreleased - 0.19.0
 

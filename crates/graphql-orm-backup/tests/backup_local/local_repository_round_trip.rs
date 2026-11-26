@@ -1,3 +1,5 @@
+//! Local repository blob operations and persistence across handles.
+
 // `LocalBackupRepository::new` does not exist on Windows; see
 // `new_trusted_windows_root`.
 #![cfg(not(windows))]

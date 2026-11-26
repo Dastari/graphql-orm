@@ -434,7 +434,7 @@ fn composed_cases() -> Vec<(String, Target)> {
                 let sibling = Box::new(Closure(
                     if inner == Any { All } else { Any },
                     Keys::FanOut,
-                    Box::new(Below(6)),
+                    Box::new(Below(5)),
                     2,
                 ));
                 for (name, target) in [

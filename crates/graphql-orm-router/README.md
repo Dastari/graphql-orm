@@ -206,6 +206,9 @@ WebSocket message budget are refused over WebSocket only. See
 [persisted documents](docs/configuration.md#persisted-documents) for wire forms, manifest bounds, Unix temporary-filesystem permissions, and restart
 requirements.
 
+The router library forbids unsafe Rust and checks documentation for its
+public API.
+
 ## Install
 
 Find the package manifest in the

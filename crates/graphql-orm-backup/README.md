@@ -125,6 +125,9 @@ crate does not define application authorization, scheduling, object metadata,
 cloud credentials, application transactions, or a claim that a restore is safe
 for an unverified target.
 
+Workspace lints forbid unsafe Rust in this crate and check documentation
+for its public API.
+
 ## Install
 
 Find the package manifest in the

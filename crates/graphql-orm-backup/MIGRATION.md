@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.32.0 to 0.33.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
 ## 0.31.0 to 0.32.0: integration test binaries
 
 **No action.** The integration test binaries are grouped by lane.

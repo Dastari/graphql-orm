@@ -1,3 +1,5 @@
+//! Full-snapshot creation, including table payloads and referenced objects.
+
 use std::{
     collections::HashMap,
     sync::{

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.22.0
+
+- Check public API documentation in the library and retain its unsafe Rust
+  prohibition. Package-wide lint inheritance is deferred while the outbound
+  proxy integration test sets process environment variables.
+
 ## Unreleased - 0.21.0
 
 - **Test reliability (#545).** Router tests wait on explicit signals instead
