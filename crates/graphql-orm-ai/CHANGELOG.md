@@ -3,12 +3,68 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-21
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.170.0 (breaking release)
+
+- **Breaking (#551).** Generated subscriptions can join the fixed capability
+  broker as durable waits. This completes the #551 broker scope: generated
+  queries, reviewed static reads, generated mutations and generated
+  subscriptions are all reachable through the five fixed broker
+  definitions. A session opts in with
+  `AiCapabilityBrokerSession::with_brokered_subscriptions`. Without it, nothing
+  changes: no subscription is discovered, browsed, described or executed.
+  With it, a subscription of an index compiled in process from a typed
+  subscription catalogue (which refuses `@transientInput` roots) is
+  discoverable (`kind: "generated_subscription"`), browsable and describable
+  (`effect: "wait"`, a compact signature and an `observation` summary of its
+  bounds and completion conditions). Execute takes a new `observation`
+  argument (`timeoutSeconds`, `maximumEvents`, optional `condition`) and
+  only resolves the subscription
+  (`AiCapabilityExecution::is_subscription_wait`); it is never continued.
+  The host routes such a call (`AiCapabilityBrokerSession::holds_loaded_subscription`)
+  to `OrmAiSubscriptionWaitService::register_wait` with the delivery attached
+  (`AiSubscriptionWaitRegistrationContext::with_capability_delivery`). Both
+  coordinators' read paths refuse it with the fixed correction
+  `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`, so nothing waits or runs there.
+  Registration classifies the **resolved** subscription by its own
+  capability fingerprint and also requires the rules to admit the broker
+  execute definition the provider called. The wait's tool-call row reuses
+  the AI schema module 0.86.0 dual identity: `tool_id` and
+  `tool_fingerprint` are the subscription, `provider_tool_id` and
+  `provider_tool_fingerprint` the broker execute definition, and the
+  protected arguments are the `graphql-orm-ai/brokered-call/v1` evidence
+  envelope. The protected wait request records the resolved call
+  (`formatVersion` 2). Results and wait completions answer the provider's
+  original broker call ID and tool ID. Per-turn, per-run and rule-usage
+  limits are those of a direct wait. No schema module change. The discover
+  and execute broker definitions change in the same release as broker
+  version 3. [Migration](MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
+- **Breaking (#551).** Every claim, delivery and resumption of a durable wait,
+  direct or brokered, re-proves that its subscription capability is still
+  registered with the exact fingerprint it was registered against. A removed
+  or replaced subscription closes the wait as `capability_stale` (run
+  `Failed`, tool call and step `capability_stale`) before anything is
+  observed or delivered, instead of `subscription_authority_revoked`, and
+  resumption refuses it with `AI_CAPABILITY_STALE`.
+- **Fixed (#551).** The wait service checked hierarchical rules against the
+  per-plan compiled descriptor fingerprint instead of the subscription's
+  capability fingerprint, so a rule allowlist could never admit a direct
+  subscription (it failed closed). Rules now admit a subscription by its
+  capability fingerprint, the fingerprint of its offered definition, for
+  direct and brokered waits alike.
+- New API: `AiCapabilityBrokerSession::with_brokered_subscriptions`,
+  `brokers_subscriptions` and `holds_loaded_subscription`,
+  `AiCapabilityExecution::is_subscription_wait`,
+  `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`,
+  `AiSubscriptionWaitRegistrationContext::with_capability_delivery`,
+  `AiToolCatalog::subscription_capability` and
+  `subscription_capability_signature`.
 
 ## Unreleased - 0.169.0 (breaking release)
 

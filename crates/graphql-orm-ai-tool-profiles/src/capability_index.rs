@@ -349,6 +349,9 @@ pub struct AiCapabilityIndex {
     /// An in-process mutation catalogue checked against its finished SDL.
     #[serde(skip)]
     compiled_mutations: bool,
+    /// An in-process subscription catalogue checked against its finished SDL.
+    #[serde(skip)]
+    compiled_subscriptions: bool,
 }
 
 impl AiCapabilityIndex {
@@ -555,6 +558,7 @@ impl AiCapabilityIndex {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: mutation_catalogue.is_some(),
+            compiled_subscriptions: subscription_catalogue.is_some(),
         };
         let member_ids = index
             .entries
@@ -684,6 +688,18 @@ impl AiCapabilityIndex {
     /// proof does not survive serialization and grants no execution authority.
     pub const fn mutations_checked_against_finished_schema(&self) -> bool {
         self.compiled_mutations
+    }
+
+    /// Whether this index was built in process from a typed subscription
+    /// catalogue.
+    ///
+    /// The subscription compiler checks the finished SDL and refuses any
+    /// replayable subscription root with an argument marked
+    /// `@transientInput`, as the mutation compiler does for classified
+    /// mutations. This proof does not survive serialization and grants no
+    /// execution authority.
+    pub const fn subscriptions_checked_against_finished_schema(&self) -> bool {
+        self.compiled_subscriptions
     }
 
     /// Canonical index fingerprint.
@@ -2876,6 +2892,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
         }
     }
 
@@ -3044,6 +3061,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3091,6 +3109,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3744,6 +3763,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
             ..roots
         }
     }
@@ -4059,6 +4079,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
             ..roots
         }
     }
@@ -4212,6 +4233,7 @@ mod tests {
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
             compiled_mutations: false,
+            compiled_subscriptions: false,
             ..index.clone()
         };
         for text in [

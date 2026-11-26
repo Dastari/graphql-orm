@@ -3453,6 +3453,16 @@ impl AiProviderCallResult {
         self
     }
 
+    /// Replaces the tool definitions the test provider turn was offered.
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn test_with_offered_tools(
+        mut self,
+        tools: Vec<crate::ModelToolDefinition>,
+    ) -> Self {
+        self.request_snapshot.tools = tools;
+        self
+    }
+
     #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_with_budget_reservation(
         mut self,

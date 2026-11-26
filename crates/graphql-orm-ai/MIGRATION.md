@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-21
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -11,6 +11,68 @@ supersedes: []
 # Migration Guide
 
 ## Breaking release (unreleased)
+
+### Generated subscriptions through the capability broker (#551)
+
+**Action needed** for fixed-broker hosts, and for hosts whose rules list
+subscription fingerprints. This completes the #551 broker scope.
+
+1. **Rebind (same release as broker version 3).** The discover definition's
+   `kind` enum adds `generated_subscription`, and the discover and execute
+   definitions change (execute gains an optional `observation` argument), so
+   those fingerprints change again in this release. Admit the current five
+   broker fingerprints wherever you list them by value.
+2. **Rule allowlists admit subscriptions by capability fingerprint.** The
+   wait service used to check `allowed_tool_fingerprints` against the
+   per-plan compiled descriptor fingerprint, so no allowlist could admit a
+   direct subscription. It now uses the subscription's capability
+   fingerprint (the fingerprint of its offered definition). Rules without an
+   allowlist are unaffected. If you list subscriptions, list their
+   capability fingerprints.
+3. **Stale subscriptions close as `capability_stale`.** A durable wait whose
+   subscription capability was removed, or replaced with a different
+   fingerprint, now closes as `capability_stale` (run `Failed`) at its next
+   claim or delivery, instead of `subscription_authority_revoked`, and its
+   resumption is refused with `AI_CAPABILITY_STALE`. Update alerting or
+   reporting that matches the old code for that case.
+4. **Opt in (optional).** Call
+   `AiCapabilityBrokerSession::with_brokered_subscriptions` only on sessions
+   whose host loop routes a brokered subscription to the wait service. Build
+   the broker's index in process from the subscription catalogue compiled
+   against the finished SDL; that compiler refuses `@transientInput` roots
+   and a deserialized index offers no subscription. Then, for a provider
+   turn whose one call is `graphql.capabilities.execute` and
+   `delivery.session().holds_loaded_subscription(call.arguments())`:
+
+   ```rust,ignore
+   let context = AiSubscriptionWaitRegistrationContext::new(/* as for a direct wait */)?
+       .with_capability_delivery(delivery.clone());
+   waits.register_wait(&lease, &provider_result, context).await?;
+   ```
+
+   Do not dispatch that call through the coordinator or
+   `execute_capability_broker_call`: their read path refuses it with the
+   fixed correction `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`, and nothing waits.
+   Registration resolves the call through the exact offered broker
+   definition, loaded binding, current index and host capability policy,
+   then classifies and authorizes the resolved subscription exactly as a
+   direct one, by its own fingerprint. The rules must also admit the broker
+   execute definition. A broker call without the delivery, or on a session
+   that did not opt in, is refused.
+5. **Reading tool-call and waiter rows.** A broker-routed wait's tool-call
+   row has the dual identity of AI schema module 0.86.0, exactly as a
+   brokered mutation: `tool_id` and `tool_fingerprint` are the subscription,
+   `provider_tool_id` and `provider_tool_fingerprint` the broker execute
+   definition, and the protected arguments are the
+   `graphql-orm-ai/brokered-call/v1` envelope. The waiter's protected request
+   uses `formatVersion` 2 with the resolved call. The adopted result answers
+   the provider's original broker call ID and tool ID.
+6. **Rollback.** Earlier builds cannot read a `formatVersion` 2 wait request
+   and fail closed on it. Drain or cancel brokered waits before rolling back.
+
+No schema module change, no GraphQL SDL change and no data migration.
+Restore and recovery are unchanged: a portable-restored wait is still
+`RecoveryRequired`.
 
 ### Codex app-server turn dispatch (#828)
 

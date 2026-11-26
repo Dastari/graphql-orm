@@ -153,6 +153,24 @@ catalogue edit until refreshed (known limitation). See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references).
 No data migration is needed.
 
+### 10. Opt in to brokered subscription waits (#551)
+
+**Action needed** for fixed-broker hosts of graphql-orm-ai, and for hosts
+whose rules list subscription fingerprints. A fixed-broker session can opt in
+to generated subscriptions with
+`AiCapabilityBrokerSession::with_brokered_subscriptions`; the host routes a
+broker execute that resolves to one to
+`OrmAiSubscriptionWaitService::register_wait` with
+`AiSubscriptionWaitRegistrationContext::with_capability_delivery`. The wait
+is classified by the resolved subscription's own fingerprint, keeps the
+schema module 0.86.0 dual identity, and answers the provider's broker call.
+The discover and execute broker fingerprints change in this same release.
+Rule allowlists now admit a subscription by its capability fingerprint, and
+a removed or replaced subscription closes its wait as `capability_stale`.
+This completes the #551 broker scope. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551).
+No schema or data migration is needed.
+
 ## 0.229.0 to 0.230.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate

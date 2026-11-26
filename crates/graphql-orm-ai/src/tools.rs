@@ -730,6 +730,36 @@ impl AiToolCatalog {
         self.subscription_capabilities.values()
     }
 
+    /// Returns one exact replayable subscription capability for
+    /// revalidation.
+    ///
+    /// This remains discovery metadata and does not grant source, user or
+    /// execution authority.
+    pub fn subscription_capability(
+        &self,
+        id: &AiToolId,
+    ) -> Option<&AiGraphqlSubscriptionCapability> {
+        self.subscription_capabilities.get(id)
+    }
+
+    /// Compact typed signature of one registered replayable subscription
+    /// capability, as the capability broker's describe and describe-type
+    /// return it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or a schema that cannot
+    /// be rendered.
+    pub fn subscription_capability_signature(
+        &self,
+        id: &AiToolId,
+    ) -> Result<crate::AiCapabilitySignature, AiError> {
+        self.subscription_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?
+            .capability_signature()
+    }
+
     /// Projects one registered automatic query capability for a provider.
     ///
     /// The provider receives a closed typed plan schema. It never receives a

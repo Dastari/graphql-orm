@@ -1,4 +1,9 @@
-//! Generated mutations resolved through the fixed capability broker.
+//! Generated mutations and subscriptions resolved through the fixed
+//! capability broker.
+//!
+//! A brokered subscription uses the same [`ResolvedApplicationCall`] and
+//! [`BrokeredCallEvidence`]: the durable wait service registers it, and its
+//! tool-call row carries both identities exactly as a brokered mutation's.
 //!
 //! A direct provider call has one identity: the offered definition is the
 //! capability that runs. A broker execute call has two. The provider-facing
@@ -52,8 +57,8 @@ pub(crate) struct ResolvedApplicationCall {
     pub(crate) tool_id: AiToolId,
     pub(crate) tool_fingerprint: String,
     pub(crate) arguments: serde_json::Value,
-    /// Fingerprint of the rules that admitted a brokered mutation; `None`
-    /// for a direct call.
+    /// Fingerprint of the rules that admitted a brokered mutation or
+    /// subscription; `None` for a direct call.
     pub(crate) rule_fingerprint: Option<String>,
 }
 
