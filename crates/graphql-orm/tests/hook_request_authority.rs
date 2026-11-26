@@ -51,8 +51,11 @@ struct HostMutation;
 #[Object]
 impl HostMutation {
     /// Dispatch the order-delete hook on a transaction of the host's own,
-    /// through the public dispatcher or the generated-mutation one. Returns
-    /// whether the hook's cleanup was admitted; nothing is committed.
+    /// through the public dispatcher or the generated-write one. Host code
+    /// holds no `GeneratedWriteAuthority` (it has no public constructor and
+    /// only the runtime write pipeline's admission issues one), so the
+    /// generated-write dispatcher takes no request from it. Returns whether
+    /// the hook's cleanup was admitted; nothing is committed.
     async fn host_dispatch(
         &self,
         ctx: &Context<'_>,
@@ -74,7 +77,21 @@ impl HostMutation {
             after_state: None,
         };
         let outcome = if generated {
-            tx.__run_generated_mutation_hook(Some(ctx), &event).await
+            tx.__run_generated_write_hook(
+                &graphql_orm::graphql::orm::GeneratedWriteEntity::new(
+                    event.entity_name,
+                    event.table_name,
+                    HookOrder::metadata,
+                ),
+                None,
+                event.phase,
+                event.action,
+                event.id.clone(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
         } else {
             tx.run_mutation_hook(Some(ctx), &event).await
         };
@@ -1025,19 +1042,25 @@ async fn the_public_dispatcher_issues_no_request_authority() {
 }
 
 #[tokio::test]
-async fn request_authority_is_issued_only_to_a_request_admitted_to_the_mutation() {
-    // The generated-mutation dispatcher asks the entity write decision of the
-    // mutation's own entity again before it attaches the request. A caller
-    // who is not admitted to delete orders gets no authority from it, even
-    // though the same caller could write lines.
+async fn request_authority_is_issued_only_by_the_write_pipeline_admission() {
+    // The generated-write dispatcher attaches a request only together with
+    // the authority the runtime write pipeline issued for it (#724). Host
+    // code cannot construct one, so its own dispatch presents nothing, also
+    // for a caller who is admitted to delete orders and to write lines.
     let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
     assert!(!host_dispatch(&fixture.db, subject(&["lines.write"]), true).await);
-    // An entity-admitted caller does get it. This entry is macro-internal:
-    // the entity decision is its only admission, so host code must not call
-    // it (the generated resolver's scope, assurance and target checks are not
-    // repeated here). #724 moves admission into the runtime and seals it.
-    assert!(host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
-    // Without the opt-in, nothing is attached for anyone.
-    let fixture = setup(Policy::PerEntity, false, Cleanup::Plain).await;
     assert!(!host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
+    assert_untouched(&fixture.db).await;
+    // The generated mutation of the same caller does present it: its
+    // admission ran in the pipeline.
+    let response = schema_builder(fixture.db.clone())
+        .data(subject(&["orders.write", "lines.write"]))
+        .finish()
+        .execute(r#"mutation { deleteHookOrder(id: "o1") { success } }"#)
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["deleteHookOrder"]["success"],
+        true
+    );
 }

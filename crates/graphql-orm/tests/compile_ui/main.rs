@@ -53,4 +53,5 @@ mod stable_type_id_ui;
 mod transform_write_ui;
 mod update_assurance_ui;
 mod upsert_validation_ui;
+mod write_pipeline_ui;
 mod zero_public_write_inputs_ui;

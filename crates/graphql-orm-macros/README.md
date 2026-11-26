@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.228.0 generates GraphQL writes that call the ORM's shared
+[write pipeline](../../MIGRATION.md#02260-to-02280-generated-write-pipeline)
+instead of inlining their authorization sequence.
+
 Version 0.225.0 aligns with the ORM's
 [partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
 

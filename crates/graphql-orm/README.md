@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.228.0 moves the authorization sequence of generated GraphQL writes
+into shared runtime functions, with unchanged checks and order.
+[Migration](../../MIGRATION.md#02260-to-02280-generated-write-pipeline)
+
 Version 0.225.0 preserves opaque partial-index predicates in SQLite and
 PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
 

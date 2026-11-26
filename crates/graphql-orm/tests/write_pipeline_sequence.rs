@@ -242,7 +242,11 @@ impl EntityPolicy for Recorder {
                 Refuse::ChildEntity => !(child && kind == EntityAccessKind::Write),
                 // Bulk writes ask twice before the first hook.
                 Refuse::EntityAtHook => {
-                    let before_hooks = if field(ctx).ends_with("SeqOrders") { 2 } else { 1 };
+                    let before_hooks = if field(ctx).ends_with("SeqOrders") {
+                        2
+                    } else {
+                        1
+                    };
                     !(kind == EntityAccessKind::Write && asked >= before_hooks)
                 }
                 _ => true,
@@ -719,7 +723,12 @@ async fn scenario(out: &mut String, name: &str, query: &str, mode: Refuse) {
     writeln!(
         out,
         "rows orders[{}] lines[{}] devices[{}]",
-        dump(&db, "seq_orders", "id || ':' || tenant || ':' || COALESCE(note, '-')").await,
+        dump(
+            &db,
+            "seq_orders",
+            "id || ':' || tenant || ':' || COALESCE(note, '-')"
+        )
+        .await,
         dump(
             &db,
             "seq_lines",

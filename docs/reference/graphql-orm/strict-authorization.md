@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -292,6 +292,42 @@ policy callback, on every generated path:
 | Relation boundary | `FORBIDDEN`, or `UNAUTHENTICATED` / `AUTHORIZATION_MISCONFIGURED` when it carries that code; no text | the failure class; no text |
 | `Changed` subscription event | the event is dropped; a timer refusal ends the stream with `FORBIDDEN` | the stream ends with a continuity-loss error |
 | Repository field policy callbacks | its code and message when the code is an ORM public code; otherwise `INTERNAL_ERROR`, default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
+
+## The Generated Write Pipeline
+
+Generated GraphQL create, update, upsert, delete, bulk and nested-create
+mutations do not carry their own authorization sequence. They call the
+runtime's write pipeline (`graphql_orm::graphql::orm::write_pipeline` in the
+ORM source), which fixes the order of the checks in one place:
+
+1. **Request admission.** Resolver authentication (`auth`), the PostgreSQL RLS
+   request context, the operation's declared scopes, then its declared
+   [assurance](../../architecture/operation-assurance.md). A nested child row
+   is admitted the same way against its entity's own create root.
+2. **Entity admission.** The request's `Database`, the entity write decision on
+   the `GraphqlMutation` surface, then the check that a row policy provider is
+   registered when the entity declares a row write policy key. A
+   [principal-bound upsert](runtime-and-writes.md#principal-bound-upserts)
+   resolves its key between steps 1 and 2.
+3. **Target admission.** A single-row update or delete locks its row through
+   the write-target prefilter and classifies it with the row read and write
+   decisions; a bulk write does the same for every row its filter selects. See
+   [row policy on generated writes](#row-policy-on-generated-writes).
+4. **Hook dispatch.** The `Before` and `After` hooks, the hook's
+   [request authority](#hook-writes-on-the-originating-requests-authority) and
+   the change journal record.
+
+The input transform, the field write decisions, value binding and the SQL
+statement run between steps 3 and 4 in generated code, because they are typed
+per entity field. Their order is unchanged; see
+[hooks](runtime-and-writes.md#hooks) for the order around the write itself.
+
+The pipeline's functions are macro-internal and hidden from the API
+documentation. They take the operation's scopes and assurance coordinate from
+the generated resolver, so they are not an authorization API for host code:
+a custom resolver declares its own
+[authorization](resolver-operation-metadata.md) and writes through the
+repository or `Database::transaction`.
 
 ## Row Policy On Generated Writes
 
@@ -683,13 +719,11 @@ The authority belongs to the hook's transaction, and to nothing else:
   write the mutation's entity: the entity decision is asked once more, on the `GraphqlMutation`
   surface, before each hook invocation that attaches it. `MutationContext::run_mutation_hook`,
   which host code can call, runs the hook without it.
-  The generated mutation's dispatcher, `MutationContext::__run_generated_mutation_hook`, is
-  macro-internal and hosts must not call it. It is public only because generated code compiles
-  in the host's crate. Its entity write-policy check is the only admission it performs: called
-  from host code with a request and an event of the host's making, it attaches that request's
-  authority to the hook without the generated resolver's scope, assurance or target-row
-  admission. [#724](https://github.com/Dastari/graphql-orm/issues/724) moves generated write
-  admission into the runtime and seals it.
+  The generated mutation presents it through the
+  [write pipeline](#the-generated-write-pipeline): its hook dispatch takes the request only
+  together with the authority that the pipeline's request and entity admission issued for that
+  entity. That authority has no public constructor, so host code that dispatches a hook itself
+  has none to present and attaches nothing.
 - **It ends with the hook invocation,** including on an error or a dropped future, and every read
   of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
   return `None` afterwards, also for a value obtained earlier. Post-commit actions, later

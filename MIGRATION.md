@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.226.0 to 0.228.0: Generated write pipeline
+
+**No action.** Generated GraphQL writes call shared runtime functions for
+their authorization sequence instead of inlining it (#724). The checks, their
+order, the refusals, the SDL and the catalogues are unchanged. Recompile with
+matching `graphql-orm` and `graphql-orm-macros` versions, as for every release.
+
+`MutationContext::__run_generated_mutation_hook` is removed. It was hidden,
+macro-internal, and documented as not callable from host code. Host code that
+dispatches a hook itself uses `MutationContext::run_mutation_hook`, as before.
+Request authority for a hook is now issued only by the write pipeline's own
+admission. See
+[the generated write pipeline](docs/reference/graphql-orm/strict-authorization.md#the-generated-write-pipeline).
+
 ## 0.225.0 to 0.226.0: Generated nested create
 
 **No action** unless opting in (#353). Add `nested_create` to the parent
@@ -71,8 +85,9 @@ It is macro-internal: it attaches the caller's request authority after only
 an entity write-policy check, without the generated resolver's scope,
 assurance or target admission. Host code that dispatches hooks itself uses
 `run_mutation_hook`, which attaches none.
-[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
-admission into the runtime and seal that entry.
+ORM/macros 0.228.0 remove that entry and issue the authority from the
+runtime's own admission: see
+[generated write pipeline](#02260-to-02280-generated-write-pipeline).
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 
