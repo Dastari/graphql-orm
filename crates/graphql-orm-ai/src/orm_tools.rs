@@ -5254,7 +5254,7 @@ struct BrokerCorrection {
 const QUERY_PLAN_CORRECTION_CONTRACT: &[u8] = b"graphql-orm-ai/capability-query-plan-correction/v3";
 
 const CAPABILITY_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
-    text: "Nothing was executed. The published capability catalogue changed after this capability was discovered or described, so its candidateReference, signatures, expanded types and loadedReference are no longer valid. Call discover again, describe the new candidate with its new candidateReference, then issue a new call using only the new signatures and loadedReference.",
+    text: "Nothing was executed. This capability changed after it was discovered or described, so its candidateReference, signatures, expanded types and loadedReference are no longer valid. Call discover again, describe the new candidate with its new candidateReference, then issue a new call using only the new signatures and loadedReference.",
     disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v3",
 };
 
