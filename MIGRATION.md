@@ -16,8 +16,10 @@ supersedes: []
 closure built from column comparisons and NULL tests can share the inner
 walk across the governed and reached rows. The verdict is still TRUE,
 FALSE or UNKNOWN. Hand-written or generated filters and relation targets
-retain their existing evaluation sites. The hop and composition limits
-continue to apply.
+retain their existing evaluation sites. The byte and weighted-relation
+budgets are measured on the smaller shared rendering, so some nested
+compositions previously refused with `AUTHORIZATION_MISCONFIGURED` now
+build.
 
 ## 0.229.0 to 0.230.0: Shared generated read execution
 

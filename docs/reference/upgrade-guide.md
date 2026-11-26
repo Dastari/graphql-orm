@@ -70,7 +70,7 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.230.0**; **`graphql-orm-macros` 0.230.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.231.0**; **`graphql-orm-macros` 0.231.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
 
 - **No action** — ORM/macros 0.231.0 shares SQL for nested read-predicate closures over built-in column tests (#785). [Migration](../../MIGRATION.md#02300-to-02310-nested-closure-sql)
 - **No action** — router 0.20.0 adds rate-limited downstream GraphQL error logs and opt-in message disclosure for queries and mutations (#923). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0190-to-0200)

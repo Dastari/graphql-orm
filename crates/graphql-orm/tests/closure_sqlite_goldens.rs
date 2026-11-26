@@ -138,7 +138,23 @@ fn sqlite_standalone_closures_render_as_before_0_200_0() {
         let header = expected.lines().next().unwrap();
         assert_eq!(actual.lines().next(), Some(header));
         if header.contains("any over parents") {
-            assert!(actual.contains("__gom_closure_2_i"), "{actual}");
+            let mut lines = actual.lines().skip(1);
+            let sql = lines.next().unwrap();
+            assert_eq!(lines.next(), Some("[Int(3), Int(3), Int(3), Int(3)]"));
+            for fragment in [
+                "NULL, NULL UNION SELECT",
+                "COALESCE(__gom_closure_2.__gom_depth + 1, 0), (SELECT COALESCE(2 * (",
+                "WHERE __gom_closure_2.__gom_depth IS NULL) AS __gom_closure_2_i)",
+                "WHERE __gom_closure_2.__gom_depth IS NULL OR __gom_closure_2_t.\"id\" IS NOT NULL",
+                "WHERE __gom_closure_2_n.__gom_depth IS NOT NULL",
+            ] {
+                assert!(sql.contains(fragment), "{header}: missing {fragment}");
+            }
+            assert_eq!(
+                sql.matches("WITH RECURSIVE __gom_closure_1 ").count(),
+                1,
+                "{header}"
+            );
         } else {
             assert_eq!(actual, expected);
         }

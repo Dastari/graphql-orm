@@ -38,12 +38,29 @@ pub fn predicate<B: OrmBackend, E: Entity + 'static>(
     comparison: &str,
     value: SqlValue,
 ) -> ReadPredicate {
+    column_test::<B, E>(column, &format!("{comparison} ?"), vec![value])
+}
+
+#[allow(dead_code)] // This helper is only needed by the backend parity fixture.
+pub fn null_test<B: OrmBackend, E: Entity + 'static>(column: &str, is_null: bool) -> ReadPredicate {
+    column_test::<B, E>(
+        column,
+        if is_null { "IS NULL" } else { "IS NOT NULL" },
+        vec![],
+    )
+}
+
+fn column_test<B: OrmBackend, E: Entity + 'static>(
+    column: &str,
+    test: &str,
+    values: Vec<SqlValue>,
+) -> ReadPredicate {
     ReadPredicate::from_filter::<B, _>(&ColumnTest::<B, E> {
         sql: format!(
-            "__gom_self.{} {comparison} ?",
+            "__gom_self.{} {test}",
             B::DIALECT.delimited_column_identifier(column),
         ),
-        values: vec![value],
+        values,
         entity: PhantomData,
     })
     .unwrap()

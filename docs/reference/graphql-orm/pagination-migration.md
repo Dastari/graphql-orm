@@ -536,8 +536,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     closure adds two subquery levels and one relation. At the default bound,
     the standalone projection uses 66 subquery levels. The original
     composition rendering uses 67 levels for one closure and leaves room for
-    four relations around it. A shared rendering counts each inner walk
-    once, while the original rendering counts each copy. Putting a
+    four relations around it. A directly nested closure over column tests
+    counts as two relations with shared rendering, one for each walk. Putting a
     relation between two closures uses 73 levels and exhausts the
     nine-relation budget. A relation chain alone may be nine deep, and a
     relation filter or count ordering may add five relations to a statement.

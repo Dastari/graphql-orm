@@ -151,10 +151,11 @@ enum Target {
     Below(i64),
     ScoreIsNull,
     Not(Box<Target>),
+    And(Box<Target>, Box<Target>),
     Or(Box<Target>, Box<Target>),
     Closure(ReadPredicateQuantifier, Keys, Box<Target>, u32),
 }
-use Target::{AtLeast, Below, Closure, Not, Or, ScoreIsNull};
+use Target::{And, AtLeast, Below, Closure, Not, Or, ScoreIsNull};
 
 impl Target {
     fn predicate(&self, legacy: bool) -> ReadPredicate {
@@ -170,6 +171,7 @@ impl Target {
             Below(value) => score(ReadPredicateOp::Lt, "<", *value),
             ScoreIsNull => ReadPredicate::is_null::<B, Node>("score").unwrap(),
             Not(target) => target.predicate(legacy).not().unwrap(),
+            And(left, right) => left.predicate(legacy).and(right.predicate(legacy)).unwrap(),
             Or(left, right) => left.predicate(legacy).or(right.predicate(legacy)).unwrap(),
             Closure(quantifier, keys, target, depth) => {
                 ReadPredicate::related_closure_within::<B, Node>(
@@ -194,6 +196,16 @@ impl Target {
                 .truths(rows)
                 .into_iter()
                 .map(|truth| truth.map(|truth| !truth))
+                .collect(),
+            And(left, right) => left
+                .truths(rows)
+                .into_iter()
+                .zip(right.truths(rows))
+                .map(|pair| match pair {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                })
                 .collect(),
             Or(left, right) => left
                 .truths(rows)
@@ -409,6 +421,40 @@ fn cases() -> Vec<(String, Target)> {
     cases
 }
 
+fn composed_cases() -> Vec<(String, Target)> {
+    use ReadPredicateQuantifier::{All, Any};
+    let mut cases = Vec::new();
+    for outer in [Any, All] {
+        for inner in [Any, All] {
+            for (keys, depth) in [(Keys::Parent, 1), (Keys::Composite, 3)] {
+                // Shallow walks expose the depth cut, and composite keys
+                // also expose partially NULL and dangling pointers.
+                let walk = || Box::new(Closure(inner, keys, Box::new(AtLeast(5)), depth));
+                let column = || Box::new(Below(5));
+                let sibling = Box::new(Closure(
+                    if inner == Any { All } else { Any },
+                    Keys::FanOut,
+                    Box::new(Below(6)),
+                    2,
+                ));
+                for (name, target) in [
+                    ("and", And(walk(), column())),
+                    ("sibling or", Or(walk(), sibling)),
+                    ("not or", Not(Box::new(Or(walk(), column())))),
+                    ("and not", And(Box::new(Not(walk())), column())),
+                ] {
+                    let label =
+                        format!("nested {outer:?}({name}) {inner:?} {keys:?} depth {depth}");
+                    let closure = Closure(outer, Keys::Parent, Box::new(target), depth);
+                    cases.push((format!("not {label}"), Not(Box::new(closure.clone()))));
+                    cases.push((label, closure));
+                }
+            }
+        }
+    }
+    cases
+}
+
 #[cfg(feature = "sqlite")]
 struct FixtureOwner;
 #[cfg(feature = "sqlite")]
@@ -520,11 +566,15 @@ async fn fixture() -> (Database, FixtureOwner) {
 )]
 async fn every_backend_admits_the_reference_sets() {
     let (db, mut owner) = fixture().await;
+    let text = SqlText::default();
+    let db = db.with_read_query_observer(text.clone());
     let rows = rows();
     let mut mismatches = Vec::new();
     let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
-    let cases = cases();
-    for (name, target) in &cases {
+    let mut cases = cases();
+    let first_composed_case = cases.len();
+    cases.extend(composed_cases());
+    for (index, (name, target)) in cases.iter().enumerate() {
         let expected = rows
             .iter()
             .zip(target.truths(&rows))
@@ -540,6 +590,14 @@ async fn every_backend_admits_the_reference_sets() {
             .iter()
             .map(|row| row.id)
             .collect::<Vec<_>>();
+        if index >= first_composed_case {
+            // Check the executed SQL so parity also proves the shared path ran.
+            let sql = text.0.lock().unwrap();
+            assert!(sql.contains("AS __gom_closure_2_i"), "{name}: {sql}");
+            if B::DIALECT == DatabaseBackend::Mssql {
+                assert!(sql.contains("(__gom_truth) FROM (VALUES "), "{name}: {sql}");
+            }
+        }
         admitted.sort();
         for id in admitted.iter().chain([&-1]) {
             fingerprint = (fingerprint ^ *id as u64).wrapping_mul(0x0100_0000_01b3);
@@ -611,20 +669,6 @@ async fn directly_nested_closures_agree_with_original_sql() {
         }
     };
 
-    let text_eq = |column, value: &str| {
-        ReadPredicate::column::<B, Node>(
-            column,
-            ReadPredicateOp::Eq,
-            SqlValue::String(value.to_owned()),
-        )
-        .unwrap()
-    };
-    let score =
-        ReadPredicate::column::<B, Node>("score", ReadPredicateOp::Eq, SqlValue::Float(5.0))
-            .unwrap();
-    let null = ReadPredicate::is_null::<B, Node>("name").unwrap();
-    let score_is =
-        |op, value| ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap();
     let nested = |outer, inner, target, outer_depth, inner_depth| {
         let closure = |quantifier, target, depth| {
             ReadPredicate::related_closure_within::<B, Node>(
@@ -637,92 +681,107 @@ async fn directly_nested_closures_agree_with_original_sql() {
         };
         closure(outer, closure(inner, target, inner_depth), outer_depth)
     };
-    let cases = [
-        (
-            "case folding",
-            nested(All, All, text_eq("name", "abc"), 1, 1),
-        ),
-        (
-            "trailing space",
-            nested(All, All, text_eq("label", "abc"), 1, 1),
-        ),
-        (
-            "case-sensitive label",
-            nested(All, All, text_eq("label", "ABC "), 1, 1),
-        ),
-        (
-            "float bind for integer column",
-            nested(Any, Any, score.clone(), 1, 3),
-        ),
-        (
-            "scalar negation",
-            nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1),
-        ),
-        ("null test", nested(Any, All, null.clone(), 1, 6)),
-        (
-            "disjunction",
-            nested(
-                Any,
-                Any,
-                text_eq("name", "abc").or(null.clone()).unwrap(),
-                6,
-                1,
+    let [candidates, originals] = [false, true].map(|legacy| {
+        let column = |column, op, comparison, value| {
+            if legacy {
+                closure_legacy::predicate::<B, Node>(column, comparison, value)
+            } else {
+                ReadPredicate::column::<B, Node>(column, op, value).unwrap()
+            }
+        };
+        let null_test = |column, is_null| {
+            if legacy {
+                closure_legacy::null_test::<B, Node>(column, is_null)
+            } else if is_null {
+                ReadPredicate::is_null::<B, Node>(column).unwrap()
+            } else {
+                ReadPredicate::is_not_null::<B, Node>(column).unwrap()
+            }
+        };
+        let text_eq = |name, value: &str| {
+            column(
+                name,
+                ReadPredicateOp::Eq,
+                "=",
+                SqlValue::String(value.to_owned()),
+            )
+        };
+        let score = column("score", ReadPredicateOp::Eq, "=", SqlValue::Float(5.0));
+        let null = null_test("name", true);
+        let score_is =
+            |op, comparison, value| column("score", op, comparison, SqlValue::Int(value));
+        [
+            (
+                "case folding",
+                nested(All, All, text_eq("name", "abc"), 1, 1),
             ),
-        ),
-        (
-            "conjunction",
-            nested(
-                All,
-                All,
-                score
-                    .and(ReadPredicate::is_not_null::<B, Node>("name").unwrap())
-                    .unwrap(),
-                6,
-                6,
+            (
+                "trailing space",
+                nested(All, All, text_eq("label", "abc"), 1, 1),
             ),
-        ),
-        // Two distinct binds in the nested leaf. Exchanging them would
-        // admit the score-5 rows instead of the score-1 rows.
-        (
-            "two bound values",
-            nested(
-                Any,
-                All,
-                score_is(ReadPredicateOp::Gte, 1)
-                    .and(score_is(ReadPredicateOp::Ne, 5))
-                    .unwrap(),
-                3,
-                3,
+            (
+                "case-sensitive label",
+                nested(All, All, text_eq("label", "ABC "), 1, 1),
             ),
-        ),
-        (
-            "text and integer binds",
-            nested(
-                All,
-                Any,
-                text_eq("name", "abc")
-                    .and(score_is(ReadPredicateOp::Lt, 5))
-                    .unwrap(),
-                6,
-                3,
+            (
+                "float bind for integer column",
+                nested(Any, Any, score.clone(), 1, 3),
             ),
-        ),
-        (
-            "complete cycle",
-            nested(
-                All,
-                All,
-                ReadPredicate::is_not_null::<B, Node>("id").unwrap(),
-                6,
-                6,
+            (
+                "scalar negation",
+                nested(All, Any, text_eq("name", "abc").not().unwrap(), 6, 1),
             ),
-        ),
-    ];
-    let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
-    for (name, candidate) in cases {
-        let composed = candidate.clone().and(primary_key_present.clone()).unwrap();
-        let (before, _, _) = read(query(composed)).await;
-        let (after, _, _) = read(query(candidate.clone())).await;
+            ("null test", nested(Any, All, null.clone(), 1, 6)),
+            (
+                "disjunction",
+                nested(
+                    Any,
+                    Any,
+                    text_eq("name", "abc").or(null.clone()).unwrap(),
+                    6,
+                    1,
+                ),
+            ),
+            (
+                "conjunction",
+                nested(All, All, score.and(null_test("name", false)).unwrap(), 6, 6),
+            ),
+            // Two distinct binds in the nested leaf. Exchanging them would
+            // admit the score-5 rows instead of the score-1 rows.
+            (
+                "two bound values",
+                nested(
+                    Any,
+                    All,
+                    score_is(ReadPredicateOp::Gte, ">=", 1)
+                        .and(score_is(ReadPredicateOp::Ne, "<>", 5))
+                        .unwrap(),
+                    3,
+                    3,
+                ),
+            ),
+            (
+                "text and integer binds",
+                nested(
+                    All,
+                    Any,
+                    text_eq("name", "abc")
+                        .and(score_is(ReadPredicateOp::Lt, "<", 5))
+                        .unwrap(),
+                    6,
+                    3,
+                ),
+            ),
+            (
+                "complete cycle",
+                nested(All, All, null_test("id", false), 6, 6),
+            ),
+        ]
+    });
+    for ((name, candidate), (_, original)) in candidates.into_iter().zip(originals) {
+        let (before, before_sql, _) = read(query(original)).await;
+        let (after, after_sql, _) = read(query(candidate.clone())).await;
+        assert_nested_rendering(name, &before_sql, &after_sql);
         let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
         assert_eq!(before, after, "{name}");
         assert_eq!(before, double_negated, "double negation of {name}");
@@ -758,32 +817,39 @@ async fn directly_nested_closures_agree_with_original_sql() {
         }
     }
     if B::DIALECT == DatabaseBackend::Postgres {
-        let initial =
-            ReadPredicate::column::<B, Node>("id", ReadPredicateOp::Ne, SqlValue::Int(61)).unwrap();
+        let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
         let primary_key_missing = ReadPredicate::is_null::<B, Node>("id").unwrap();
         // Each alternation adds one level while preserving the target's
         // truth. At this boundary the extra compact scalar parentheses
         // exceed the budget and the original renderer still fits.
-        let mut target = initial;
-        for step in 0..248 {
-            target = if step % 2 == 0 {
-                target.and(primary_key_present.clone())
-            } else {
-                target.or(primary_key_missing.clone())
+        let deepen = |mut target: ReadPredicate, levels| {
+            for step in 0..levels {
+                target = if step % 2 == 0 {
+                    target.and(primary_key_present.clone())
+                } else {
+                    target.or(primary_key_missing.clone())
+                }
+                .unwrap();
             }
-            .unwrap();
-        }
-        let fallback = nested(
-            All,
-            All,
-            target.and(primary_key_present.clone()).unwrap(),
-            1,
-            1,
-        );
-        let original = fallback.clone().and(primary_key_present).unwrap();
-        let (before, _, _) = read(query(original)).await;
-        let (after, _, _) = read(query(fallback)).await;
+            nested(All, All, target, 1, 1)
+        };
+        let initial =
+            ReadPredicate::column::<B, Node>("id", ReadPredicateOp::Ne, SqlValue::Int(61)).unwrap();
+        let legacy = closure_legacy::predicate::<B, Node>("id", "<>", SqlValue::Int(61));
+        let below_limit = query(deepen(initial.clone(), 248));
+        let fallback = query(deepen(initial, 249));
+        let original = query(deepen(legacy, 249));
+        let (_, below_binds) = below_limit.build_delete_sql();
+        let (_, fallback_binds) = fallback.build_delete_sql();
+        let (_, original_binds) = original.build_delete_sql();
+        assert_eq!(fallback_binds, vec![SqlValue::Int(61); 16]);
+        assert_eq!(fallback_binds, original_binds);
+        assert!(below_binds.len() < fallback_binds.len(), "{below_binds:?}");
+        let (before, _, _) = read(original).await;
+        let (after, _, _) = read(fallback).await;
+        let (below, _, _) = read(below_limit).await;
         assert_eq!(after, before, "compact cost fallback");
+        assert_eq!(after, below, "at the compact cost boundary");
         assert!(!after.is_empty() && !after.contains(&61));
     }
 
