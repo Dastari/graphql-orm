@@ -110,9 +110,11 @@ or data migration is needed.
    `capability-broker-discover/v3` and `capability-broker-describe/v3`;
    client-deferred discovery keeps `version: 2` and its version 2 contract.
    Browse candidates carry an opaque `candidateReference` instead of
-   `candidateFingerprint`, and browse results carry no index fingerprint;
-   describe takes either `candidateFingerprint` (from discover) or
-   `candidateReference` (from browse), exactly one. A broker execute result of a generated keyset
+   `candidateFingerprint`, and browse results carry no index fingerprint.
+   In this same release discover candidates do too, and describe takes
+   only `candidateReference`; see
+   [Run-bound discover candidate references](#run-bound-discover-candidate-references).
+   A broker execute result of a generated keyset
    root now carries `continuation` beside `data` and `errorCodes`: a
    `{"handle", "expiresInSeconds"}` object while more rows exist, else
    `null`. Its disclosure-schema fingerprint is derived from the query's own
@@ -231,6 +233,52 @@ hosts.
 
 No GraphQL SDL change. Subscriptions keep their wait contract and do not
 enter the broker in this release.
+
+### Run-bound discover candidate references
+
+**Action needed** for fixed-broker hosts, and for tests or model guidance that
+read fixed-broker discover or describe results.
+
+The fixed broker's discover results no longer carry `indexFingerprint` or a
+`candidateFingerprint`, and describe results no longer echo
+`candidateFingerprint`. Those fingerprints hash the whole index set or
+entity entry, including operations host policy hides from the principal, so
+a model, or anyone who can read the transcript, could tell that hidden
+operations exist and when they change. The canonical fingerprints stay
+server-side and still fence describe, `describe_type` and execute exactly as
+before.
+
+1. **Wire.** Every discover candidate carries an opaque `candidateReference`,
+   as browse candidates already did. Describe takes `capabilityId` and
+   `candidateReference`, both required; `candidateFingerprint` is gone from
+   its definition. A replayed describe call that still sends
+   `candidateFingerprint` is answered `selection_stale`, whatever its value,
+   so the model discovers again. Discover results report disclosure
+   contract `capability-broker-discover/v4` and describe results
+   `capability-broker-describe/v4`; the `capability_stale` correction names
+   `candidateReference` and is `capability-stale-correction/v3`. Update tests
+   or parsers that read `indexFingerprint` or `candidateFingerprint` from
+   these results. No model-facing staleness signal replaces
+   `indexFingerprint`: a held candidate whose catalogue changed is still
+   answered `capability_stale` at describe.
+2. **Run-bound references.** A reference resolves only for the principal
+   reference, AI session, run, attempt and provider session it was issued
+   to. Every discover issues fresh references.
+3. **Discovery cache.** `with_discovery_cache` no longer lets a later run
+   describe a candidate an earlier run discovered: its entries answer only
+   the run whose references they hold (for example a fresh
+   `AiCapabilityBrokerSession` of the same run, or a search the session
+   itself has already evicted). A later run, or another attempt, discovers
+   again. Hosts that enabled the cache to save a discover call per run
+   should expect one discover call before the first describe of each run.
+4. **Rebind.** The describe definition changes, so its fingerprint changes
+   in this same release as broker version 3. `AI_CAPABILITY_BROKER_VERSION`
+   stays 3. Admit the current five broker fingerprints wherever you list
+   them by value.
+
+Client-deferred discovery is unchanged: it keeps `version: 2`,
+`indexFingerprint` and `candidateFingerprint` under its version 2 contract.
+No GraphQL SDL, AI schema-module or data migration is needed.
 
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 

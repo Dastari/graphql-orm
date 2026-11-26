@@ -12,6 +12,16 @@ supersedes: []
 
 ## Unreleased - next breaking graphql-orm-ai release
 
+- **Breaking.** Fixed-broker discover and describe results no longer carry
+  the index-set or entry fingerprint, which covered operations host policy
+  hides from the principal. Every discover candidate carries an opaque,
+  run-bound `candidateReference`, as browse candidates do, and describe takes
+  only `candidateReference`; a replayed `candidateFingerprint` is
+  `selection_stale`. Disclosure contracts are now
+  `capability-broker-discover/v4`, `capability-broker-describe/v4` and
+  `capability-stale-correction/v3`, and the describe definition fingerprint
+  changes. The discovery cache answers only the run its references were
+  issued to. Client-deferred discovery is unchanged.
 - **Breaking (#551).** Generated mutations can join the fixed capability
   broker. A session opts in with
   `AiCapabilityBrokerSession::with_brokered_mutations`; the classified native

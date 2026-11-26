@@ -476,8 +476,10 @@ continuation handles (next section).
   its `operations` (each root's name and shape). A root without an entity and
   a brokered static tool are candidates of their own. `kind` filters:
   `generated_query` (every generated read), `generated_entity` or
-  `reviewed_static`.
-- **Describe** loads the candidate and returns one entry per operation under
+  `reviewed_static`. Each candidate carries an opaque `candidateReference`
+  (see [Candidate references](#candidate-references)).
+- **Describe** takes the candidate's `capabilityId` and `candidateReference`,
+  loads the candidate and returns one entry per operation under
   `operations`: the root's shape, description, result-record cost and a
   compact typed signature, for example
   `Records(where?: RecordWhereInput|null, page?: PageInput) -> select`, with
@@ -577,16 +579,42 @@ Nothing in a browse result depends on what the principal may not see:
   policy work grows with the entries before the page. A host with an
   expensive policy should override `authorize_discovery`.
 - Results carry no index or entry fingerprint. Each listed capability has an
-  opaque `candidateReference`, fresh for every browse, that describe takes
-  in place of `candidateFingerprint`. It resolves only in the broker session
-  that issued it and only for the same principal, AI session, run, attempt
-  and provider session, so a reused or cloned session cannot resolve it
-  under another run. Browse results are not shared through the discovery
-  cache.
+  opaque `candidateReference`, fresh for every browse, that describe takes,
+  exactly like a discover candidate's (see
+  [Candidate references](#candidate-references)). Browse results are not
+  shared through the discovery cache.
 - The `operations` header has no operation list, so `limit` bounds every
   list the page returns.
 
 Browsing grants no load or execution authority.
+
+#### Candidate references
+
+Discover and browse return no index-set, index or entry fingerprint, and
+describe echoes none. Those fingerprints hash the whole index set or entity
+entry, including operations host policy denies the principal, so returning
+them would let the model, or anyone who can read the transcript, see that
+hidden operations exist and detect when they change. The broker keeps them
+server-side and checks them at describe, `describe_type` and execute as
+before; the model receives `capability_stale` when one has changed.
+
+Every discover or browse candidate instead carries an opaque
+`candidateReference`: 64 hex characters of a random nonce and the capability
+ID, fresh for every call, hashing no fingerprint or policy decision.
+Describe takes `capabilityId` and `candidateReference`. A reference resolves
+only in the broker session that issued it, or the discovery cache, and only
+for the same principal reference, AI session, run, attempt and provider
+session, so a reused or cloned session cannot resolve it under another run.
+Apart from their fresh references, two principals with different policy
+therefore receive identical discover and describe results for the operations
+they share, and no result changes when only a hidden operation changes. A describe call that sends an earlier
+contract's `candidateFingerprint` is `selection_stale`, whatever its value.
+
+`AiCapabilityDiscoveryBroker::with_discovery_cache` retains discovery results
+beyond the session's own `maximum_retained_searches`, together with the
+references they issued and the run they were issued to. A cached entry
+answers only that run, so a later run, or another attempt of the same run,
+discovers again before it describes.
 
 **Continuation handles.** A generated keyset root
 (`AiGraphqlQueryCapability::supports_continuation`) returns its rows a page
@@ -842,8 +870,10 @@ What else the binding covers depends on the mode:
 
 Broker version 3 also versions the fixed-broker result contracts it
 changes: discover results carry disclosure contract
-`capability-broker-discover/v3` and describe results
-`capability-broker-describe/v3`; browse is `capability-broker-browse/v1`,
+`capability-broker-discover/v4` and describe results
+`capability-broker-describe/v4` (version 4 of each contract dropped the
+model-facing index and candidate fingerprints); browse is
+`capability-broker-browse/v1`,
 and a continuable execute result has a contract derived from its query's
 disclosure schema. Client-deferred discovery is unchanged: it still returns
 `version: 2` under the version 2 contract
@@ -868,7 +898,7 @@ Both outcomes are retryable, execute nothing, and carry a fixed `correction`
 | Model-facing code | When | Model recovery |
 | --- | --- | --- |
 | `capability_stale` | The run holds the candidate or loaded capability, and a fingerprint above has changed since (at describe, `describe_type` or execute). | Discover again, describe the new candidate, use the new signatures and `loadedReference`. |
-| `selection_stale` | The run does not hold the selection: discovery or browse never returned that candidate to it, the `loadedReference` is unknown or expired, or the continuation handle is unknown, expired or belongs to another `loadedReference`. | Discover (or describe) again. |
+| `selection_stale` | The run does not hold the selection: discovery or browse never returned that candidate reference to it (including a reference issued to another run or attempt, and an earlier contract's `candidateFingerprint`), the `loadedReference` is unknown or expired, or the continuation handle is unknown, expired or belongs to another `loadedReference`. | Discover (or describe) again. |
 
 `capability_stale` is reported only for a candidate the current principal was
 already shown, or a capability it already loaded, so it reveals nothing about

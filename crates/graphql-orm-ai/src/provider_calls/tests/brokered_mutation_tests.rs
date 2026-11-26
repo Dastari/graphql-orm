@@ -164,7 +164,7 @@ async fn load_mutation(fixture: &Fixture, delivery: &AiCapabilityDeliveryTurn) -
             delivery.session(),
             &json!({
                 "capabilityId": candidate["capabilityId"],
-                "candidateFingerprint": candidate["candidateFingerprint"],
+                "candidateReference": candidate["candidateReference"],
             }),
         )
         .await
@@ -451,7 +451,7 @@ async fn approved_brokered_mutation(
             delivery.session(),
             &json!({
                 "capabilityId": candidate["capabilityId"],
-                "candidateFingerprint": candidate["candidateFingerprint"],
+                "candidateReference": candidate["candidateReference"],
             }),
         )
         .await

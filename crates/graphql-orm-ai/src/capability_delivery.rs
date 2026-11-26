@@ -448,7 +448,7 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
     broker_definition(
         AI_CAPABILITY_DISCOVER_TOOL_ID,
         "graphql_capabilities_discover",
-        "Search the current reviewed capabilities. A generated_entity candidate covers every read operation of one entity; its operations list names them. A generated_mutation candidate is a change this run may request; describe reports whether it needs approval.",
+        "Search the current reviewed capabilities. A generated_entity candidate covers every read operation of one entity; its operations list names them. A generated_mutation candidate is a change this run may request; describe reports whether it needs approval. Describe a candidate with its capabilityId and candidateReference.",
         None,
         json!({
             "type": "object",
@@ -519,16 +519,12 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
             "type": "object",
             "properties": {
                 "capabilityId": {"type": "string", "maxLength": 200},
-                "candidateFingerprint": {
-                    "type": ["string", "null"], "minLength": 64, "maxLength": 64,
-                    "description": "candidateFingerprint of a discover candidate."
-                },
                 "candidateReference": {
-                    "type": ["string", "null"], "minLength": 64, "maxLength": 64,
-                    "description": "candidateReference of a browse candidate. Send exactly one of candidateFingerprint and candidateReference."
+                    "type": "string", "minLength": 64, "maxLength": 64,
+                    "description": "Exact candidateReference of a discover or browse candidate returned in this run."
                 }
             },
-            "required": ["capabilityId"],
+            "required": ["capabilityId", "candidateReference"],
             "additionalProperties": false
         }),
     );
@@ -1181,8 +1177,11 @@ impl AiLoadedCapabilityBinding {
 
 #[derive(Clone)]
 struct CachedCapabilityDiscovery {
-    principal_fingerprint: String,
-    session_id: AiSessionId,
+    /// [`candidate_reference_fence`] of the run the references were issued
+    /// to. A cached search answers only that principal, session, run,
+    /// attempt and provider session.
+    fence: String,
+    references: Vec<(String, AiToolId)>,
     search: AiCapabilityIndexSetSearchResult,
     expires_at: OffsetDateTime,
 }
@@ -1238,16 +1237,22 @@ impl AiCapabilityDiscoveryBroker {
         })
     }
 
-    /// Enables bounded process-local reuse of discovery candidates across runs.
+    /// Enables bounded process-local retention of discovery results beyond a
+    /// run's own [`AiCapabilityDeliveryLimits::maximum_retained_searches`].
     ///
-    /// Cache entries belong to one principal reference and AI session. Only
-    /// authority-neutral discovery metadata is retained: describe still checks
-    /// the current index, rehydrates the principal and authorizes the candidate,
-    /// then issues a new short-lived binding for the current fenced run.
-    /// Execution bindings, permissions and tool results are never cached here.
-    /// Cloned brokers share this cache; replacing the broker starts it empty.
-    /// Entries expire after an absolute TTL and the oldest searches are evicted
-    /// at capacity. The cache is disabled unless this builder is called.
+    /// A discover candidate is described by an opaque `candidateReference`
+    /// bound to the principal reference, AI session, run, attempt and provider
+    /// session that received it, so a cache entry answers only that exact
+    /// run, including through a fresh or cloned [`AiCapabilityBrokerSession`].
+    /// A later run, or another attempt of the same run, discovers again: a
+    /// reference never crosses runs. Only admitted discovery candidates are
+    /// retained, server-side; describe still checks the current index,
+    /// rehydrates the principal and authorizes the candidate, then issues a
+    /// new short-lived binding. Execution bindings, permissions, browse
+    /// results and tool results are never cached here. Cloned brokers share
+    /// this cache; replacing the broker starts it empty. Entries expire after
+    /// an absolute TTL and the oldest searches are evicted at capacity. The
+    /// cache is disabled unless this builder is called.
     ///
     /// # Errors
     ///
@@ -1303,9 +1308,9 @@ impl AiCapabilityDiscoveryBroker {
 
     fn cache_discovery(
         &self,
-        principal_reference: &PrincipalReference,
-        run: &AiCapabilityRunBinding,
+        fence: &str,
         search: &AiCapabilityIndexSetSearchResult,
+        references: &[CandidateReference],
     ) {
         let Some(cache) = &self.discovery_cache else {
             return;
@@ -1314,8 +1319,11 @@ impl AiCapabilityDiscoveryBroker {
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.expires_at > now);
         entries.push_back(CachedCapabilityDiscovery {
-            principal_fingerprint: discovery_reference_fingerprint(principal_reference),
-            session_id: run.session_id,
+            fence: fence.to_owned(),
+            references: references
+                .iter()
+                .map(|reference| (reference.reference.clone(), reference.capability_id.clone()))
+                .collect(),
             search: search.clone(),
             expires_at: now + cache.ttl,
         });
@@ -1324,28 +1332,27 @@ impl AiCapabilityDiscoveryBroker {
         }
     }
 
+    /// The cached search that issued `reference` for `capability_id` under
+    /// exactly `fence`.
     fn cached_discovery(
         &self,
-        principal_reference: &PrincipalReference,
-        run: &AiCapabilityRunBinding,
+        fence: &str,
         capability_id: &AiToolId,
-        candidate_fingerprint: &str,
+        reference: &str,
     ) -> Option<AiCapabilityIndexSetSearchResult> {
         let cache = self.discovery_cache.as_ref()?;
         let now = self.clock.now();
-        let fingerprint = discovery_reference_fingerprint(principal_reference);
         let mut entries = cache.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.expires_at > now);
         entries
             .iter()
             .rev()
             .find(|entry| {
-                entry.principal_fingerprint == fingerprint
-                    && entry.session_id == run.session_id
-                    && entry.search.candidates.iter().any(|candidate| {
-                        &candidate.id == capability_id
-                            && candidate.entry_fingerprint == candidate_fingerprint
-                    })
+                entry.fence == fence
+                    && entry
+                        .references
+                        .iter()
+                        .any(|(issued, id)| issued == reference && id == capability_id)
             })
             .map(|entry| entry.search.clone())
     }
@@ -1810,15 +1817,6 @@ fn valid_binding_value(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
 }
 
-// Discovery metadata is reusable across freshly admitted work deadlines. Every
-// other principal binding remains part of the cache key. Loaded execution handles
-// deliberately retain the complete reference fingerprint, including its deadline.
-fn discovery_reference_fingerprint(reference: &PrincipalReference) -> String {
-    let mut identity = reference.clone();
-    identity.expires_at = None;
-    principal_reference_fingerprint(&identity)
-}
-
 fn principal_reference_fingerprint(reference: &PrincipalReference) -> String {
     let encoded = serde_json::to_vec(reference)
         .expect("PrincipalReference contains only serializable safe reference values");
@@ -2016,9 +2014,8 @@ struct BrokerSessionState {
     searches: VecDeque<AiCapabilityIndexSetSearchResult>,
     loaded: VecDeque<(String, AiLoadedCapabilityBinding)>,
     continuations: VecDeque<(String, BrokerContinuation)>,
-    /// Opaque browse references: reference, capability, entry fingerprint
-    /// and the fence of the principal and run that received it.
-    browse_references: VecDeque<(String, AiToolId, String, String)>,
+    /// Opaque candidate references issued by discover and browse.
+    candidate_references: VecDeque<CandidateReference>,
     deferred_installation_pending: bool,
     amplification: AiCapabilityBrokerAmplification,
 }
@@ -2306,12 +2303,32 @@ impl AiCapabilityBrokerSession {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn record_search(&self, result: AiCapabilityIndexSetSearchResult) {
+    fn record_search(
+        &self,
+        result: AiCapabilityIndexSetSearchResult,
+        references: Vec<CandidateReference>,
+    ) {
         let mut state = self.state();
         state.amplification.discover_calls = state.amplification.discover_calls.saturating_add(1);
         state.searches.push_back(result);
         while state.searches.len() > usize::from(self.limits.maximum_retained_searches) {
             state.searches.pop_front();
+        }
+        self.retain_references(&mut state, references);
+    }
+
+    /// Retains newly issued candidate references, keeping at most one full
+    /// page per retained search.
+    fn retain_references(
+        &self,
+        state: &mut BrokerSessionState,
+        references: Vec<CandidateReference>,
+    ) {
+        state.candidate_references.extend(references);
+        let maximum = usize::from(self.limits.maximum_retained_searches)
+            .saturating_mul(usize::from(AI_CAPABILITY_BROWSE_PAGE_MAXIMUM));
+        while state.candidate_references.len() > maximum {
+            state.candidate_references.pop_front();
         }
     }
 
@@ -2377,7 +2394,7 @@ impl AiCapabilityBrokerSession {
     fn record_browse(
         &self,
         result: Option<AiCapabilityIndexSetSearchResult>,
-        references: Vec<(String, AiToolId, String, String)>,
+        references: Vec<CandidateReference>,
     ) {
         let mut state = self.state();
         state.amplification.browse_calls = state.amplification.browse_calls.saturating_add(1);
@@ -2387,30 +2404,27 @@ impl AiCapabilityBrokerSession {
                 state.searches.pop_front();
             }
         }
-        state.browse_references.extend(references);
-        let maximum = usize::from(self.limits.maximum_retained_searches)
-            .saturating_mul(usize::from(AI_CAPABILITY_BROWSE_PAGE_MAXIMUM));
-        while state.browse_references.len() > maximum {
-            state.browse_references.pop_front();
-        }
+        self.retain_references(&mut state, references);
     }
 
-    /// Entry fingerprint behind one opaque browse reference that this
+    /// Entry fingerprint behind one opaque candidate reference that this
     /// session issued for `capability_id` under exactly `fence`.
-    fn browse_reference(
+    fn candidate_reference(
         &self,
         capability_id: &AiToolId,
         reference: &str,
         fence: &str,
     ) -> Option<String> {
         self.state()
-            .browse_references
+            .candidate_references
             .iter()
             .rev()
-            .find(|(candidate, id, _, issued)| {
-                candidate == reference && id == capability_id && issued == fence
+            .find(|issued| {
+                issued.reference == reference
+                    && &issued.capability_id == capability_id
+                    && issued.fence == fence
             })
-            .map(|(_, _, fingerprint, _)| fingerprint.clone())
+            .map(|issued| issued.entry_fingerprint.clone())
     }
 
     fn record_continuation(&self, handle: String, continuation: BrokerContinuation) {
@@ -2465,9 +2479,12 @@ struct BrokerDiscoverArguments {
 struct BrokerDescribeArguments {
     capability_id: String,
     #[serde(default)]
-    candidate_fingerprint: Option<String>,
-    #[serde(default)]
     candidate_reference: Option<String>,
+    /// Earlier broker contracts named a discover candidate by its entry
+    /// fingerprint. A replayed one is accepted only to be answered as a
+    /// selection the run does not hold, whatever its value.
+    #[serde(default)]
+    candidate_fingerprint: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2576,18 +2593,21 @@ fn empty_browse_page(level: BrowseLevel) -> serde_json::Value {
     }
 }
 
-/// Model-facing browse candidate: discover's candidate shape with an opaque
-/// `candidateReference` in place of the entry fingerprint, and the entity's
-/// operation list only where `with_operations` asks for it.
-fn browse_candidate_value(
+/// Model-facing fixed-broker candidate of discover or browse: the
+/// admitted candidate's metadata with an opaque `candidateReference`, never
+/// an index or entry fingerprint, and the entity's operation list only where
+/// `with_operations` asks for it.
+fn fixed_candidate_value(
     candidate: &crate::AiCapabilitySearchCandidate,
-    reference: String,
+    reference: &CandidateReference,
     with_operations: bool,
 ) -> serde_json::Value {
     let mut value = candidate_value(candidate);
     if let Some(object) = value.as_object_mut() {
-        object.remove("candidateFingerprint");
-        object.insert("candidateReference".to_owned(), json!(reference));
+        object.insert(
+            "candidateReference".to_owned(),
+            json!(reference.reference.as_str()),
+        );
         if !with_operations {
             object.remove("operations");
         }
@@ -2595,11 +2615,40 @@ fn browse_candidate_value(
     value
 }
 
-/// Fence of one browse reference: the principal reference and the run,
-/// attempt and provider session it was issued to. A reference presented
-/// under any other binding, through a reused or cloned session, resolves
-/// nothing.
-fn browse_reference_fence(
+/// One opaque candidate reference a discover or browse call issued: the
+/// model-facing reference, the capability it names, the entry fingerprint it
+/// stands for (server-side only) and the fence it was issued under.
+#[derive(Clone, Debug)]
+struct CandidateReference {
+    reference: String,
+    capability_id: AiToolId,
+    entry_fingerprint: String,
+    fence: String,
+}
+
+impl CandidateReference {
+    /// A fresh random reference to `candidate` under `fence`. It hashes no
+    /// index, entry or policy fingerprint, so nothing about entries the
+    /// principal may not see enters it.
+    fn issue(candidate: &crate::AiCapabilitySearchCandidate, fence: &str) -> Self {
+        Self {
+            reference: hash_json(&json!({
+                "version": 1,
+                "nonce": Uuid::new_v4(),
+                "capability": candidate.id,
+            })),
+            capability_id: candidate.id.clone(),
+            entry_fingerprint: candidate.entry_fingerprint.clone(),
+            fence: fence.to_owned(),
+        }
+    }
+}
+
+/// Fence of one candidate reference: the principal reference and the
+/// session, run, attempt and provider session it was issued to. A reference
+/// presented under any other binding, through a reused or cloned session or
+/// the discovery cache, resolves nothing.
+fn candidate_reference_fence(
     principal_reference: &PrincipalReference,
     run: &AiCapabilityRunBinding,
 ) -> String {
@@ -3278,7 +3327,6 @@ fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json
         "entity": candidate.entity_name,
         "operation": candidate.operation_name,
         "shape": candidate.operation_shape,
-        "candidateFingerprint": candidate.entry_fingerprint,
     });
     if !candidate.operations.is_empty()
         && let Some(object) = value.as_object_mut()
@@ -3366,7 +3414,6 @@ fn planning_contract(
         "risk": entry.risk,
         "approval": entry.approval,
         "aggregates": entry.aggregate_features,
-        "candidateFingerprint": entry.fingerprint,
         "usage": DESCRIBE_USAGE,
         "operations": operations,
     });
@@ -3501,6 +3548,11 @@ impl AiCapabilityDiscoveryBroker {
     /// returned candidate has already passed current host policy for the
     /// current principal.
     ///
+    /// The result carries no index or entry fingerprint: those hash entries
+    /// host policy may hide from this principal. Each candidate instead has a
+    /// fresh opaque `candidateReference` that describe accepts only from the
+    /// run it was issued to.
+    ///
     /// # Errors
     ///
     /// Returns [`AiError::InvalidInput`] for malformed broker arguments and
@@ -3557,17 +3609,27 @@ impl AiCapabilityDiscoveryBroker {
         let result = self
             .search_admitted(principal_reference, run, &query, false, admit)
             .await?;
+        // Each candidate carries a fresh opaque reference bound to this
+        // principal and run. The index-set and entry fingerprints hash
+        // entries host policy hides from this principal, so they stay
+        // server-side.
+        let fence = candidate_reference_fence(principal_reference, run);
+        let references = result
+            .candidates
+            .iter()
+            .map(|candidate| CandidateReference::issue(candidate, &fence))
+            .collect::<Vec<_>>();
         let value = json!({
             "version": AI_CAPABILITY_BROKER_VERSION,
-            "indexFingerprint": result.index_set_fingerprint,
             "candidates": result
                 .candidates
                 .iter()
-                .map(candidate_value)
+                .zip(&references)
+                .map(|(candidate, reference)| fixed_candidate_value(candidate, reference, true))
                 .collect::<Vec<_>>(),
         });
-        self.cache_discovery(principal_reference, run, &result);
-        session.record_search(result);
+        self.cache_discovery(&fence, &result, &references);
+        session.record_search(result, references);
         Ok(value)
     }
 
@@ -3705,20 +3767,11 @@ impl AiCapabilityDiscoveryBroker {
         // Listed capabilities carry an opaque per-run reference in place of
         // their entry fingerprint; describe resolves it server-side, only
         // for the same principal and run.
-        let fence = browse_reference_fence(principal_reference, run);
+        let fence = candidate_reference_fence(principal_reference, run);
         let mut references = Vec::new();
         let mut reference_for = |candidate: &crate::AiCapabilitySearchCandidate| {
-            let reference = hash_json(&json!({
-                "version": 1,
-                "nonce": Uuid::new_v4(),
-                "capability": candidate.id,
-            }));
-            references.push((
-                reference.clone(),
-                candidate.id.clone(),
-                candidate.entry_fingerprint.clone(),
-                fence.clone(),
-            ));
+            let reference = CandidateReference::issue(candidate, &fence);
+            references.push(reference.clone());
             reference
         };
         let mut retained = Vec::new();
@@ -3743,9 +3796,9 @@ impl AiCapabilityDiscoveryBroker {
                 let mut items = Vec::new();
                 for (candidate, admitted) in &kept[range] {
                     let summary = candidate.admitted_candidate(admitted);
-                    items.push(browse_candidate_value(
+                    items.push(fixed_candidate_value(
                         &summary,
-                        reference_for(&summary),
+                        &reference_for(&summary),
                         true,
                     ));
                     retained.push(summary);
@@ -3775,7 +3828,7 @@ impl AiCapabilityDiscoveryBroker {
                 // the only one, and it honours the requested limit.
                 object.insert(
                     "capability".to_owned(),
-                    browse_candidate_value(&summary, reference_for(&summary), false),
+                    fixed_candidate_value(&summary, &reference_for(&summary), false),
                 );
                 object.insert("nextOffset".to_owned(), json!(next));
                 object.insert(
@@ -3860,7 +3913,16 @@ impl AiCapabilityDiscoveryBroker {
             "candidates": result
                 .candidates
                 .iter()
-                .map(candidate_value)
+                .map(|candidate| {
+                    let mut value = candidate_value(candidate);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "candidateFingerprint".to_owned(),
+                            json!(candidate.entry_fingerprint),
+                        );
+                    }
+                    value
+                })
                 .collect::<Vec<_>>(),
         });
         session.record_deferred_search(result, loaded);
@@ -3869,10 +3931,13 @@ impl AiCapabilityDiscoveryBroker {
 
     /// Dispatches one frozen `graphql.capabilities.describe` call.
     ///
-    /// The candidate must come from discovery retained for this run or, when
-    /// enabled, the unexpired cache for this principal and AI session. Its
-    /// fingerprint must still match. An unknown identifier and an identifier
-    /// never returned to this run by discovery are both reported as one
+    /// The model names the candidate by the opaque `candidateReference` a
+    /// discover or browse call of this run returned. The reference resolves
+    /// only for the principal reference, AI session, run, attempt and
+    /// provider session it was issued to, from this session or, when enabled,
+    /// the unexpired discovery cache; its server-held entry fingerprint must
+    /// still match. An unknown identifier, an unknown reference and one issued
+    /// to another run are all reported as one
     /// bounded retryable [`AI_CAPABILITY_SELECTION_STALE`], so describe cannot
     /// be used to probe for capabilities the current principal cannot see.
     /// A candidate this run does hold whose index set has since changed is
@@ -3894,31 +3959,22 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<AiCapabilityDescription, AiError> {
         let parsed: BrokerDescribeArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
-        let capability_id = AiToolId::parse(parsed.capability_id).map_err(|_| stale_selection())?;
-        // A discovered candidate names its fingerprint; a browsed one names
-        // an opaque reference that only this run resolves to it.
-        let candidate_fingerprint = match (parsed.candidate_fingerprint, parsed.candidate_reference)
-        {
-            (Some(fingerprint), None) if crate::valid_sha256(&fingerprint) => fingerprint,
-            (None, Some(reference)) if crate::valid_sha256(&reference) => session
-                .browse_reference(
-                    &capability_id,
-                    &reference,
-                    &browse_reference_fence(principal_reference, run),
-                )
-                .ok_or_else(stale_selection)?,
+        let reference = match (parsed.candidate_reference, parsed.candidate_fingerprint) {
+            (Some(reference), None) if crate::valid_sha256(&reference) => reference,
+            // A transcript from an earlier contract holds no selection: the
+            // model discovers again and receives references.
+            (None, Some(_)) => return Err(stale_selection()),
             _ => return Err(malformed_broker_arguments()),
         };
+        let capability_id = AiToolId::parse(parsed.capability_id).map_err(|_| stale_selection())?;
+        // A discovered or browsed candidate names an opaque reference that
+        // only the run it was issued to resolves, from its own session or
+        // the discovery cache, to the candidate held server-side.
+        let fence = candidate_reference_fence(principal_reference, run);
         let search = session
-            .candidate_search(&capability_id, &candidate_fingerprint)
-            .or_else(|| {
-                self.cached_discovery(
-                    principal_reference,
-                    run,
-                    &capability_id,
-                    &candidate_fingerprint,
-                )
-            })
+            .candidate_reference(&capability_id, &reference, &fence)
+            .and_then(|fingerprint| session.candidate_search(&capability_id, &fingerprint))
+            .or_else(|| self.cached_discovery(&fence, &capability_id, &reference))
             .ok_or_else(stale_selection)?;
         // Admission is decided from the held candidate first: a candidate
         // this run's rules or brokered tools do not reach is a stale
@@ -5049,10 +5105,28 @@ mod tests {
         added_field: Option<&str>,
         second_root: bool,
     ) -> Arc<AiCapabilityIndex> {
+        generated_index_with_roots(
+            target_id,
+            profile_id,
+            target_policy,
+            added_field,
+            second_root.then_some("Read one reviewed application record by its subject heading."),
+        )
+    }
+
+    /// [`generated_index_with_schema`] whose `RecordBySubject` root, when
+    /// present, carries `second_root` as its description.
+    fn generated_index_with_roots(
+        target_id: &str,
+        profile_id: &str,
+        target_policy: &str,
+        added_field: Option<&str>,
+        second_root: Option<&str>,
+    ) -> Arc<AiCapabilityIndex> {
         let added_sdl = added_field
             .map(|field| format!(", {field}: String!"))
             .unwrap_or_default();
-        let second_root_sdl = if second_root {
+        let second_root_sdl = if second_root.is_some() {
             ", RecordBySubject(subject: String!): Record!"
         } else {
             ""
@@ -5112,11 +5186,11 @@ mod tests {
             true,
         )
         .expect("test query semantics should validate");
-        let second_operation = second_root.then(|| {
+        let second_operation = second_root.map(|description| {
             GraphqlSemanticOperationDescriptor::custom(
                 GraphqlOperationKind::Query,
                 "RecordBySubject",
-                "Read one reviewed application record by its subject heading.",
+                description,
                 vec![GraphqlSemanticArgumentDescriptor {
                     graphql_name: "subject".to_owned(),
                     description: "Reviewed record subject.".to_owned(),
@@ -6742,7 +6816,7 @@ mod tests {
             ).await.expect("discovery");
             json!({
                 "capabilityId": result["candidates"][0]["capabilityId"],
-                "candidateFingerprint": result["candidates"][0]["candidateFingerprint"]
+                "candidateReference": result["candidates"][0]["candidateReference"]
             })
         }
 
@@ -6753,36 +6827,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_cache_reuses_metadata_across_runs_with_fresh_execution_fences() {
+    async fn discovery_cache_answers_only_the_run_its_references_were_issued_to() {
         let mut fixture = DiscoveryCacheFixture::new(4);
         fixture.principal.expires_at = Some(fixture.clock.now() + Duration::minutes(75));
         let candidate = fixture.discover(&fixture.run).await;
+        // A fresh session of the issuing run resolves the reference from the
+        // cache.
         let first_session = DiscoveryCacheFixture::session();
         let first = fixture
             .broker
             .dispatch_describe(&fixture.principal, &fixture.run, &first_session, &candidate)
             .await
-            .expect("cached candidate describes in first run");
+            .expect("cached candidate describes in the issuing run");
         let mut changed_deadline = fixture.principal.clone();
         changed_deadline.expires_at = Some(fixture.clock.now() + Duration::minutes(90));
         assert!(matches!(fixture.broker.authorize_broker_execution(
             &changed_deadline, &fixture.run, &first_session,
             &json!({"loadedReference": first.loaded_reference(), "selections": ["records.id"]}),
         ).await, Err(AiError::Forbidden)));
+
+        // No later run, and no other attempt of this run, resolves it, so a
+        // reference never crosses runs through the cache.
         fixture.clock.advance_seconds(3_600);
         fixture.principal.expires_at = Some(fixture.clock.now() + Duration::minutes(75));
         let mut next_run = fixture.run.clone();
         next_run.run_id = AiRunId(Uuid::from_u128(200));
         next_run.attempt_id = Uuid::from_u128(201);
+        let mut next_attempt = fixture.run.clone();
+        next_attempt.attempt_id = Uuid::from_u128(202);
+        let mut next_provider_session = fixture.run.clone();
+        next_provider_session.provider_session_fingerprint = "provider-session-v2".to_owned();
+        for run in [&next_run, &next_attempt, &next_provider_session] {
+            let session = DiscoveryCacheFixture::session();
+            let error = fixture
+                .broker
+                .clone()
+                .dispatch_describe(&fixture.principal, run, &session, &candidate)
+                .await
+                .expect_err("another run holds no selection");
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+            assert_eq!(session.amplification().describe_calls, 0);
+        }
+
+        // The next run discovers again and loads with fresh fences.
+        let rediscovered = fixture.discover(&next_run).await;
+        assert_ne!(
+            rediscovered["candidateReference"], candidate["candidateReference"],
+            "every discovery issues fresh references"
+        );
         let next_session = DiscoveryCacheFixture::session();
         let next = fixture
             .broker
-            .clone()
-            .dispatch_describe(&fixture.principal, &next_run, &next_session, &candidate)
+            .dispatch_describe(&fixture.principal, &next_run, &next_session, &rediscovered)
             .await
-            .expect("one-hour-old candidate describes without another discovery");
-        assert_eq!(next_session.amplification().discover_calls, 0);
-        assert_eq!(next_session.amplification().describe_calls, 1);
+            .expect("rediscovered candidate describes");
         assert_ne!(first.loaded_reference(), next.loaded_reference());
         let execute =
             json!({"loadedReference": next.loaded_reference(), "selections": ["records.id"]});
@@ -6832,7 +6930,7 @@ mod tests {
                     &fixture.principal,
                     &next_run,
                     &DiscoveryCacheFixture::session(),
-                    &candidate,
+                    &rediscovered,
                 )
                 .await,
             Err(AiError::Forbidden)
@@ -6963,7 +7061,7 @@ mod tests {
         // after the change, whether or not the identifier exists.
         let unknown = json!({"loadedReference": "e".repeat(64), "selections": ["recordId"]});
         let mut forged = candidate.clone();
-        forged["candidateFingerprint"] = json!("f".repeat(64));
+        forged["candidateReference"] = json!("f".repeat(64));
         let mut absent = candidate.clone();
         absent["capabilityId"] = json!("generated.never_published");
         let assert_unheld = |error: AiError| {
@@ -7109,7 +7207,7 @@ mod tests {
             Err(AiError::InvalidInput(_))
         ));
         let mut forged = candidate.clone();
-        forged["candidateFingerprint"] = json!("f".repeat(64));
+        forged["candidateReference"] = json!("f".repeat(64));
         assert!(matches!(
             fixture
                 .broker
@@ -7154,10 +7252,10 @@ mod tests {
                 .await,
             Err(AiError::InvalidInput(_))
         ));
-        fixture.discover(&fixture.run).await;
+        let evicted = fixture.discover(&fixture.run).await;
         let mut other_run = fixture.run.clone();
         other_run.session_id = AiSessionId(Uuid::from_u128(999));
-        fixture.discover(&other_run).await;
+        let newest = fixture.discover(&other_run).await;
         assert!(matches!(
             fixture
                 .broker
@@ -7165,7 +7263,7 @@ mod tests {
                     &fixture.principal,
                     &fixture.run,
                     &DiscoveryCacheFixture::session(),
-                    &candidate,
+                    &evicted,
                 )
                 .await,
             Err(AiError::InvalidInput(_))
@@ -7176,7 +7274,7 @@ mod tests {
                 &fixture.principal,
                 &other_run,
                 &DiscoveryCacheFixture::session(),
-                &candidate,
+                &newest,
             )
             .await
             .expect("newest entry survives eviction");
@@ -7188,7 +7286,7 @@ mod tests {
                     &fixture.principal,
                     &other_run,
                     &DiscoveryCacheFixture::session(),
-                    &candidate,
+                    &newest,
                 )
                 .await,
             Err(AiError::InvalidInput(_))
@@ -7250,7 +7348,7 @@ mod tests {
                 &session,
                 &json!({
                     "capabilityId": candidate["capabilityId"],
-                    "candidateFingerprint": candidate["candidateFingerprint"]
+                    "candidateReference": candidate["candidateReference"]
                 }),
             )
             .await
@@ -7441,14 +7539,20 @@ mod tests {
 
         let describe = json!({
             "capabilityId": candidate["capabilityId"],
-            "candidateFingerprint": candidate["candidateFingerprint"],
+            "candidateReference": candidate["candidateReference"],
         });
         // A candidate this run did not broker is a stale selection, even when
-        // its search result is at hand.
+        // its search result and reference are at hand.
         default.record_search(
             session
                 .candidate_search(&static_entry.id, &static_entry.fingerprint)
                 .expect("recorded search"),
+            session
+                .state()
+                .candidate_references
+                .iter()
+                .cloned()
+                .collect(),
         );
         assert!(matches!(
             broker
@@ -7834,15 +7938,29 @@ mod tests {
         );
         assert!(!browsed.to_string().contains(create.id.as_str()));
 
+        let listed = browsed["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .find(|candidate| candidate["capabilityId"] == archive.id.as_str())
+            .expect("browsed mutation")
+            .clone();
         let describe = json!({
             "capabilityId": archive.id.as_str(),
-            "candidateFingerprint": archive.fingerprint,
+            "candidateReference": listed["candidateReference"],
         });
-        // The same candidate in a session whose rules refuse it is stale.
+        // The same candidate in a session whose rules refuse it is stale,
+        // even with its search result and reference at hand.
         narrow.record_search(
             session
                 .candidate_search(&archive.id, &archive.fingerprint)
                 .expect("recorded search"),
+            session
+                .state()
+                .candidate_references
+                .iter()
+                .cloned()
+                .collect(),
         );
         assert!(matches!(
             broker
@@ -8263,15 +8381,16 @@ mod tests {
 
     impl EntityBrokerFixture {
         fn new() -> Self {
-            let principal = principal();
+            Self::with_principal(principal(), two_root_entity_index("target-policy-v1"))
+        }
+
+        fn with_principal(principal: AuthPrincipal, index: Arc<AiCapabilityIndex>) -> Self {
             let reference = principal.reference();
             let authority = Arc::new(RootAuthority {
                 denied: RwLock::new(BTreeSet::new()),
                 policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
             });
-            let index = Arc::new(CurrentIndex(RwLock::new(two_root_entity_index(
-                "target-policy-v1",
-            ))));
+            let index = Arc::new(CurrentIndex(RwLock::new(index)));
             let clock = FixedClock::new(OffsetDateTime::UNIX_EPOCH);
             let broker = AiCapabilityDiscoveryBroker::new(
                 Arc::new(Resolver(principal)),
@@ -8328,7 +8447,7 @@ mod tests {
                     &self.session,
                     &json!({
                         "capabilityId": candidate["capabilityId"],
-                        "candidateFingerprint": candidate["candidateFingerprint"],
+                        "candidateReference": candidate["candidateReference"],
                     }),
                 )
                 .await
@@ -8534,7 +8653,7 @@ mod tests {
                     &fixture.session,
                     &json!({
                         "capabilityId": held["capabilityId"],
-                        "candidateFingerprint": held["candidateFingerprint"],
+                        "candidateReference": held["candidateReference"],
                     }),
                 )
                 .await,
@@ -9390,6 +9509,248 @@ mod tests {
             )
             .await
             .expect("issuing run");
+    }
+
+    fn principal_named(user_id: &str) -> AuthPrincipal {
+        let mut named = principal();
+        if let AuthPrincipal::User(user) = &mut named {
+            user.user_id = user_id.to_owned();
+        }
+        named
+    }
+
+    /// A model-facing broker response with each opaque per-call reference
+    /// replaced by a placeholder, after checking that it is one and that the
+    /// response carries no fingerprint member at all.
+    fn without_references(mut value: serde_json::Value) -> serde_json::Value {
+        fn walk(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for (key, member) in object.iter_mut() {
+                        assert!(
+                            !key.to_ascii_lowercase().contains("fingerprint"),
+                            "model-facing {key}"
+                        );
+                        if key == "candidateReference" || key == "loadedReference" {
+                            assert!(member.as_str().is_some_and(crate::valid_sha256), "{member}");
+                            *member = json!("<reference>");
+                        } else {
+                            walk(member);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
+                _ => {}
+            }
+        }
+        walk(&mut value);
+        value
+    }
+
+    /// What one principal sees of the `Record` entity through discover and
+    /// describe, when `RecordBySubject` carries `hidden_description` and,
+    /// with `deny_hidden`, host policy denies it that root.
+    async fn observe_record_entity(
+        user_id: &str,
+        hidden_description: &str,
+        deny_hidden: bool,
+    ) -> (serde_json::Value, serde_json::Value) {
+        let fixture = EntityBrokerFixture::with_principal(
+            principal_named(user_id),
+            generated_index_with_roots(
+                "generated-read-application",
+                "generated-read",
+                "target-policy-v1",
+                None,
+                Some(hidden_description),
+            ),
+        );
+        if deny_hidden {
+            fixture.deny("RecordBySubject");
+        }
+        let discovered = fixture.discover().await;
+        let described = fixture
+            .describe()
+            .await
+            .expect("describe")
+            .into_model_result();
+        (
+            without_references(discovered),
+            without_references(described),
+        )
+    }
+
+    #[tokio::test]
+    async fn discover_and_describe_never_vary_with_hidden_operations() {
+        const HIDDEN: &str = "Read one reviewed application record by its subject heading.";
+        const REVISED: &str =
+            "Read one reviewed application record by its revised subject heading.";
+        // `restricted` is denied RecordBySubject; `full` may use both roots.
+        let restricted = observe_record_entity("restricted-user", HIDDEN, true).await;
+        let revised = observe_record_entity("restricted-user", REVISED, true).await;
+        // A change to a root host policy hides changes nothing this
+        // principal receives: no index, entry or candidate fingerprint, and
+        // no other artifact, follows it.
+        assert_eq!(restricted, revised);
+        for response in [&restricted.0, &restricted.1] {
+            let text = response.to_string();
+            assert!(!text.contains("RecordBySubject"), "{text}");
+            assert!(!text.contains("heading"), "{text}");
+        }
+
+        // Two principals with different policy see the operation they share
+        // identically, and the same candidate apart from the operation list.
+        let full = observe_record_entity("full-user", HIDDEN, false).await;
+        let shared = |described: &serde_json::Value| {
+            described["operations"]
+                .as_array()
+                .expect("operations")
+                .iter()
+                .find(|operation| operation["operation"] == "GeneratedRecord")
+                .cloned()
+                .expect("shared operation")
+        };
+        assert_eq!(shared(&full.1), shared(&restricted.1));
+        assert_eq!(full.1["operations"].as_array().map(Vec::len), Some(2));
+        let mut full_candidate = full.0["candidates"][0].clone();
+        full_candidate["operations"] = restricted.0["candidates"][0]["operations"].clone();
+        assert_eq!(full_candidate, restricted.0["candidates"][0]);
+        let mut full_discovery = full.0.clone();
+        full_discovery["candidates"] = restricted.0["candidates"].clone();
+        assert_eq!(full_discovery, restricted.0);
+        for key in [
+            "version",
+            "capabilityId",
+            "kind",
+            "name",
+            "description",
+            "namespace",
+            "entity",
+            "risk",
+            "approval",
+            "usage",
+        ] {
+            assert_eq!(full.1[key], restricted.1[key], "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_references_resolve_only_for_the_issuing_run() {
+        let fixture = EntityBrokerFixture::new();
+        let discovered = fixture.discover().await;
+        assert!(discovered.get("indexFingerprint").is_none(), "{discovered}");
+        let candidate = discovered["candidates"][0].clone();
+        assert!(candidate.get("candidateFingerprint").is_none());
+        let arguments = json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateReference": candidate["candidateReference"],
+        });
+        // The same (cloned) session under another run, attempt, provider
+        // session, AI session or principal resolves nothing.
+        let mut other_run = fixture.run.clone();
+        other_run.run_id = AiRunId::new();
+        let mut other_attempt = fixture.run.clone();
+        other_attempt.attempt_id = Uuid::new_v4();
+        let mut other_provider_session = fixture.run.clone();
+        other_provider_session.provider_session_fingerprint = "provider-session-v2".to_owned();
+        let mut other_session = fixture.run.clone();
+        other_session.session_id = AiSessionId::new();
+        for run in [
+            other_run,
+            other_attempt,
+            other_provider_session,
+            other_session,
+        ] {
+            let error = fixture
+                .broker
+                .dispatch_describe(
+                    &fixture.principal,
+                    &run,
+                    &fixture.session.clone(),
+                    &arguments,
+                )
+                .await
+                .expect_err("another run");
+            assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        }
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &principal_named("another-user").reference(),
+                &fixture.run,
+                &fixture.session,
+                &arguments,
+            )
+            .await
+            .expect_err("another principal");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        // A fresh session of the same run, without the discovery cache,
+        // holds nothing either.
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &DiscoveryCacheFixture::session(),
+                &arguments,
+            )
+            .await
+            .expect_err("fresh session");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        // The server-held entry fingerprint is no substitute: an earlier
+        // contract's candidateFingerprint is an unheld selection.
+        let entity = fixture.entity_id();
+        let entry = fixture
+            .index
+            .0
+            .read()
+            .expect("index")
+            .entries()
+            .find(|entry| entry.id == entity)
+            .expect("entity entry")
+            .fingerprint
+            .clone();
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({"capabilityId": entity.as_str(), "candidateFingerprint": entry}),
+            )
+            .await
+            .expect_err("entry fingerprint");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        // A reference named under another capability resolves nothing.
+        let error = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &json!({
+                    "capabilityId": fixture.root_id("GeneratedRecord").as_str(),
+                    "candidateReference": candidate["candidateReference"],
+                }),
+            )
+            .await
+            .expect_err("another capability");
+        assert_input_error(&error, AI_CAPABILITY_SELECTION_STALE);
+        let described = fixture
+            .broker
+            .dispatch_describe(
+                &fixture.principal,
+                &fixture.run,
+                &fixture.session,
+                &arguments,
+            )
+            .await
+            .expect("issuing run");
+        assert!(described.contract().get("candidateFingerprint").is_none());
+        // Discovering again issues a fresh reference; both stay usable in
+        // the issuing run.
+        let again = fixture.discover().await["candidates"][0]["candidateReference"].clone();
+        assert_ne!(again, candidate["candidateReference"]);
     }
 
     /// Describes the entity and authorizes one first page of `operation`.

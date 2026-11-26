@@ -1181,7 +1181,7 @@ async fn broker_round_trips(
         }
         let describe = json!({
             "capabilityId": candidate["capabilityId"],
-            "candidateFingerprint": candidate["candidateFingerprint"],
+            "candidateReference": candidate["candidateReference"],
         });
         let started = Instant::now();
         let description = broker
