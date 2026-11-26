@@ -28,8 +28,8 @@ by those columns, or use an explicit backend-specific query for ordering
 that needs SQL expressions.
 
 The rendered sort contributes to the client interpretation fingerprint.
-Fingerprints change for entities whose sort SQL changes. Regenerate affected
-catalogues and refresh pinned fingerprints before deploying.
+A schema's fingerprint changes if any entity's rendered sort SQL changes.
+Regenerate affected catalogues and refresh pinned fingerprints before deploying.
 
 Handwritten `DatabaseEntity` implementations that use runtime schema
 conversion must supply `DEFAULT_SORT_TERMS` for a nonempty `DEFAULT_SORT`.
