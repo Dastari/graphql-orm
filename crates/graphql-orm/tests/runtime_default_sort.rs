@@ -12,11 +12,17 @@ use graphql_orm_macros::GraphQLSchemaEntity;
 #[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[cfg_attr(
     not(feature = "mssql"),
-    graphql_entity(table = "sort_records", default_sort = r#"sort_records.id DESC, "line,no" ASC, "order""#)
+    graphql_entity(
+        table = "sort_records",
+        default_sort = r#"sort_records.id DESC, "line,no" ASC, "order""#
+    )
 )]
 #[cfg_attr(
     feature = "mssql",
-    graphql_entity(table = "sort_records", default_sort = "sort_records.id DESC, [line,no] ASC, [order]")
+    graphql_entity(
+        table = "sort_records",
+        default_sort = "sort_records.id DESC, [line,no] ASC, [order]"
+    )
 )]
 struct SortRecord {
     #[primary_key]
