@@ -1,3 +1,5 @@
+//! Build and serialize a descriptor for a hand-written subgraph.
+
 use graphql_orm_router_protocol::{
     AuthorizationRequirement, CapabilitySet, Fingerprint, OperationDescriptor, RootOperationType,
     SubgraphDescriptorBuilder,

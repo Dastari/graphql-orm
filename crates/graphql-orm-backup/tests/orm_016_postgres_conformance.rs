@@ -1,3 +1,5 @@
+//! Backup adapter conformance against test-owned PostgreSQL databases.
+
 // The shared conformance suite builds `LocalBackupRepository::new`, which does
 // not exist on Windows.
 #![cfg(not(windows))]

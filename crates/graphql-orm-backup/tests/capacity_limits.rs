@@ -1,3 +1,5 @@
+//! Byte limits for buffered reads, decompression, and streaming fallback.
+
 // `LocalBackupRepository::new` does not exist on Windows; see
 // `new_trusted_windows_root`.
 #![cfg(not(windows))]

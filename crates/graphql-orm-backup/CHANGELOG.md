@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.32.0
+
+- Inherit the workspace lint baseline, forbid unsafe Rust in crate targets,
+  and document the remaining public backup API.
+
 ## Unreleased - 0.31.0
 
 - The optional PostgreSQL ORM adapter can use canonical change-journal keys

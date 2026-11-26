@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.20.0 to 0.21.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
 ## 0.19.0 to 0.20.0
 
 **No action.** The existing downstream error response is unchanged by

@@ -1,3 +1,5 @@
+//! Snapshot lifecycle and repository locking against a test-owned Samba share.
+
 use std::{
     env,
     sync::{Arc, Mutex},

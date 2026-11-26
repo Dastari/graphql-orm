@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.18.3 to 0.19.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
 ## 0.18.2 to 0.18.3: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

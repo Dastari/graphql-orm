@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.31.0 to 0.32.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
 ## 0.30.0 to 0.31.0: Canonical PostgreSQL journal keys
 
 **No action.** Upgrade ORM and backup together when enabling

@@ -1,3 +1,5 @@
+//! Incremental backup, staged restore, and synthetic-full compaction.
+
 // `LocalBackupRepository::new` does not exist on Windows; see
 // `new_trusted_windows_root`.
 #![cfg(not(windows))]

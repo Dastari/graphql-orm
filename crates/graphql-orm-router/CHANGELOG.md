@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.21.0
+
+- Check public API documentation in the library and retain its unsafe Rust
+  prohibition. Package-wide lint inheritance is deferred while the outbound
+  proxy integration test sets process environment variables.
+
 ## Unreleased - 0.20.0
 
 - **No action (#923).** Downstream GraphQL errors from queries and mutations
