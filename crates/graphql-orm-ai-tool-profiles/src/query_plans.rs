@@ -271,7 +271,7 @@ impl AiCustomInputDisclosure {
         schema: &FinishedSchema,
         catalog: &GraphqlSemanticCatalog,
     ) -> Result<CustomInputBinding, AiError> {
-        let operator_roles = validate_filter_roles(schema, catalog).ok();
+        let filter_roles = validate_filter_roles(schema, catalog);
         let reachable =
             |arguments: &[graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor]| {
                 arguments
@@ -308,37 +308,63 @@ impl AiCustomInputDisclosure {
         }
         // Canonical link changes reach keys owned by the relationship target.
         for entity in &catalog.entities {
-            for (name, ty) in &schema.types {
-                let Some(relation) = link_change_relation(entity, name) else {
-                    continue;
-                };
-                let SchemaType::InputObject(fields) = ty else {
-                    continue;
-                };
-                if generated_reach
-                    .get(&entity.entity_name)
-                    .is_some_and(|reach| reach.contains(name))
-                    && generated_shape_matches(
+            let targets = generated_reach
+                .get(&entity.entity_name)
+                .into_iter()
+                .flatten()
+                .filter_map(|name| {
+                    let relation = link_change_relation(entity, name)?;
+                    let Some(SchemaType::InputObject(fields)) = schema.types.get(name) else {
+                        return None;
+                    };
+                    generated_shape_matches(
                         schema,
                         entity,
                         SemanticInputKind::LinkChange,
                         name,
                         fields,
                     )
-                {
-                    generated_reach
-                        .entry(relation.target.clone())
-                        .or_default()
-                        .insert(format!("{}KeyInput", relation.target));
+                    .then_some(&relation.target)
+                })
+                .collect::<Vec<_>>();
+            for target in targets {
+                generated_reach
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(format!("{target}KeyInput"));
+            }
+        }
+        let mut generated_owners = BTreeMap::new();
+        for (index, entity) in catalog.entities.iter().enumerate() {
+            for input in generated_reach
+                .get(&entity.entity_name)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(kind) = generated_input_kind(input, &entity.entity_name).or_else(|| {
+                    (link_change_relation(entity, input).is_some()
+                        || entity.generated_input_members.iter().any(|member| {
+                            member.input_type == *input
+                                && member.kind == graphql_orm_operation_catalog::GraphqlGeneratedInputKind::LinkChange
+                        }))
+                    .then_some(SemanticInputKind::LinkChange)
+                }) {
+                    generated_owners
+                        .entry(input.clone())
+                        .or_insert_with(Vec::new)
+                        .push((index, kind));
                 }
             }
         }
         let mut binding = CustomInputBinding {
-            declared: BTreeMap::new(),
-            generated_reach,
+            generated_owners,
+            reached_inputs: generated_reach.into_values().flatten().collect(),
+            ..CustomInputBinding::default()
         };
+        // Shape errors take priority over filter-role errors, as before.
         validate_generated_input_shapes(schema, catalog, &binding)?;
-        validate_filter_roles(schema, catalog)?;
+        binding.filter_roles = filter_roles?;
+        binding.shared_page_input = shared_page_input(schema, catalog, &binding);
         // Every input object outside the generated entity inputs and the
         // shared generated helpers is handwritten, wherever it is reached.
         let handwritten = schema
@@ -346,9 +372,7 @@ impl AiCustomInputDisclosure {
             .iter()
             .filter(|(_, ty)| matches!(ty, SchemaType::InputObject(_)))
             .map(|(name, _)| name)
-            .filter(|name| {
-                handwritten_input(schema, catalog, &binding, operator_roles.as_ref(), name)
-            })
+            .filter(|name| handwritten_input(schema, catalog, &binding, name))
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut declared = BTreeMap::<String, BTreeSet<String>>::new();
@@ -2146,17 +2170,36 @@ impl AiGraphqlMutationCapabilityCatalog {
                 "finished GraphQL Mutation roots and semantic operations differ",
             ));
         }
+        let classified_for_ai = |operation: &GraphqlSemanticOperationDescriptor| {
+            matches!(
+                operation.ai_mutation_execution,
+                Some(
+                    AiMutationExecutionPolicy::Automatic
+                        | AiMutationExecutionPolicy::ApprovalRequired
+                )
+            )
+        };
+        // A mutation classified for AI execution must not take a transient
+        // argument: a plan's arguments are retained with the run. Checked on
+        // every classified mutation, before the result-disclosure filter, so
+        // such a declaration is always an error and never a silent omission,
+        // and before any plan schema is built, so the argument is never
+        // offered.
+        for operation in semantic_mutations
+            .iter()
+            .filter(|operation| classified_for_ai(operation))
+        {
+            let root = schema.mutation_root_field(&operation.field_name)?;
+            if root.arguments.values().any(|input| input.transient) {
+                return Err(configuration_error(
+                    "operation takes a transient argument and cannot be an AI capability",
+                ));
+            }
+        }
         let executable = semantic_mutations
             .into_iter()
             .filter(|operation| {
-                operation_result_is_provider_exportable(operation)
-                    && matches!(
-                        operation.ai_mutation_execution,
-                        Some(
-                            AiMutationExecutionPolicy::Automatic
-                                | AiMutationExecutionPolicy::ApprovalRequired
-                        )
-                    )
+                operation_result_is_provider_exportable(operation) && classified_for_ai(operation)
             })
             .collect::<Vec<_>>();
         let (executable, diagnostics) =
@@ -2714,30 +2757,44 @@ fn admit_input_capabilities<'a>(
                 }
             }
         }
-        let mut blocked = false;
-        for entity in &catalog.entities {
-            for member in &entity.generated_input_members {
-                if member.required
-                    && inputs.contains(&member.input_type)
-                    && canonical_generated_owners(schema, catalog, &binding, &member.input_type)
+        let diagnostic_start = diagnostics.len();
+        let mut required_members = Vec::new();
+        let input_owners = inputs
+            .iter()
+            .map(|input| {
+                (
+                    input,
+                    canonical_generated_owners(schema, catalog, &binding, input),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (input, owners) in &input_owners {
+            for (entity, _) in owners {
+                required_members.extend(
+                    entity
+                        .generated_input_members
                         .iter()
-                        .any(|(owner, _)| owner.entity_name == entity.entity_name)
-                {
-                    blocked = true;
-                    diagnostics.push(AiGraphqlCapabilityDiagnostic {
-                        operation_kind: operation.kind,
-                        field_name: operation.field_name.clone(),
-                        input_type: member.input_type.clone(),
-                        member: member.field_name.clone(),
-                    });
-                }
+                        .enumerate()
+                        .filter(|(_, member)| member.required && member.input_type == **input)
+                        .map(|(index, member)| (&entity.entity_name, index, member)),
+                );
             }
         }
-        for input in &inputs {
+        // Preserve the diagnostic ordering of the canonical entity and member lists.
+        required_members.sort_by_key(|&(entity_name, index, _)| (entity_name, index));
+        diagnostics.extend(required_members.into_iter().map(|(_, _, member)| {
+            AiGraphqlCapabilityDiagnostic {
+                operation_kind: operation.kind,
+                field_name: operation.field_name.clone(),
+                input_type: member.input_type.clone(),
+                member: member.field_name.clone(),
+            }
+        }));
+        for (input, owners) in input_owners {
             let Some(SchemaType::InputObject(fields)) = schema.types.get(input) else {
                 continue;
             };
-            for (entity, _) in canonical_generated_owners(schema, catalog, &binding, input) {
+            for (entity, _) in owners {
                 for (name, field) in fields {
                     if is_non_null(&field.ty)
                         && !field.has_default
@@ -2747,26 +2804,21 @@ fn admit_input_capabilities<'a>(
                                     || semantic.classification
                                         == GraphqlSemanticClassification::Secret)
                         })
+                        && !diagnostics[diagnostic_start..].iter().any(|diagnostic| {
+                            diagnostic.input_type == *input && diagnostic.member == *name
+                        })
                     {
-                        blocked = true;
-                        if !diagnostics.iter().any(|diagnostic| {
-                            diagnostic.operation_kind == operation.kind
-                                && diagnostic.field_name == operation.field_name
-                                && diagnostic.input_type == *input
-                                && diagnostic.member == *name
-                        }) {
-                            diagnostics.push(AiGraphqlCapabilityDiagnostic {
-                                operation_kind: operation.kind,
-                                field_name: operation.field_name.clone(),
-                                input_type: input.clone(),
-                                member: name.clone(),
-                            });
-                        }
+                        diagnostics.push(AiGraphqlCapabilityDiagnostic {
+                            operation_kind: operation.kind,
+                            field_name: operation.field_name.clone(),
+                            input_type: input.clone(),
+                            member: name.clone(),
+                        });
                     }
                 }
             }
         }
-        if !blocked {
+        if diagnostics.len() == diagnostic_start {
             admitted.push(operation);
         }
     }
@@ -3307,19 +3359,37 @@ struct FinishedSchema {
 struct CustomInputBinding {
     /// Declared exportable fields per handwritten input object.
     declared: BTreeMap<String, BTreeSet<String>>,
-    /// Input objects actually reached by each entity's generated operations
-    /// or by relationship arguments targeting that entity.
-    generated_reach: BTreeMap<String, BTreeSet<String>>,
+    /// Candidate generated owners by exact input identity, in catalogue order.
+    /// Indices refer to the same validated entity catalogue used for binding.
+    generated_owners: BTreeMap<String, Vec<(usize, SemanticInputKind)>>,
+    /// Types reached by a generated root or relationship.
+    reached_inputs: BTreeSet<String>,
+    /// Helpers whose canonical filter contract passed validation.
+    filter_roles: BTreeSet<String>,
+    shared_page_input: bool,
 }
 
 impl CustomInputBinding {
-    /// Returns whether a generated-kind name belongs to that entity's
-    /// generated contract. The name alone is not enough: a generated
-    /// operation or relationship of the entity must reach it.
-    fn generated_for(&self, entity_name: &str, input_name: &str) -> bool {
-        self.generated_reach
-            .get(entity_name)
-            .is_some_and(|reach| reach.contains(input_name))
+    fn candidate_owners<'a, 'b>(
+        &'b self,
+        catalog: &'a GraphqlSemanticCatalog,
+        input_name: &str,
+    ) -> impl Iterator<
+        Item = (
+            &'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+            SemanticInputKind,
+        ),
+    > + use<'a, 'b> {
+        self.generated_owners
+            .get(input_name)
+            .into_iter()
+            .flatten()
+            .map(move |&(index, kind)| (&catalog.entities[index], kind))
+    }
+
+    fn is_shared_input(&self, name: &str) -> bool {
+        (self.filter_roles.contains(name) && self.reached_inputs.contains(name))
+            || (name == "PageInput" && self.shared_page_input)
     }
 }
 
@@ -3343,6 +3413,8 @@ struct SchemaInput {
     ty: String,
     has_default: bool,
     description: Option<String>,
+    /// Declared `@transientInput`: request-only data no plan may carry.
+    transient: bool,
 }
 
 impl FinishedSchema {
@@ -3410,6 +3482,11 @@ impl FinishedSchema {
                                         SchemaInput {
                                             ty: argument.node.ty.node.to_string(),
                                             has_default: argument.node.default_value.is_some(),
+                                            transient: argument.node.directives.iter().any(
+                                                |directive| {
+                                                    directive.node.name.node == "transientInput"
+                                                },
+                                            ),
                                             description: argument
                                                 .node
                                                 .description
@@ -3442,6 +3519,7 @@ impl FinishedSchema {
                                         .node
                                         .description
                                         .map(|description| description.node.to_string()),
+                                    transient: false,
                                 },
                             )
                         })
@@ -3494,6 +3572,16 @@ impl FinishedSchema {
             None => AiCustomInputDisclosure::default()
                 .resolve(self, catalog)
                 .map(std::borrow::Cow::Owned),
+        }
+    }
+
+    fn filter_roles(
+        &self,
+        catalog: &GraphqlSemanticCatalog,
+    ) -> Result<std::borrow::Cow<'_, BTreeSet<String>>, AiError> {
+        match &self.custom_inputs {
+            Some(binding) => Ok(std::borrow::Cow::Borrowed(&binding.filter_roles)),
+            None => validate_filter_roles(self, catalog).map(std::borrow::Cow::Owned),
         }
     }
 
@@ -3589,6 +3677,14 @@ fn compile_capability(
 ) -> Result<CompiledCapability, AiError> {
     let root_field = schema.operation_root_field(expected_kind, &operation.field_name)?;
     validate_operation_against_schema(operation, root_field, expected_kind)?;
+    // A plan's arguments are retained with the run, so a root that takes a
+    // transient argument has no typed capability: not with the argument in
+    // its plan schema, and not with it silently left out.
+    if root_field.arguments.values().any(|input| input.transient) {
+        return Err(configuration_error(
+            "operation takes a transient argument and cannot be an AI capability",
+        ));
+    }
     let output = resolve_query_output(schema, semantic_catalog, operation, &root_field.ty, limits)?;
     let argument_schema = build_plan_schema(schema, semantic_catalog, operation, &output, limits)?;
     let compact_argument_schema = build_compact_plan_schema(
@@ -3800,11 +3896,7 @@ fn resolve_query_output(
             maximum_items,
         });
     }
-    if catalog
-        .entities
-        .iter()
-        .any(|entity| entity.entity_name == named)
-    {
+    if find_semantic_entity(catalog, named).is_some() {
         return Ok(QueryOutput::Entity {
             entity: named.to_owned(),
             route: root_list_route(graphql_type),
@@ -4879,7 +4971,6 @@ fn restrict_input_fields(
     input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> Result<BTreeMap<String, SchemaInput>, AiError> {
-    let operator_roles = validate_filter_roles(schema, catalog)?;
     // A generated type belongs to its exact entity, not the longest entity
     // name that happens to prefix it (e.g. Subscription vs SubscriptionWhere).
     let binding = schema.custom_input_binding(catalog)?;
@@ -4904,13 +4995,7 @@ fn restrict_input_fields(
                 }
                 None => {}
             }
-            let shared = (operator_roles.contains_key(input_name)
-                && binding
-                    .generated_reach
-                    .values()
-                    .any(|reach| reach.contains(input_name)))
-                || shared_input_helper(schema, catalog, &binding, input_name);
-            if !shared {
+            if !binding.is_shared_input(input_name) {
                 // Every other input is handwritten wherever it is reached. It
                 // carries no canonical field coordinates, so its disclosure is
                 // explicit and never inferred from its name.
@@ -4920,10 +5005,15 @@ fn restrict_input_fields(
             // may be shared by entities named Page and StringFilter. A shared
             // helper that a custom root also uses as an entity input has
             // conflicting provenance and is refused rather than exempted.
-            if catalog.entities.iter().any(|entity| {
-                input_name.starts_with(&entity.entity_name)
-                    && semantic_input_owner(schema, catalog, &entity.entity_name, input_name)
-            }) {
+            if input_name
+                .char_indices()
+                .map(|(index, _)| &input_name[..index])
+                .chain(std::iter::once(input_name))
+                .any(|prefix| {
+                    find_semantic_entity(catalog, prefix).is_some()
+                        && semantic_input_owner(schema, catalog, prefix, input_name)
+                })
+            {
                 return Err(configuration_error(
                     "query input semantic ownership is ambiguous",
                 ));
@@ -5122,18 +5212,7 @@ fn validate_generated_input_shapes(
         let SchemaType::InputObject(fields) = ty else {
             continue;
         };
-        for entity in &catalog.entities {
-            if !binding.generated_for(&entity.entity_name, input) {
-                continue;
-            }
-            let kind=generated_input_kind(input,&entity.entity_name).or_else(||
-                link_change_relation(entity,input).map(|_| SemanticInputKind::LinkChange))
-                .or_else(|| entity.generated_input_members.iter().any(|member|
-                    member.input_type == *input && member.kind == graphql_orm_operation_catalog::GraphqlGeneratedInputKind::LinkChange)
-                    .then_some(SemanticInputKind::LinkChange));
-            let Some(kind) = kind else {
-                continue;
-            };
+        for (entity, kind) in binding.candidate_owners(catalog, input) {
             if kind == SemanticInputKind::RuntimeOrder {
                 validate_runtime_order_input(schema, entity, fields)?;
             } else if let Some(member) =
@@ -5142,11 +5221,7 @@ fn validate_generated_input_shapes(
                 return Err(generated_shape_error(input, &member));
             }
         }
-        if !binding
-            .generated_reach
-            .values()
-            .any(|reach| reach.contains(input))
-        {
+        if !binding.reached_inputs.contains(input) {
             continue;
         }
         let candidates: Vec<Vec<(&str, String)>> = match input.as_str() {
@@ -5254,21 +5329,9 @@ fn canonical_generated_owners<'a>(
         Some(SchemaType::InputObject(fields)) => fields,
         _ => &empty,
     };
-    catalog
-        .entities
-        .iter()
-        .filter_map(|entity| {
-            generated_input_kind(input_name, &entity.entity_name)
-                .or_else(|| entity.generated_input_members.iter().any(|member|
-                    member.input_type == input_name && member.kind == graphql_orm_operation_catalog::GraphqlGeneratedInputKind::LinkChange)
-                    .then_some(SemanticInputKind::LinkChange))
-                .or_else(|| {
-                    link_change_relation(entity, input_name).map(|_| SemanticInputKind::LinkChange)
-                })
-                .filter(|_| binding.generated_for(&entity.entity_name, input_name))
-                .filter(|kind| generated_shape_matches(schema, entity, *kind, input_name, fields))
-                .map(|kind| (entity, kind))
-        })
+    binding
+        .candidate_owners(catalog, input_name)
+        .filter(|(entity, kind)| generated_shape_matches(schema, entity, *kind, input_name, fields))
         .collect()
 }
 
@@ -5279,6 +5342,9 @@ fn link_change_relation<'a>(
     entity: &'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
     input_name: &str,
 ) -> Option<&'a GraphqlSemanticRelationshipDescriptor> {
+    if !input_name.ends_with("LinkChangeInput") {
+        return None;
+    }
     entity.fields.iter().find_map(|field| {
         let relationship = field.relationship.as_ref()?;
         if relationship.cardinality != GraphqlSemanticRelationshipCardinality::Many {
@@ -5380,12 +5446,8 @@ fn generated_service_helper(
     let Some(SchemaType::InputObject(fields)) = schema.types.get(input_name) else {
         return None;
     };
-    generated_service_helper_shape(schema, input_name, fields).filter(|_| {
-        binding
-            .generated_reach
-            .values()
-            .any(|reach| reach.contains(input_name))
-    })
+    generated_service_helper_shape(schema, input_name, fields)
+        .filter(|_| binding.reached_inputs.contains(input_name))
 }
 
 /// Checks an enum's identity and complete value set.
@@ -5756,17 +5818,11 @@ fn handwritten_input(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
     binding: &CustomInputBinding,
-    operator_roles: Option<&BTreeMap<String, Value>>,
     input_name: &str,
 ) -> bool {
     canonical_generated_owners(schema, catalog, binding, input_name).is_empty()
         && generated_service_helper(schema, binding, input_name).is_none()
-        && !(operator_roles.is_some_and(|roles| roles.contains_key(input_name))
-            && binding
-                .generated_reach
-                .values()
-                .any(|reach| reach.contains(input_name)))
-        && !shared_input_helper(schema, catalog, binding, input_name)
+        && !binding.is_shared_input(input_name)
 }
 
 /// Restricts a handwritten input object to its explicitly declared fields.
@@ -5793,7 +5849,7 @@ fn restrict_custom_input_fields(
     Ok(restricted)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SemanticInputKind {
     /// Runtime link changes of one written record, one member per relation.
     Links,
@@ -5880,8 +5936,8 @@ fn input_type_reaches(
     graphql_type: &str,
     input_name: &str,
 ) -> bool {
-    let operator_roles = validate_filter_roles(schema, catalog).ok();
-    reachable_input_types(schema, catalog, operator_roles.as_ref(), graphql_type)
+    let operator_roles = schema.filter_roles(catalog).ok();
+    reachable_input_types(schema, catalog, operator_roles.as_deref(), graphql_type)
         .contains(input_name)
 }
 
@@ -5906,7 +5962,7 @@ fn all_reachable_inputs(schema: &FinishedSchema, ty: &str) -> BTreeSet<String> {
 fn reachable_input_types(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
-    operator_roles: Option<&BTreeMap<String, Value>>,
+    operator_roles: Option<&BTreeSet<String>>,
     graphql_type: &str,
 ) -> BTreeSet<String> {
     // Explore the finite finished input-type graph, not recursive values.
@@ -5922,16 +5978,12 @@ fn reachable_input_types(
             continue;
         }
         if let Some(SchemaType::InputObject(fields)) = schema.types.get(name) {
-            let where_entity = catalog.entities.iter().find(|entity| {
-                name == format!("{}WhereInput", entity.entity_name)
-                    && generated_shape_matches(
-                        schema,
-                        entity,
-                        SemanticInputKind::Where,
-                        name,
-                        fields,
-                    )
-            });
+            let where_entity = name
+                .strip_suffix("WhereInput")
+                .and_then(|name| find_semantic_entity(catalog, name))
+                .filter(|entity| {
+                    generated_shape_matches(schema, entity, SemanticInputKind::Where, name, fields)
+                });
             for (field_name, field) in fields {
                 if let Some(entity) = where_entity {
                     // Match the generated Where field admission contract. Hidden,
@@ -5950,7 +6002,7 @@ fn reachable_input_types(
                     if semantic.filter_input.as_ref().is_some_and(|input| {
                         render_type_ref(&input.type_ref) == field.ty
                             && operator_roles.as_ref().is_some_and(|roles| {
-                                named_type(&field.ty).is_ok_and(|name| roles.contains_key(name))
+                                named_type(&field.ty).is_ok_and(|name| roles.contains(name))
                             })
                     }) {
                         continue;
@@ -5963,10 +6015,17 @@ fn reachable_input_types(
     visited
 }
 
+#[cfg(test)]
+thread_local! {
+    static FILTER_ROLE_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn validate_filter_roles(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
-) -> Result<BTreeMap<String, Value>, AiError> {
+) -> Result<BTreeSet<String>, AiError> {
+    #[cfg(test)]
+    FILTER_ROLE_VALIDATIONS.with(|count| count.set(count.get() + 1));
     let mut roles = BTreeMap::new();
     for entity in &catalog.entities {
         for field in &entity.fields {
@@ -6112,7 +6171,7 @@ fn validate_filter_roles(
             }
         }
     }
-    Ok(roles)
+    Ok(roles.into_keys().collect())
 }
 
 fn validate_filter_operand_type(
@@ -6148,38 +6207,25 @@ fn validate_filter_operand_type(
     }
 }
 
-fn shared_input_helper(
+fn shared_page_input(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
     binding: &CustomInputBinding,
-    input_name: &str,
 ) -> bool {
-    let page_shape = input_name == "PageInput"
-        && binding
-            .generated_reach
-            .values()
-            .any(|reach| reach.contains(input_name))
-        && match schema.types.get(input_name) {
-            Some(SchemaType::InputObject(fields)) => {
-                fields.len() == 2
-                    && [
-                        ["limit", "offset"],
-                        ["Limit", "Offset"],
-                        ["LIMIT", "OFFSET"],
-                    ]
+    if !binding.reached_inputs.contains("PageInput")
+        || !matches!(schema.types.get("PageInput"), Some(SchemaType::InputObject(fields))
+            if fields.len() == 2
+                && [["limit", "offset"], ["Limit", "Offset"], ["LIMIT", "OFFSET"]]
                     .iter()
                     .any(|names| names.iter().all(|name| fields.contains_key(*name)))
-                    && fields
-                        .values()
-                        .all(|field| field.ty == "Int" && !field.has_default)
-            }
-            _ => false,
-        };
+                && fields.values().all(|field| field.ty == "Int" && !field.has_default))
+    {
+        return false;
+    }
     let page_argument =
         |argument: &graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor| {
             let ty = render_type_ref(&argument.type_ref);
-            page_shape
-                && named_type(&ty).ok() == Some(input_name)
+            named_type(&ty).ok() == Some("PageInput")
                 && is_page_argument(&argument.graphql_name, &ty, schema)
         };
     catalog
@@ -6277,19 +6323,14 @@ fn restricted_enum_values(
     enum_name: &str,
     values: &[String],
 ) -> Result<Vec<String>, AiError> {
-    let mut owners = catalog.entities.iter().filter(|entity| {
-        enum_name == format!("{}AggregateField", entity.entity_name)
-            || enum_name == format!("{}OrderField", entity.entity_name)
-    });
-    let Some(entity) = owners.next() else {
+    let runtime_order = enum_name.strip_suffix("OrderField");
+    let Some(entity) = runtime_order
+        .or_else(|| enum_name.strip_suffix("AggregateField"))
+        .and_then(|name| find_semantic_entity(catalog, name))
+    else {
         return Ok(values.to_vec());
     };
-    if owners.next().is_some() {
-        return Err(configuration_error(
-            "query enum semantic ownership is ambiguous",
-        ));
-    }
-    let runtime_order = enum_name == format!("{}OrderField", entity.entity_name);
+    let runtime_order = runtime_order.is_some();
     if runtime_order {
         let Some(SchemaType::InputObject(fields)) = schema
             .types
@@ -6723,11 +6764,7 @@ fn unique_entity_route(
         if route.len() > maximum_depth as usize {
             continue;
         }
-        if catalog
-            .entities
-            .iter()
-            .any(|entity| entity.entity_name == type_name)
-        {
+        if find_semantic_entity(catalog, &type_name).is_some() {
             results.push((type_name, route));
             continue;
         }
@@ -6857,11 +6894,20 @@ fn semantic_entity<'a>(
     catalog: &'a GraphqlSemanticCatalog,
     name: &str,
 ) -> Result<&'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata, AiError> {
+    find_semantic_entity(catalog, name)
+        .ok_or_else(|| configuration_error("semantic result entity is missing"))
+}
+
+fn find_semantic_entity<'a>(
+    catalog: &'a GraphqlSemanticCatalog,
+    name: &str,
+) -> Option<&'a graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata> {
+    // Catalogue admission checks that entity names are unique and sorted.
     catalog
         .entities
-        .iter()
-        .find(|entity| entity.entity_name == name)
-        .ok_or_else(|| configuration_error("semantic result entity is missing"))
+        .binary_search_by(|entity| entity.entity_name.as_str().cmp(name))
+        .ok()
+        .map(|index| &catalog.entities[index])
 }
 
 fn selectable_exportable_scalar(field: &GraphqlSemanticFieldMetadata) -> bool {
@@ -7076,8 +7122,8 @@ fn canonical_json_input(
     let Some(parent) = ancestry.last() else {
         return Ok(false);
     };
-    let roles = validate_filter_roles(schema, catalog)?;
-    if !roles.contains_key(parent) {
+    let roles = schema.filter_roles(catalog)?;
+    if !roles.contains(parent) {
         return Ok(false);
     }
     fn json_leaf(ty: &GraphqlSemanticTypeRef) -> bool {
@@ -7855,6 +7901,15 @@ mod tests {
             "        type Mutation {\n          CreateParent(input: ParentMutationInput!): Parent!\n          UpdateParent(input: ParentMutationInput!): Parent!\n          DeleteParent(id: ID!): Parent\n          HiddenMutation: String!\n        }\n",
             "",
         )
+    }
+
+    #[test]
+    fn query_catalogue_validates_filter_roles_once() {
+        FILTER_ROLE_VALIDATIONS.with(|count| count.set(0));
+        let catalogue =
+            two_root_catalog(AiGraphqlQueryCapabilityOptions::default()).expect("catalogue");
+        assert_eq!(catalogue.capabilities().count(), 2);
+        assert_eq!(FILTER_ROLE_VALIDATIONS.with(std::cell::Cell::get), 1);
     }
 
     fn catalog() -> AiGraphqlQueryCapabilityCatalog {
@@ -11824,6 +11879,57 @@ mod tests {
             })),
             Err(AiError::InvalidInput(_))
         ));
+    }
+
+    /// A mutation that takes a `@transientInput` argument has no typed
+    /// capability: classifying it for AI execution fails the catalogue.
+    #[test]
+    fn mutation_capabilities_refuse_transient_arguments() {
+        let semantics = mutation_semantic_catalog();
+        let compile = |sdl: &str| {
+            AiGraphqlMutationCapabilityCatalog::compile_with_options(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                sdl,
+                &semantics,
+                AiGraphqlQueryCapabilityLimits::default(),
+                AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                    AiCustomInputDisclosure::new()
+                        .with_exportable_field("ParentMutationInput", "name")
+                        .expect("declared field"),
+                ),
+            )
+        };
+        let marked = |root: &str, argument: &str| {
+            let plain = format!("{root}({argument})");
+            assert!(SDL.contains(&plain), "{plain}");
+            SDL.replace(&plain, &format!("{root}({argument} @transientInput)"))
+        };
+        // Automatic and approval-required roots are both refused.
+        for root in ["CreateParent", "UpdateParent"] {
+            assert!(matches!(
+                compile(&marked(root, "input: ParentMutationInput!")),
+                Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
+            ));
+        }
+        // A classified root whose result is not exportable would be left out
+        // of the catalogue anyway. With a marked argument it is still an
+        // error, not a silent omission.
+        assert!(SDL.contains("HiddenMutation: String!"));
+        assert!(matches!(
+            compile(&SDL.replace(
+                "HiddenMutation: String!",
+                "HiddenMutation(proof: String @transientInput): String!"
+            )),
+            Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
+        ));
+        // A prohibited root stays structurally absent, marker or not.
+        let catalog = compile(&marked("DeleteParent", "id: ID!")).expect("prohibited root");
+        assert_eq!(catalog.capabilities().count(), 2);
+        for capability in catalog.capabilities() {
+            let schema = serde_json::to_string(capability.argument_schema()).expect("schema");
+            assert!(!schema.contains("transient"), "{schema}");
+        }
     }
 
     #[test]

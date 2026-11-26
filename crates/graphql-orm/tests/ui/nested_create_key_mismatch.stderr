@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: nested_create relation to fields must match the child's nested_create_keys
+  --> tests/ui/nested_create_key_mismatch.rs:3:25
+   |
+ 3 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `_::<impl Line>::__gom_assert_nested_create_binding`
+  --> tests/ui/nested_create_key_mismatch.rs:15:25
+   |
+15 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^ the failure occurred here

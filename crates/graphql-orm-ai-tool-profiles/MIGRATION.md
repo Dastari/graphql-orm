@@ -10,6 +10,36 @@ supersedes: []
 
 # Migration Guide
 
+## 0.32.0 transient mutation arguments
+
+**No action.** Profile compilation, schema-aware manifest validation and typed
+capability compilation now fail with `InvalidConfiguration` when a tool
+document, argument plan or AI-classified operation uses an argument that the
+finished schema declares `@transientInput`. The ORM adds that directive only
+to the transient argument of a generated upsert that opts in (ORM 0.222.0), so
+no existing schema has one. Manifests and fingerprints of existing profiles
+are unchanged.
+
+`AiGraphqlToolManifest::register_into` does not receive the finished SDL. If
+you register a manifest that this process did not compile from the same SDL,
+validate it first with `validate_against_finished_schema`, or call the new
+`register_into_with_finished_schema`. Manifest validation now also refuses a
+tool document that contains a fragment spread; compiled documents never do.
+
+## 0.31.0 provider endpoint path error
+
+**No action.** The shared, non-exhaustive `AiError` adds
+`InvalidProviderEndpointPath` for adapter path validation on provider profile
+saves. The non-exhaustive `AiProviderEndpointPathError` also includes
+`MalformedEndpoint` for reports on missing or malformed stored URLs.
+No schema or data migration is needed.
+
+## 0.30.0 capability catalogue compilation
+
+**No action.** Capability fingerprints, plan schemas, catalogue contents and
+broker describe output are unchanged. Existing bindings and stored indexes
+remain valid. No schema or data migration is needed.
+
 ## 0.29.0 generated keyset page limits
 
 **No action.** The planner now validates the server-injected `limit` on the

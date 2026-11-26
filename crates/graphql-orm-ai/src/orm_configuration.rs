@@ -1,6 +1,7 @@
 //! ORM-backed GraphQL-managed AI configuration service.
 
 use crate::AiOrmBackend;
+use crate::configuration::ProviderEndpointPathContract;
 use crate::orm_read_bounds::InternalReadBound as _;
 use crate::orm_support::{map_orm, map_transaction, principal_kind};
 use std::sync::Arc;
@@ -24,10 +25,11 @@ use crate::{
     AiConfigurationAction, AiConfigurationService, AiContentProtectionMode,
     AiContentProtectionPolicy, AiContentProtectionPolicyResolver, AiContentProtectionPolicyView,
     AiError, AiOpenAiCompatibleProfileInput, AiOpenAiCompatibleProfileView,
-    AiProviderEndpointPolicy, AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView,
-    AiRunState, AiScope, AiSecretStore, ReclaimAiBudgetReservationInput,
-    RemoveAiProviderCredentialInput, SecretRef, SetAiContentProtectionPolicyInput,
-    SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput, UpsertAiProviderProfileInput,
+    AiProviderEndpointPathError, AiProviderEndpointPolicy, AiProviderKindInput,
+    AiProviderProfileView, AiRetentionPolicyView, AiRunState, AiScope, AiSecretStore,
+    ReclaimAiBudgetReservationInput, RemoveAiProviderCredentialInput, SecretRef,
+    SetAiContentProtectionPolicyInput, SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput,
+    UpsertAiProviderProfileInput,
 };
 
 /// A pending host-only secret cleanup command. Contains no credential material.
@@ -48,6 +50,15 @@ pub struct AiPendingSecretCleanupPage {
     pub entries: Vec<AiPendingSecretCleanup>,
     /// Cursor for the next page, if any.
     pub next_cursor: Option<String>,
+}
+
+/// Identifies a saved profile with an invalid configurable endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiProviderProfileEndpointIssue {
+    /// Profile ID.
+    pub id: Uuid,
+    /// Endpoint validation reason. Contains no configured URL or credentials.
+    pub reason: AiProviderEndpointPathError,
 }
 
 /// Deployment hard bounds for GraphQL-managed budget policies.
@@ -482,28 +493,59 @@ impl OrmAiConfigurationService {
             .map_err(|_| AiError::RecentMfaRequired)
     }
 
-    async fn profile(&self, id: Uuid) -> Result<AiProviderProfileRecord, AiError> {
-        AiProviderProfileRecord::find_by_id(&self.database, &id)
-            .await
-            .map_err(|error| map_orm(OrmPublicError::from(error)))?
-            .ok_or(AiError::NotFound)
-    }
-}
-
-#[async_trait]
-impl AiConfigurationService for OrmAiConfigurationService {
-    async fn provider_profiles(
+    /// Lists saved profiles with invalid configurable endpoints in one exact scope.
+    ///
+    /// Requires the host's provider-profile read authority. Includes disabled
+    /// profiles. The result contains only profile IDs and content-free reasons
+    /// for malformed endpoints or paths that fail the adapter's contract.
+    /// It does not evaluate deployment endpoint policy or credential readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an access, bounded-read, or persistence error if the profiles
+    /// cannot be read.
+    pub async fn provider_profile_endpoint_issues(
         &self,
         principal: &AuthPrincipal,
         scope: AiScope,
-    ) -> Result<Vec<AiProviderProfileView>, AiError> {
+    ) -> Result<Vec<AiProviderProfileEndpointIssue>, AiError> {
+        let profiles = self.read_provider_profiles(principal, &scope).await?;
+        let mut issues = Vec::new();
+        for row in profiles {
+            let Some(kind) = CONFIGURABLE_PROFILE_ENDPOINT_KINDS
+                .into_iter()
+                .find(|kind| kind.as_str() == row.provider_kind)
+            else {
+                continue;
+            };
+            let contract = profile_endpoint_path_contract(kind)?;
+            let url = row
+                .base_url
+                .as_deref()
+                .and_then(|value| crate::configuration::parse_provider_endpoint(value).ok());
+            let reason = match url {
+                Some(url) => contract.validate(&url).err(),
+                None => Some(AiProviderEndpointPathError::MalformedEndpoint),
+            };
+            if let Some(reason) = reason {
+                issues.push(AiProviderProfileEndpointIssue { id: row.id, reason });
+            }
+        }
+        Ok(issues)
+    }
+
+    async fn read_provider_profiles(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+    ) -> Result<Vec<AiProviderProfileRecord>, AiError> {
         self.require_access(
             principal,
-            &scope,
+            scope,
             AiConfigurationAction::ReadProviderProfiles,
         )
         .await?;
-        let scope_key = scope_key(&scope);
+        let scope_key = scope_key(scope);
         let rows = self
             .database
             .transaction(TransactionMode::Default, move |tx| {
@@ -530,7 +572,29 @@ impl AiConfigurationService for OrmAiConfigurationService {
                 "provider profile scope exceeds the bounded limit".to_owned(),
             ));
         }
-        rows.iter().map(provider_view).collect()
+        Ok(rows)
+    }
+
+    async fn profile(&self, id: Uuid) -> Result<AiProviderProfileRecord, AiError> {
+        AiProviderProfileRecord::find_by_id(&self.database, &id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)
+    }
+}
+
+#[async_trait]
+impl AiConfigurationService for OrmAiConfigurationService {
+    async fn provider_profiles(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<Vec<AiProviderProfileView>, AiError> {
+        self.read_provider_profiles(principal, &scope)
+            .await?
+            .iter()
+            .map(provider_view)
+            .collect()
     }
 
     async fn content_protection_policy(
@@ -2249,18 +2313,28 @@ pub(crate) fn normalize_and_validate_budget_policy_input(
     Ok(())
 }
 
+const CONFIGURABLE_PROFILE_ENDPOINT_KINDS: [AiProviderKindInput; 3] = [
+    AiProviderKindInput::Ollama,
+    AiProviderKindInput::OpenAiCompatible,
+    AiProviderKindInput::ChatCompletions,
+];
+
+fn profile_endpoint_path_contract(
+    kind: AiProviderKindInput,
+) -> Result<ProviderEndpointPathContract, AiError> {
+    kind.endpoint_path_contract().ok_or_else(|| {
+        AiError::InvalidConfiguration(
+            "configurable provider endpoint has no path contract".to_owned(),
+        )
+    })
+}
+
 fn normalize_endpoint(
     kind: AiProviderKindInput,
     base_url: Option<String>,
     endpoint_policy: &dyn AiProviderEndpointPolicy,
 ) -> Result<Option<String>, AiError> {
-    let configurable = matches!(
-        kind,
-        AiProviderKindInput::Ollama
-            | AiProviderKindInput::OpenAiCompatible
-            | AiProviderKindInput::ChatCompletions
-    );
-    if !configurable {
+    if !CONFIGURABLE_PROFILE_ENDPOINT_KINDS.contains(&kind) {
         return if base_url.is_none() {
             Ok(None)
         } else {
@@ -2284,6 +2358,7 @@ fn normalize_endpoint(
             .to_owned(),
         )
     })?;
+    profile_endpoint_path_contract(kind)?.validate(&url)?;
     if !crate::configuration::provider_endpoint_permitted(endpoint_policy, kind, &url) {
         return Err(AiError::Forbidden);
     }

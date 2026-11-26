@@ -1,0 +1,5 @@
+error: server_only_key relations require exactly comparable key members; `partition` is boolean, use an integer, string or UUID key
+  --> tests/ui/server_only_keys/bool_key.rs:28:9
+   |
+28 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^

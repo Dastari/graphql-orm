@@ -32,6 +32,9 @@ header is sent, which suits local servers. Build the adapter with
 `ChatCompletionsProviderConfig::from_profile(view, credential)` and
 `ChatCompletionsProvider::new(config, endpoint_policy, secrets)`.
 
+Profile saves and adapter initialization require a non-root normalized path of
+at most 2,048 bytes. Existing profiles still load for administrative review.
+
 Capabilities are declared, never probed. Every egress manifest must bind the
 profile ID, the normalized endpoint and the retention label, like the
 OpenAI-compatible adapter. Redirects are disabled and `Debug` output redacts

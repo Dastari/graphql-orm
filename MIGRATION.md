@@ -3,18 +3,287 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## 0.215.0 to 0.225.0: Shared generated read execution
+## 0.228.0 to 0.229.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate
 resolvers use shared execution helpers. Their schema, catalogue and
 authorization contracts are unchanged.
+
+## 0.227.0 to 0.228.0: Transient input validation errors
+
+**No action.** Generated schema builders now return a fixed message when
+async-graphql rejects a transient argument, its variable default, or another
+argument that shares the variable.
+[Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
+
+## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
+
+**Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on
+columns using a legacy `SQL_` collation. Move the column to a Windows
+collation after reviewing its comparison rules, or add a persisted computed
+Unicode column and index it for the affected comparison.
+
+Upgrade ORM and macros together. The 0.215.0 ASCII VARCHAR conversion could
+match different rows under `SQL_` collations, including
+`SQL_Latin1_General_CP1_CI_AS`. String filters now bind as NVARCHAR with
+either pool setting. In the SQL Server fixture, a `SQL_` index scanned at
+31 logical reads with NVARCHAR, compared with a 2-read VARCHAR seek in
+0.215.0. The Windows CP1252 and UTF-8 VARCHAR indexes already sought with
+NVARCHAR at 2 reads each. A tested VARCHAR rewrite with per-statement
+collation and conversion checks used 10 reads on each Windows index.
+
+Opt-in integer narrowing to INT, SMALLINT and TINYINT still uses BIGINT when
+a signed comparison operand exceeds the declared width. Generated updates
+and upserts, including transactional writes, return `INVALID_INPUT` for
+out-of-range unsigned inputs before selecting targets. Updates validate the
+input even when no rows match.
+See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+
+## 0.225.0 to 0.226.0: Generated nested create
+
+**No action** unless opting in (#353). Add `nested_create` to the parent
+collection relation and declare the child's `nested_create_keys`. For an
+opted-in parent, regenerate the SDL and catalogues and update clients using
+GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
+The standalone child create keeps its shape. See
+[creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
+
+## 0.224.0 to 0.225.0: Opaque partial-index predicates
+
+**Action needed.** Review schema validation and migration plans before applying
+the upgrade to existing databases. SQLite and PostgreSQL now retain filters
+they cannot represent as portable predicates. SQL Server retains the presence
+of a filter even when its definition is unavailable. For a same-name live
+index whose filter differs from the declaration, a replacement plan contains
+a destructive `DropIndex` followed by `CreateIndex`. Confirm who owns the index
+and whether the declared index should replace it before applying the plan
+with `allow_destructive`.
+
+Re-plan against the live database after upgrading if you prepared the plan
+before the upgrade. The owned apply path checks the source hash and refuses an
+older plan when the live hash changes because introspection now retains its
+filter.
+
+`build_migration_plan` and `render_migration_step` return a refusal statement
+that fails on execution when rendering would recreate an opaque predicate the
+backend cannot reproduce. Opaque SQLite and PostgreSQL predicates are
+inspection metadata. Use explicitly reviewed DDL to recreate one.
+
+SQL Server `INCLUDE` columns are still unrepresented in the schema model.
+The follow-up on `next/breaking` will add an included-columns field and mark
+the public index structs `#[non_exhaustive]`.
+
+## 0.223.0 to 0.224.0: explicit authority for hooks and workers
+
+**No action.** Upgrade ORM and macros together. Existing policies decide
+exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
+`RowPolicy` and `FieldPolicy` have defaults that call the existing methods
+with the same arguments, and nothing is propagated unless the host opts in.
+
+To let a mutation hook's nested writes be authorized from the GraphQL request
+that caused them, set
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
+`Database::with_request_authority_propagated_to_hooks(true)`) on the handle
+the schema serves. Then:
+
+- `ScopeEntityPolicy` applies its scope requirement to the originating
+  subject for the hook's nested operations.
+- A host `EntityPolicy` or `RowPolicy` reads `PolicyAuthority::hook_request()`
+  in a `*_with_authority` method and decides. Repository field decisions do
+  not receive the request. A policy that wraps another forwards
+  the authority to the inner policy's `*_with_authority` method.
+- Under `AgqlCurrentAuthorityPolicy`, also implement
+  `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
+
+Do not call `MutationContext::__run_generated_mutation_hook` from host code.
+It is macro-internal: it attaches the caller's request authority after only
+an entity write-policy check, without the generated resolver's scope,
+assurance or target admission. Host code that dispatches hooks itself uses
+`run_mutation_hook`, which attaches none.
+[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
+admission into the runtime and seal that entry.
+
+See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
+
+## 0.222.0 to 0.223.0: SQL Server exact string filter seeks
+
+Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL
+Server can seek on declared BIN2 Unicode key columns for `eq` and nonempty
+`in_list` filters (#867). The SQL text changes for every opted-in exact
+comparison, including on non-BIN2 columns and for `ne` and `not_in`. This
+also applies to the AI crate's opted-in entities. Review SQL Server plan
+guides and Query Store forced plans for these queries because they match on
+statement text. The generated SQL always converts the column to Unicode
+for the exactness check, including the byte-length check on non-seek paths.
+
+**Action needed** if a live column has drifted. Compare the live column
+types with the ORM declarations for opted-in entities and review affected
+read policies. On a live `VARCHAR` column declared as `NVARCHAR`, the old
+length check compared bytes across encodings. It rejected true matches when
+the byte counts differed, including every nonempty single-byte exact match.
+It could also admit a space-padded value whose byte count happened to
+match, such as stored `'bob   '` for operand `'bob'`. Exact comparisons now
+accept the true match and reject the padded value. A read policy that
+matches an owner exactly can now return rows to the true owner that it
+previously denied. The upgrade itself requires no schema or data migration.
+
+## 0.221.0 to 0.222.0: principal-bound upserts
+
+**No action.** Upgrade ORM and macros together. `upsert_bound_key`,
+`transient_input` and `upsert_acknowledge` are new, opt-in entity options.
+Entities that declare none of them generate the same schema, SQL, hooks and
+operation fingerprints as before. An entity that declares one changes its own
+upsert's arguments and its operation `schema_signature`, so rebind a pinned
+fingerprint for that entity. An upsert result can have `success: true` with
+`action: null` only on an entity that declares `upsert_acknowledge`.
+See [principal-bound upserts](docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+## 0.220.0 to 0.221.0: generated Changed replay
+
+**No action.** Upgrade ORM and macros together. No data migration is needed.
+To adopt replay, set `changed_started = true, changed_replay = true` on the
+entity. Update clients to save `Cursor`, resume with `After` and resubscribe
+without a cursor before refetching on `SUBSCRIPTION_REPLAY_RESET`. Operation
+catalogue 0.16.0 describes the replay window in exported client metadata.
+
+A resume waits for the authority tick within the advertised 120-second
+window. Base intervals of 120 seconds or more make every resume age out.
+The reset bit is visible at tick granularity. Parallel probes with reusable
+cursors can estimate when total writes after a checkpoint cross the 128-event
+bound, including hidden and other-tenant writes. An oversized delete preimage
+or a value whose storage cannot be measured clears the ring.
+[Changed replay reference](docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
+## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
+
+**No action.** The default uses the legacy journal recorder and full backup
+key format. The opt-in is PostgreSQL-only and requires the
+ORM `change-journal` feature.
+
+1. Upgrade all recorder installers, writers and backup workers to compatible
+   versions, including backup 0.31.0 if you use `OrmBackupAdapter`. Stop
+   writes, deployments and backup jobs for the cutover. Complete and retain
+   any legacy backups you need before changing the recorder.
+2. With the usual journal search path, as the schema owner, install the
+   recorder for all journaled entities using the schema target or
+   `Database::ensure_change_journal_recorder`. Call
+   `Database::enable_canonical_change_journal_keys().await?`. This reserves
+   a sequence boundary for the resolved journal. A retry returns the same
+   boundary. Legacy rows remain stored, and the old cursors are refused.
+3. Enable the backup crate's `canonical-journal-keys` feature, construct
+   `OrmBackupAdapter` with `with_canonical_change_journal_keys()`, and take a
+   new full backup before resuming writes. Record the returned
+   boundary as its initial journal checkpoint. If any canonical writes
+   occurred before this full backup, capture a fresh checkpoint under
+   quiescence at the full snapshot instead. Use the ORM adapter's
+   `schema_snapshot` for the chain's schema identity. Delegate every host
+   `schema_snapshot` call live to the ORM adapter so the after-export recheck
+   sees key storage changes. To implement `export_incremental`, hold one read
+   fence or stop writers and schema changes across the journal read and row
+   export. While writes are stopped, call `Database::export_changes` with
+   `ChangeWindow { after_sequence: Some(<parent checkpoint>), until: i64::MAX }`
+   (`until` is a Unix timestamp in seconds), then index `OrmBackupAdapter::export_full` by
+   `(table_name, primary_key)`. Keep the last action per exact key in
+   sequence order. Pass delete keys through as tombstones. For a final create
+   or update, use the matching exported row and fail if it is missing.
+   Include object metadata from that same export and advance the checkpoint
+   only after the incremental is committed.
+4. Enable canonical mode on a canonical restore target before applying the
+   backup. Keep a legacy-configured target available for retained legacy
+   snapshots. After a restore, start a new incremental chain from a full
+   snapshot and a current checkpoint.
+
+Canonical keys support PostgreSQL's built-in `boolean`, `smallint`,
+`integer`, `bigint`, `real`, `double precision`, `numeric`, `uuid`,
+`timestamp`, `timestamptz`, `date`, `text`, `varchar`, `bytea`, and
+`jsonb`. Other types, including `char(n)`, `citext`, `time`, `inet` and
+domains, are refused at cutover or when installing a recorder in canonical
+mode. Full export also checks single-key tables without recorders and still
+requires portable column values. Composite-key tables are full-only. A
+spelling change under a nondeterministic collation records an old-key delete
+and a new-key create.
+
+The backup schema identity includes live key types and type modifiers for
+the adapter's single-key backup entities. Tables outside the backup do not
+affect restore compatibility. The underlying error for a key storage
+mismatch names the affected table and column.
+Pause backup jobs during key DDL and take a new full backup and checkpoint
+after every key storage type change, including a change later reverted. The
+cutover is one-way because rounded legacy keys can lose the original value.
+Build every compaction tool that handles canonical chains with the backup
+crate's `canonical-journal-keys` feature for exact float decoding.
+
+## 0.218.0 to 0.219.0: Indirect query assurance
+
+**Action needed.** If you require assurance on a runtime collection query or
+a generated entity query, handle `STEP_UP_REQUIRED` on indirect reads of the
+same data. Runtime node lookups and relation layers, including mutation payload
+relations, now check the target collection's query requirements before database
+access. Generated Federation `_entities` checks every enabled query root for the
+entity, in addition to its existing single-read and `_entities` checks.
+Complete step-up before retrying a refused request. Hosts without query assurance
+can upgrade without changing their queries or policies.
+
+## 0.217.0 to 0.218.0: server-only relation join keys
+
+**No action.** Upgrade ORM and macros together. `server_only_key` is a new,
+opt-in relation option; existing relations, their checks and their SQL are
+unchanged. Hand-written `GeneratedRelationReadability` implementations keep
+compiling: the new `SERVER_ONLY_COLUMNS` constant defaults to empty, so they
+cannot be a server-only target until they list the column. Store server-only
+key members in canonical form on both sides (for example lower-case UUID text
+on SQLite): a target stored in another spelling matches no row.
+See [server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+## 0.216.0 to 0.217.0: Relation target assurance
+
+**Action needed.** A requirement on *any* generated query root of an entity
+(list, get-by-id, keyset, scan, search or aggregate) now gates every generated
+relation into that entity. If you require assurance on any generated query
+root, clients traversing relations into that root's entity must satisfy the
+same policy. Handle `STEP_UP_REQUIRED` on relation fields, mutation result
+selections, and queries using related-row filters, relation-count ordering,
+or related search sources. Related reads can be issued again after step-up.
+If a relation field in a mutation result needs step-up, refresh it with a
+separate query since the mutation may already have committed. Upgrade ORM
+and macros together.
+
+Runtime `node`, runtime child layers and generated `_entities` are covered from
+0.219.0; see [Indirect query assurance](#02180-to-02190-indirect-query-assurance).
+
+## Operation catalogue 0.15.0
+
+**No action.** Generated relationships with a declared field policy export
+`subgraph_only` in the resolver catalogue. The resolver catalogue fingerprint
+changes for exports that previously referenced a target root for such a
+relationship. Consumers of older exports should defer authorization to the
+subgraph when `has_field_policy` is true. Rebind any pinned
+resolver-catalogue fingerprint.
+
+## 0.215.0 to 0.216.0: PostgreSQL RLS search
+
+**No action.** Upgrade ORM and macros together. Native search on generated
+PostgreSQL `#[graphql_rls]` entities with an unqualified, column-based
+default sort can use a document primary-key probe or a bulk join. Both RLS
+policies still apply. The change only affects ORM-generated queries, so hosts
+need no database migration, index rebuild, or policy update. PostgreSQL
+evaluates `@@` after the document policy, which prevents GIN from serving
+the search. With 200,000 documents the median selective page at 10%
+visibility went from 318 to 87 ms and its count from 276 to 79 ms. At full
+visibility the common page went from 370 to 353 ms and its count from 252
+to 238 ms. The full-visibility selective query still scanned documents and
+its page went from 233 to 256 ms. Broad partial visibility can also be
+slower. At 50% and 90% visibility the common page went from 280 to 418 ms
+and from 422 to 628 ms, respectively. The 90%-visible common count went
+from 300 to 546 ms. See the
+[measured plans and costs](docs/reference/graphql-orm/postgres.md#search-performance).
 
 ## 0.214.0 to 0.215.0: SQL Server parameter types and column identifiers
 

@@ -202,6 +202,16 @@ body. Loosening nullability on opted-in entities keeps every existing
 document valid, and subscribers that never pass `Started: true` never receive
 a null.
 
+## Changed replay window
+
+With `client_metadata: true`, a generated stream with `changed_replay = true`
+includes a `replay` object in its changed-stream facts. It reports
+`scope: "process"`, `maximum_events`, `maximum_bytes` and
+`maximum_age_seconds`. The semantic catalogue reports `BestEffort` for
+generated streams. `ReplayThenLive` describes bounded, application-supplied
+observation sources for the AI-facing semantic contract.
+[Changed replay reference](macros-and-attributes.md#bounded-replay)
+
 ## Aggregate source entity
 
 `#[graphql_entity(aggregate = true, aggregate_source = true)]` makes the

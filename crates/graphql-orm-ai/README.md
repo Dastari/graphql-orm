@@ -10,6 +10,28 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.167.0 verifies the stored provider plan hash when executing an approved
+generated mutation. See the [migration guide](MIGRATION.md#01660-to-01670-approved-generated-mutations).
+
+AI 0.166.0 tests legacy approval-index upgrades with ORM 0.225.0's partial-index
+introspection. See the [migration guide](MIGRATION.md#01650-to-01660).
+
+AI 0.165.0 forwards host-owned repository field decisions to the host
+policy's authority-aware methods (ORM 0.224.0). See the
+[migration guide](MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+
+AI 0.164.0 uses the ORM's exact string filters to seek on SQL Server run-state
+indexes (#867). See the [migration guide](MIGRATION.md#01630-to-01640).
+
+AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
+provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.
+Editing a reported profile requires correcting its URL. See the
+[migration guide](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints).
+
+AI 0.162.0 uses tool profiles 0.30.0 to speed up catalogue compilation for
+targets with many capability roots. See the
+[benchmark measurements](docs/capability-discovery-and-execution.md#catalogue-compilation-benchmark).
+
 AI 0.161.0 uses ORM 0.215.0 and has no migration action.
 See the [migration guide](MIGRATION.md#01600-to-01610).
 

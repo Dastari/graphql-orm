@@ -113,6 +113,8 @@ impl OllamaProvider {
     ///
     /// Returns [`ProviderError::InvalidConfiguration`] for an unsafe URL,
     /// invalid timeout/keep-alive, denied endpoint, or HTTP client failure.
+    /// Returns [`ProviderError::InvalidEndpointPath`] when the path
+    /// does not meet this adapter's requirement.
     pub fn new(
         config: OllamaProviderConfig,
         endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
@@ -127,7 +129,10 @@ impl OllamaProvider {
                 "invalid Ollama timeout, keep-alive or chunk ceiling".to_owned(),
             ));
         }
-        let base_url = super::endpoint::normalized_provider_origin(&config.base_url)?;
+        let base_url = super::endpoint::normalized_provider_endpoint(
+            &config.base_url,
+            AiProviderKindInput::Ollama,
+        )?;
         let endpoint_guard = super::endpoint::ProviderEndpointGuard::authorize(
             endpoint_policy,
             AiProviderKindInput::Ollama,
@@ -782,9 +787,12 @@ mod tests {
         OllamaProvider::new(
             OllamaProviderConfig::new(base_url),
             Arc::new(ExactEndpointPolicy(
-                super::super::endpoint::normalized_provider_origin(base_url)
-                    .expect("test endpoint should normalize")
-                    .to_string(),
+                super::super::endpoint::normalized_provider_endpoint(
+                    base_url,
+                    AiProviderKindInput::Ollama,
+                )
+                .expect("test endpoint should normalize")
+                .to_string(),
             )),
         )
         .expect("test provider should build")
@@ -1121,7 +1129,9 @@ mod tests {
                 OllamaProviderConfig::new("http://127.0.0.1:11434/private"),
                 Arc::new(ExactEndpointPolicy("unused".to_owned())),
             ),
-            Err(ProviderError::InvalidConfiguration(_))
+            Err(ProviderError::InvalidEndpointPath(
+                crate::AiProviderEndpointPathError::OriginRequired
+            ))
         ));
         for unsafe_endpoint in [
             "ftp://127.0.0.1:11434",

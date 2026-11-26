@@ -1,0 +1,7 @@
+error: nested_create requires an unconditional collection relation
+  --> tests/ui/nested_create_to_one.rs:9:5
+   |
+ 9 | /     #[graphql_orm(read = false)]
+10 | |     #[relation(target = "Line", from = "id", to = "order_id", nested_create)]
+11 | |     line: Option<Line>,
+   | |______________________^

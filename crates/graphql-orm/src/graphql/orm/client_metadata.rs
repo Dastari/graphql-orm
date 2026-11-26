@@ -11,11 +11,11 @@
 //! Both are descriptive. Neither grants or changes any authority.
 
 use super::{
-    ColumnDef, Entity, GraphqlChangedStreamMetadata, GraphqlClientEntityMetadata,
-    GraphqlClientMetadata, GraphqlEntityLifetimeMetadata, GraphqlRelationshipKeyMapping,
-    GraphqlRelationshipKeyMetadata, GraphqlRelationshipNotBatchableReason, GraphqlSemanticCatalog,
-    OrmBackend, RelationMetadata, SqlDialect, relationship_key_field_exposed,
-    relationship_target_filterable,
+    ColumnDef, Entity, GraphqlChangedReplayMetadata, GraphqlChangedStreamMetadata,
+    GraphqlClientEntityMetadata, GraphqlClientMetadata, GraphqlEntityLifetimeMetadata,
+    GraphqlRelationshipKeyMapping, GraphqlRelationshipKeyMetadata,
+    GraphqlRelationshipNotBatchableReason, GraphqlSemanticCatalog, OrmBackend, RelationMetadata,
+    SqlDialect, relationship_key_field_exposed, relationship_target_filterable,
 };
 
 /// Version of the cursor and key encodings the interpretation fingerprint
@@ -46,6 +46,7 @@ pub struct ClientEntitySource {
     carried_fields: Vec<String>,
     identity_carried: bool,
     started_signal: bool,
+    changed_replay: bool,
     lifetime: Option<GraphqlEntityLifetimeMetadata>,
     columns: &'static [ColumnDef],
     relations: &'static [RelationMetadata],
@@ -64,11 +65,18 @@ impl ClientEntitySource {
             carried_fields,
             identity_carried,
             started_signal,
+            changed_replay: false,
             lifetime: T::graphql_lifetime(),
             columns: T::columns(),
             relations: T::relation_metadata(),
             quote: |identifier| B::DIALECT.quote_identifier_path(identifier),
         }
+    }
+
+    /// Records whether the generated Changed stream supports replay.
+    pub fn with_changed_replay(mut self, enabled: bool) -> Self {
+        self.changed_replay = enabled;
+        self
     }
 
     fn column_api_name(&self, column: &str) -> Option<&'static str> {
@@ -113,7 +121,7 @@ pub fn compose_client_metadata(
                     && operation.kind == super::GraphqlOperationKind::Subscription
             });
             if stream_published {
-                entity = entity.with_changed_stream(GraphqlChangedStreamMetadata::new(
+                let mut stream = GraphqlChangedStreamMetadata::new(
                     source.changed_root,
                     source
                         .carried_fields
@@ -129,7 +137,16 @@ pub fn compose_client_metadata(
                         .collect(),
                     source.identity_carried,
                     source.started_signal,
-                ));
+                );
+                if source.changed_replay {
+                    use crate::graphql::subscriptions::replay;
+                    stream.replay = Some(GraphqlChangedReplayMetadata::process(
+                        replay::MAX_EVENTS,
+                        replay::MAX_BYTES,
+                        replay::MAX_AGE.as_secs(),
+                    ));
+                }
+                entity = entity.with_changed_stream(stream);
             }
             if let Some(lifetime) = &source.lifetime {
                 entity = entity.with_lifetime(lifetime.clone());
@@ -237,6 +254,8 @@ pub struct InterpretationEntity {
     /// Primary-key fields in key order: public name, logical value kind and
     /// column type.
     keys: Vec<(&'static str, String, &'static str)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_replay_cursor_format: Option<u32>,
 }
 
 impl InterpretationEntity {
@@ -263,7 +282,15 @@ impl InterpretationEntity {
             generated,
             default_sort: T::DEFAULT_SORT,
             keys,
+            changed_replay_cursor_format: None,
         }
+    }
+
+    /// Adds the Changed cursor format only for entities that serve it.
+    pub fn with_changed_replay(mut self, enabled: bool) -> Self {
+        self.changed_replay_cursor_format =
+            enabled.then_some(crate::graphql::subscriptions::CHANGED_REPLAY_CURSOR_FORMAT);
+        self
     }
 }
 
@@ -280,7 +307,7 @@ impl InterpretationEntity {
 ///   keyset cursors are bound to (every order column with direction and null
 ///   placement, key suffix included), its effective default sort, and each
 ///   primary-key field's public name, logical value kind and column type, in
-///   key order;
+///   key order, plus the Changed cursor format when the entity opts in;
 /// - the SHA-256 of the host salt, when one is given.
 ///
 /// It names no secret, host, path or version string. Column names and sort
@@ -330,6 +357,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, kind, sql_type)| (name, kind.to_owned(), sql_type))
                 .collect(),
+            changed_replay_cursor_format: None,
         }
     }
 

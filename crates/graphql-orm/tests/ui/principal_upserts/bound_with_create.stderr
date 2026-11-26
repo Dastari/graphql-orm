@@ -1,0 +1,5 @@
+error: upsert_bound_key requires mutation_shapes without create: a generated create has no principal binding and would store the key type's default value
+  --> tests/ui/principal_upserts/bound_with_create.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

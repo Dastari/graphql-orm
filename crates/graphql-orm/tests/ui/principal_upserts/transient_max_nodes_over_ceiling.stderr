@@ -1,0 +1,5 @@
+error: transient_input max_nodes must be between 1 and 65536
+  --> tests/ui/principal_upserts/transient_max_nodes_over_ceiling.rs:25:64
+   |
+25 |     transient_input(type = "Proof", on = "upsert", max_nodes = 1000000),
+   |                                                                ^^^^^^^

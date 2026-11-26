@@ -1,0 +1,5 @@
+error: nested_create requires an available generated create mutation and a writable, single-primary-key entity
+ --> tests/ui/nested_create_composite_key.rs:5:8
+  |
+5 | struct Line {
+  |        ^^^^

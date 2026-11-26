@@ -44,6 +44,7 @@ pub(crate) use read_snapshot::{SNAPSHOT_WRITE_REFUSED, ensure_write_allowed};
 mod read_authorization;
 mod resolver_catalog;
 pub use resolver_catalog::*;
+mod journal_key;
 mod restore_marker;
 mod rls;
 mod root_fields;

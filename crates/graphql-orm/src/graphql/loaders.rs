@@ -259,6 +259,10 @@ pub struct CompositeRelationQueryKey {
     pub(crate) sorts: Vec<crate::graphql::orm::SortExpression>,
     pub(crate) pagination: Option<crate::graphql::orm::PaginationRequest>,
     pub(crate) auth_context: Option<DbAuthContext>,
+    /// Associate batched rows, counts and pages with this key by the
+    /// database's own match of the complete tuple, never by re-comparing key
+    /// text in Rust. Set for relations with a server-only key.
+    pub(crate) associate_by_match: bool,
 }
 
 impl CompositeRelationQueryKey {
@@ -296,7 +300,20 @@ impl CompositeRelationQueryKey {
             sorts,
             pagination,
             auth_context,
+            associate_by_match: false,
         }
+    }
+
+    /// Generated-only: associate this key's batched rows by database match
+    /// identity. Each statement joins its parent tuples as a derived table
+    /// with one ordinal per key, and rows, counts and page windows are
+    /// regrouped by that ordinal. The loader then agrees with the direct
+    /// relation query for every value type and collation. Hidden and outside
+    /// semver.
+    #[doc(hidden)]
+    pub fn __associate_by_database_match(mut self) -> Self {
+        self.associate_by_match = true;
+        self
     }
 
     /// The parent key values this key loads related rows for.
@@ -373,6 +390,7 @@ impl PartialEq for CompositeRelationQueryKey {
             && self.where_signature == other.where_signature
             && self.order_signature == other.order_signature
             && self.page_signature == other.page_signature
+            && self.associate_by_match == other.associate_by_match
             && self.auth_context.as_ref().map(DbAuthContext::partition_key)
                 == other
                     .auth_context
@@ -393,6 +411,7 @@ impl Hash for CompositeRelationQueryKey {
         self.where_signature.hash(state);
         self.order_signature.hash(state);
         self.page_signature.hash(state);
+        self.associate_by_match.hash(state);
         self.auth_context
             .as_ref()
             .map(DbAuthContext::partition_key)
@@ -757,6 +776,7 @@ struct RelationGroupKey {
     order_signature: Option<String>,
     page_signature: Option<String>,
     auth_context_key: Option<crate::graphql::auth::AuthPartitionKey>,
+    associate_by_match: bool,
 }
 
 fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
@@ -1110,6 +1130,7 @@ where
             order_signature: key.order_signature.clone(),
             page_signature: key.page_signature.clone(),
             auth_context_key: key.auth_context.as_ref().map(DbAuthContext::partition_key),
+            associate_by_match: key.associate_by_match,
         };
         grouped_keys.entry(group_key).or_default().push(key);
     }
@@ -1210,6 +1231,9 @@ where
     let sample = group
         .first()
         .ok_or_else(|| "relation batch group should not be empty".to_string())?;
+    if sample.associate_by_match {
+        return load_relation_statement_by_match::<T, B>(db, group, selection).await;
+    }
 
     let mut parent_values = Vec::with_capacity(group.len());
     let mut parent_key_order = Vec::with_capacity(group.len());
@@ -1534,6 +1558,383 @@ where
     Ok(results)
 }
 
+const RELATION_PARENTS: &str = "__gom_relation_parents";
+const RELATION_ORDINAL: &str = "__gom_relation_ordinal";
+
+fn relation_parent_alias(index: usize) -> String {
+    format!("__gom_relation_parent_{index}")
+}
+
+/// One statement's parent tuples as the derived table `__gom_relation_parents`:
+/// a literal ordinal, the key's position in the statement, then its bound
+/// members. Binds are appended to `values` in statement-text order.
+fn relation_parent_table(
+    dialect: DatabaseBackend,
+    parent_values: &[Vec<crate::graphql::orm::SqlValue>],
+    sql_types: &[&'static str],
+    values: &mut Vec<crate::graphql::orm::SqlValue>,
+) -> String {
+    use crate::graphql::orm::SqlDialect;
+    let rows = parent_values
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parts)| {
+            let mut cells = vec![match dialect {
+                DatabaseBackend::Sqlite => ordinal.to_string(),
+                _ => format!("CAST({ordinal} AS BIGINT)"),
+            }];
+            for (index, value) in parts.iter().enumerate() {
+                values.push(
+                    value
+                        .clone()
+                        .with_mssql_type(sql_types.get(index).copied().unwrap_or("")),
+                );
+                cells.push(dialect.placeholder(values.len()));
+            }
+            match dialect {
+                DatabaseBackend::Mysql => format!("ROW({})", cells.join(", ")),
+                _ => format!("({})", cells.join(", ")),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names = std::iter::once(RELATION_ORDINAL.to_owned())
+        .chain((0..sql_types.len()).map(relation_parent_alias))
+        .collect::<Vec<_>>();
+    match dialect {
+        // SQLite names VALUES columns `column1`, `column2`, ... and accepts
+        // no column list on a derived table.
+        DatabaseBackend::Sqlite => format!(
+            "(SELECT {} FROM (VALUES {rows})) {RELATION_PARENTS}",
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| format!("column{} AS {name}", index + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => format!(
+            "(VALUES {rows}) AS {RELATION_PARENTS}({})",
+            names.join(", ")
+        ),
+    }
+}
+
+/// `FROM` of a by-match statement: the target table, unaliased so read
+/// predicates keep their table qualifiers, joined to the parent tuples on
+/// every member with the database's own equality.
+fn relation_match_from(
+    dialect: DatabaseBackend,
+    table: &str,
+    fk_columns: &[&str],
+    parents: &str,
+) -> String {
+    let join = fk_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            format!(
+                "{column} = {RELATION_PARENTS}.{}",
+                relation_parent_alias(index)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "{} INNER JOIN {parents} ON {join}",
+        dialect.render_identifier_path(table)
+    )
+}
+
+fn relation_ordinal_of<B: OrmBackend>(row: &B::Row, keys: usize) -> Result<usize, String> {
+    let ordinal = B::try_get_i64(row, RELATION_ORDINAL)
+        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+    usize::try_from(ordinal)
+        .ok()
+        .filter(|ordinal| *ordinal < keys)
+        .ok_or_else(|| "relation batch returned an unknown parent ordinal".to_string())
+}
+
+/// [`load_relation_statement`] for keys that associate by database match.
+///
+/// The parent tuples are a derived table joined on the complete key, so the
+/// database decides every match exactly as the direct relation query does,
+/// including type affinity, collation and trailing-space padding. A row
+/// matched for several keys is returned once per key. Rows, counts and page
+/// windows are grouped by the joined ordinal; no key text is compared in Rust.
+async fn load_relation_statement_by_match<T, B>(
+    db: &crate::db::Database<B>,
+    group: &[CompositeRelationQueryKey],
+    selection: crate::graphql::pagination::ConnectionSelection,
+) -> Result<Vec<RelationLoadResult<T>>, String>
+where
+    B: OrmBackend,
+    T: RelationTarget<B>,
+{
+    use crate::graphql::orm::{
+        PaginationRequest, SortExpression, SqlDialect, SqlValue, render_filter_expression,
+    };
+
+    let dialect = B::DIALECT;
+    let sample = group
+        .first()
+        .ok_or_else(|| "relation batch group should not be empty".to_string())?;
+    let parent_values = group
+        .iter()
+        .map(|key| key.parent_values.clone())
+        .collect::<Vec<_>>();
+    let sql_types = sample
+        .fk_columns
+        .iter()
+        .map(|column| relation_parameter_type::<T, B>(column).unwrap_or(""))
+        .collect::<Vec<_>>();
+
+    // The direct query's order: the caller's, else the target's default,
+    // then the primary key as the final tie-break.
+    let mut sorts = if sample.sorts.is_empty() {
+        vec![SortExpression::unbound(T::DEFAULT_SORT.to_string())]
+    } else {
+        sample.sorts.clone()
+    };
+    sorts.retain(|sort| !sort.clause.trim().is_empty());
+    for primary_key in T::PRIMARY_KEYS {
+        if !sorts.iter().any(|sort| {
+            crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
+        }) {
+            sorts.push(SortExpression::unbound(format!(
+                "{} ASC",
+                dialect.render_identifier_path(primary_key)
+            )));
+        }
+    }
+    let render_sorts = |values: &mut Vec<SqlValue>| {
+        sorts
+            .iter()
+            .map(|sort| {
+                let rendered = dialect.normalize_sql(&sort.clause, values.len() + 1);
+                values.extend(sort.values.iter().cloned());
+                rendered
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // The parents' derived table and the WHERE clause, rendered after the
+    // binds that precede them in the statement text.
+    let from_and_where = |values: &mut Vec<SqlValue>| {
+        let parents = relation_parent_table(dialect, &parent_values, &sql_types, values);
+        let mut sql = relation_match_from(dialect, T::TABLE_NAME, &sample.fk_columns, &parents);
+        if let Some(filter) = &sample.filter {
+            let mut next_index = values.len() + 1;
+            let where_sql = render_filter_expression(dialect, filter, &mut next_index, values);
+            if !where_sql.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&where_sql);
+            }
+        }
+        sql
+    };
+    let fetch = |sql: String, values: Vec<SqlValue>| async move {
+        ensure_within_bind_limit(dialect, values.len())?;
+        crate::graphql::orm::fetch_rows_with_auth::<B>(
+            db.pool(),
+            &sql,
+            &values,
+            sample.auth_context.as_ref(),
+        )
+        .await
+        .map_err(crate::graphql::errors::loader_error_from_sqlx)
+    };
+    let ordinal = format!("{RELATION_PARENTS}.{RELATION_ORDINAL}");
+    let entity_columns = T::column_names().join(", ");
+    let mut grouped: Vec<Vec<T>> = (0..group.len()).map(|_| Vec::new()).collect();
+
+    if sample.pagination.is_some()
+        || selection != crate::graphql::pagination::ConnectionSelection::ALL
+    {
+        let PaginationRequest { limit, offset } =
+            sample.pagination.clone().unwrap_or(PaginationRequest {
+                limit: None,
+                offset: 0,
+            });
+        let start = offset.max(0);
+        let row_limit = if !selection.count && selection.has_next_page {
+            limit.map(|n| n.saturating_add(1))
+        } else {
+            limit
+        };
+        let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
+
+        // Both statements are rendered first: when a page needs its count
+        // and its rows, they run together in one transaction with the
+        // database auth context applied once, as on the ordinary loader.
+        let count = selection.count.then(|| {
+            let mut values = Vec::new();
+            let from = from_and_where(&mut values);
+            (
+                format!(
+                    "SELECT {ordinal} AS {RELATION_ORDINAL}, COUNT(*) AS __gom_relation_total_count \
+                     FROM {from} GROUP BY {ordinal}"
+                ),
+                values,
+            )
+        });
+        let page = needs_rows.then(|| {
+            // Rank only the complete primary key per ordinal, then join the
+            // bounded keys back to the entity table for full rows.
+            let mut values = Vec::new();
+            let sort_sql = render_sorts(&mut values);
+            let ranked_keys = T::PRIMARY_KEYS
+                .iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    format!(
+                        "{} AS __gom_relation_pk_{index}",
+                        dialect.render_identifier_path(key)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let from = from_and_where(&mut values);
+            values.push(SqlValue::Int(start));
+            let mut bounds = format!(
+                "__gom_relation_row_number > {}",
+                dialect.placeholder(values.len())
+            );
+            if let Some(limit) = row_limit {
+                values.push(SqlValue::Int(start.saturating_add(limit.max(0))));
+                bounds.push_str(&format!(
+                    " AND __gom_relation_row_number <= {}",
+                    dialect.placeholder(values.len())
+                ));
+            }
+            let join = T::PRIMARY_KEYS
+                .iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    format!(
+                        "__gom_relation_entity.{} = __gom_relation_page.__gom_relation_pk_{index}",
+                        dialect.render_identifier_path(key)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            (
+                format!(
+                    "SELECT * FROM (SELECT {entity_columns}, __gom_relation_page.{RELATION_ORDINAL}, \
+                     __gom_relation_page.__gom_relation_row_number FROM (SELECT * FROM (SELECT \
+                     {ranked_keys}, {ordinal} AS {RELATION_ORDINAL}, ROW_NUMBER() OVER (PARTITION BY \
+                     {ordinal} ORDER BY {sort_sql}) AS __gom_relation_row_number FROM {from}) \
+                     __gom_relation_ranked WHERE {bounds}) __gom_relation_page INNER JOIN {} \
+                     __gom_relation_entity ON {join}) __gom_relation_rows ORDER BY {RELATION_ORDINAL} \
+                     ASC, __gom_relation_row_number ASC",
+                    dialect.render_identifier_path(T::TABLE_NAME),
+                ),
+                values,
+            )
+        });
+        let (count_rows, page_rows) = match (count, page) {
+            (Some((count_sql, count_values)), Some((page_sql, page_values))) => {
+                ensure_within_bind_limit(dialect, count_values.len())?;
+                ensure_within_bind_limit(dialect, page_values.len())?;
+                crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
+                    db.pool(),
+                    &count_sql,
+                    &count_values,
+                    &page_sql,
+                    &page_values,
+                    sample.auth_context.as_ref(),
+                )
+                .await
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+            }
+            (Some((sql, values)), None) => (fetch(sql, values).await?, Vec::new()),
+            (None, Some((sql, values))) => (Vec::new(), fetch(sql, values).await?),
+            (None, None) => (Vec::new(), Vec::new()),
+        };
+        let mut totals = vec![0i64; group.len()];
+        for row in count_rows {
+            let index = relation_ordinal_of::<B>(&row, group.len())?;
+            totals[index] = B::try_get_i64(&row, "__gom_relation_total_count")
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+        }
+        for row in page_rows {
+            let index = relation_ordinal_of::<B>(&row, group.len())?;
+            grouped[index]
+                .push(T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?);
+        }
+        return Ok(grouped
+            .into_iter()
+            .zip(totals)
+            .map(|(mut entities, total_count)| {
+                let has_next_page = if selection.count {
+                    let page_len = if selection.rows {
+                        entities.len() as i64
+                    } else {
+                        limit.map_or((total_count - start).max(0), |n| {
+                            n.max(0).min((total_count - start).max(0))
+                        })
+                    };
+                    start.saturating_add(page_len) < total_count
+                } else {
+                    limit.is_some_and(|n| entities.len() as i64 > n)
+                };
+                if let Some(limit) = limit {
+                    entities.truncate(limit.max(0) as usize);
+                }
+                RelationLoadResult {
+                    entities,
+                    total_count,
+                    has_next_page,
+                    has_previous_page: start > 0,
+                    offset: start,
+                }
+            })
+            .collect());
+    }
+
+    let mut values = Vec::new();
+    let from = from_and_where(&mut values);
+    let sort_sql = render_sorts(&mut values);
+    let sql = format!(
+        "SELECT {entity_columns}, {ordinal} AS {RELATION_ORDINAL} FROM {from} \
+         ORDER BY {ordinal} ASC, {sort_sql}"
+    );
+    for row in fetch(sql, values).await? {
+        let index = relation_ordinal_of::<B>(&row, group.len())?;
+        grouped[index]
+            .push(T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?);
+    }
+    Ok(group
+        .iter()
+        .zip(grouped)
+        .map(|(key, all_entities)| {
+            let total_count = all_entities.len() as i64;
+            let PaginationRequest { limit, offset } =
+                key.pagination.clone().unwrap_or(PaginationRequest {
+                    limit: None,
+                    offset: 0,
+                });
+            let start = offset.max(0) as usize;
+            let end = match limit {
+                Some(limit) if limit >= 0 => start.saturating_add(limit as usize),
+                _ => all_entities.len(),
+            };
+            let has_next_page = end < all_entities.len();
+            RelationLoadResult {
+                entities: all_entities
+                    .into_iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect(),
+                total_count,
+                has_next_page,
+                has_previous_page: start > 0,
+                offset,
+            }
+        })
+        .collect())
+}
+
 /// The relation data loader that generated relation resolvers use.
 ///
 /// It loads [`RelationQueryKey`], [`CompositeRelationQueryKey`] and
@@ -1613,6 +2014,7 @@ where
                     sorts: key.sorts.clone(),
                     pagination: key.pagination.clone(),
                     auth_context: key.auth_context.clone(),
+                    associate_by_match: false,
                 })
                 .collect::<Vec<_>>();
             let composite_results = load_composite_relation_keys::<T, B>(
@@ -1636,6 +2038,7 @@ where
                     sorts: key.sorts.clone(),
                     pagination: key.pagination.clone(),
                     auth_context: key.auth_context.clone(),
+                    associate_by_match: false,
                 };
                 results.insert(
                     key,
@@ -2051,6 +2454,7 @@ mod bind_limit_tests {
             }],
             pagination: None,
             auth_context: None,
+            associate_by_match: false,
         }
     }
 
@@ -2176,6 +2580,48 @@ mod bind_limit_tests {
         assert_eq!(rendered.values.len(), per_statement * 3 + other - 2);
         assert!(ensure_within_bind_limit(dialect, rendered.values.len()).is_ok());
         assert!(rendered.values.len() + 3 > dialect.max_statement_binds() - 2);
+    }
+
+    #[test]
+    fn match_association_joins_each_parent_tuple_with_its_ordinal() {
+        use crate::graphql::orm::SqlValue;
+        let parents = vec![
+            vec![SqlValue::String("a".into()), SqlValue::Int(1)],
+            vec![SqlValue::String("b".into()), SqlValue::Int(2)],
+        ];
+        for (dialect, expected) in [
+            (
+                DatabaseBackend::Sqlite,
+                "(SELECT column1 AS __gom_relation_ordinal, column2 AS __gom_relation_parent_0, \
+                 column3 AS __gom_relation_parent_1 FROM (VALUES (0, ?, ?), (1, ?, ?))) \
+                 __gom_relation_parents",
+            ),
+            (
+                DatabaseBackend::Postgres,
+                "(VALUES (CAST(0 AS BIGINT), $1, $2), (CAST(1 AS BIGINT), $3, $4)) AS \
+                 __gom_relation_parents(__gom_relation_ordinal, __gom_relation_parent_0, \
+                 __gom_relation_parent_1)",
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(VALUES (CAST(0 AS BIGINT), @P1, @P2), (CAST(1 AS BIGINT), @P3, @P4)) AS \
+                 __gom_relation_parents(__gom_relation_ordinal, __gom_relation_parent_0, \
+                 __gom_relation_parent_1)",
+            ),
+        ] {
+            let mut values = Vec::new();
+            let parents_sql = relation_parent_table(dialect, &parents, &["", ""], &mut values);
+            assert_eq!(parents_sql, expected, "{dialect:?}");
+            assert_eq!(values.len(), 4, "{dialect:?}");
+            assert_eq!(
+                relation_match_from(dialect, "targets", &["key", "part"], &parents_sql),
+                format!(
+                    "targets INNER JOIN {parents_sql} ON key = __gom_relation_parents.__gom_relation_parent_0 \
+                     AND part = __gom_relation_parents.__gom_relation_parent_1"
+                ),
+                "{dialect:?}"
+            );
+        }
     }
 
     #[test]

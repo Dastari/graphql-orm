@@ -61,7 +61,10 @@ pub struct AiApprovalBinding {
     pub scope: AiScope,
     /// Exact reviewed static descriptor or generated capability fingerprint.
     pub tool_fingerprint: String,
-    /// Canonical validated variables/arguments hash.
+    /// Canonical JSON hash of a static tool's variables or the complete
+    /// provider plan for a generated mutation.
+    ///
+    /// For generated mutations, use [`crate::AiPreparedGraphqlMutation::argument_hash`].
     pub argument_hash: String,
     /// Exact local/remote GraphQL target and operation contract.
     pub operation: GraphqlOperationContract,

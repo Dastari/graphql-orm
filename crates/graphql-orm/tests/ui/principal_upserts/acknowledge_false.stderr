@@ -1,0 +1,5 @@
+error: upsert_acknowledge accepts only true; omit it to keep every upsert a write
+  --> tests/ui/principal_upserts/acknowledge_false.rs:25:26
+   |
+25 |     upsert_acknowledge = false,
+   |                          ^^^^^

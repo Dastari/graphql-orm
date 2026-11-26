@@ -47,8 +47,16 @@ version. A skill cannot be enabled before a version exists.
 A published input or output schema is user-authored, so publication bounds it
 beyond the 1 MiB size cap: it may nest at most 32 levels deep, and a `pattern`
 value or `patternProperties` key may be at most 256 bytes. A schema outside
-those bounds is rejected with `InvalidInput`. The bounds apply to publication
-only; a version stored before they existed still loads.
+those bounds is rejected with `InvalidInput` on publication or republication.
+
+Stored versions that exceed the limits remain usable. `AiResolvedSkill::has_legacy_schema`
+identifies them at resolution time. Operators can call
+`OrmAiSkillCatalogService::legacy_skill_schemas` with `AiSkillAction::ManageSkill`
+in the exact scope to find affected versions, including superseded versions.
+The report scans inside a state-machine transaction, holds the write lock on
+SQLite for the scan, and returns only version IDs and SHA-256 digests of the
+stored schema envelopes.
+Operators can publish a new version after bringing both schemas within bounds.
 
 Reads return at most 100 redacted skills for one exact scope. Instruction text,
 schemas, and provider-capability details are not exposed by the GraphQL view.
