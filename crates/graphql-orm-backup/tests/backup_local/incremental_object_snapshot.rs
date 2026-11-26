@@ -1,3 +1,5 @@
+//! Object capture from an incremental export and restore alongside the rows.
+
 #![cfg(all(feature = "local", not(windows)))]
 
 use async_trait::async_trait;

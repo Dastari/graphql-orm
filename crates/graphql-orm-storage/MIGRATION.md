@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.19.0 to 0.20.0
+
+**No action.** The discarded-stream warning from
+`StorageByteStream::into_inner` now includes a message. No data migration is
+needed.
+
+The library also forbids unsafe Rust, except for the Windows local provider's
+atomic no-replace rename, and checks documentation for its public API. These
+build-time lints require no host changes.
+
 ## 0.18.3 to 0.19.0: integration test binaries
 
 **No action.** The integration test binaries are grouped by lane.

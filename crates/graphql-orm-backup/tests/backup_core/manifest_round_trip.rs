@@ -1,3 +1,5 @@
+//! Manifest encoding, checksums, and full-backup planning.
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_backup::{

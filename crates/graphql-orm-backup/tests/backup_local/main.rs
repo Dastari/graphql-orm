@@ -1,3 +1,5 @@
+//! Local repository backup tests: incrementals, restore, lifecycle and operational safety.
+
 mod incremental_backup;
 mod incremental_object_snapshot;
 mod lifecycle_safety;

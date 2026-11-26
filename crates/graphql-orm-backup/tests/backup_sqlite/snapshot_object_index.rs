@@ -1,3 +1,5 @@
+//! Deriving object references and digests from exported database rows.
+
 #![cfg(all(feature = "orm-sqlite", not(windows)))]
 
 use async_trait::async_trait;

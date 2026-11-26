@@ -1,3 +1,5 @@
+//! Loading snapshot chains and rejecting invalid parent or schema relationships.
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.232.0 to 0.233.0: Nested closure SQL
+
+**No action.** Upgrade ORM and macros together. A nested read-predicate
+closure built from column comparisons and NULL tests can share the inner
+walk across the governed and reached rows. The verdict is still TRUE,
+FALSE or UNKNOWN. Hand-written or generated filters and relation targets
+retain their existing evaluation sites. The byte and weighted-relation
+budgets are measured on the smaller shared rendering, so some nested
+compositions previously refused with `AUTHORIZATION_MISCONFIGURED` now
+build.
+
 ## 0.231.0 to 0.232.0: JWT and fixture dependencies
 
 **No action.** Upgrade ORM and macros together. The ORM test suite uses

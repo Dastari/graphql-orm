@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::{BackupByteLimit, BackupError, BackupRepository, collect_backup_stream};
 
+/// Default value for the legacy, ignored lock age setting.
 pub const DEFAULT_LOCK_STALE_AFTER_SECONDS: i64 = 3_600;
 /// Repository key of the advisory repository lock.
 pub const REPOSITORY_LOCK_KEY: &str = "locks/repository.lock";

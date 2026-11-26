@@ -1,12 +1,18 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-storage"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
 description = "Provider-neutral object storage primitives for graphql-orm applications"
 publish = false
+
+# Windows local storage needs a narrowly scoped exception for MoveFileExW.
+# The library sets its unsafe_code and missing_docs lints in src/lib.rs.
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
 
 [features]
 default = ["local"]

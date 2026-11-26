@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.233.0 aligns with the ORM's
+[nested closure SQL update](../../MIGRATION.md#02320-to-02330-nested-closure-sql).
+
 Version 0.232.0 aligns with ORM 0.232.0. The full-stack test fixture builds
 its selected backend. [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
 

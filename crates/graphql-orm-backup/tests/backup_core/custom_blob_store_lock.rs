@@ -1,3 +1,5 @@
+//! Repository locking through custom blob stores and their conditional writes.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.4.0
+
+- Inherit the workspace lint baseline, which forbids unsafe Rust in crate
+  targets. The library still requires documentation for its public API.
+
 ## Unreleased - 0.3.1
 
 - Install from a reviewed Git revision using the package inventory and release manifest.

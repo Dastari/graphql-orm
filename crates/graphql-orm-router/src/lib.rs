@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 // Allow enough query depth to monomorphize the pinned Hive/Ntex service type
 // in the maintained loopback test server.
 #![recursion_limit = "256"]

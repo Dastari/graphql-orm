@@ -21,6 +21,7 @@ use crate::{
     plan_full_backup,
 };
 
+/// Manifest format identifier for newline-delimited JSON database exports.
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
 /// Default number of concurrent object/payload operations.
 pub const DEFAULT_OBJECT_CONCURRENCY: usize = 8;
@@ -176,19 +177,19 @@ pub fn snapshot_manifest_key(snapshot_id: Uuid) -> String {
     format!("snapshots/{snapshot_id}/manifest.json")
 }
 
-/// Returns the reserved table export key.
-///
 /// Returns the zstd-compressed table export key used by the snapshot format.
 #[must_use]
 pub fn database_table_key(snapshot_id: Uuid, table_name: &str) -> String {
     format!("snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst")
 }
 
+/// Returns the repository key for a table's zstd-compressed change journal.
 #[must_use]
 pub fn database_changes_key(snapshot_id: Uuid, table_name: &str) -> String {
     format!("snapshots/{snapshot_id}/database/changes/{table_name}.jsonl.zst")
 }
 
+/// Returns the content-addressed repository key for a lowercase SHA-256 digest.
 #[must_use]
 pub fn object_content_key(sha256_hex: &str) -> String {
     let shard_a = sha256_hex.get(0..2).unwrap_or("00");
@@ -999,6 +1000,7 @@ fn check_declared_object_sizes(
     Ok(())
 }
 
+/// Computes the lowercase hexadecimal SHA-256 digest of the supplied bytes.
 #[must_use]
 pub fn bytes_sha256_hex(bytes: &[u8]) -> String {
     sha256_hex(bytes)
