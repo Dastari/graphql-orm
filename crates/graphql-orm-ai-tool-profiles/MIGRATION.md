@@ -24,9 +24,14 @@ fingerprint covers every entry field. Delivery modes that bind the index set
 sessions do not. Capability, plan, catalogue and semantic fingerprints are
 unchanged.
 
-The contract fingerprint identifies what a model was shown of one root. It
-is not execution authority: execution still binds the exact capability
-fingerprint. No schema or data migration is needed.
+The contract fingerprint identifies what a model was shown of one root and
+what its plans compile to: identity, target, semantic operation, plan
+schemas, limits, and the resolved output route and projection, injected
+root bound, keyset page argument, continuation page-info fields and
+relationship-argument depth. Operation assurance is not part of it, because
+assurance is enforced at execution. It is not execution authority:
+execution still binds the exact capability fingerprint. No schema or data
+migration is needed.
 
 ## 0.33.0 mutation and subscription signatures
 

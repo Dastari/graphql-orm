@@ -1083,7 +1083,11 @@ impl AiGraphqlQueryCapability {
     }
 
     /// Returns the fingerprint of this root's model-facing contract: its
-    /// identity, target, semantic operation, plan schemas and limits.
+    /// identity, target, semantic operation, plan schemas and limits, and
+    /// the resolved inputs that shape what is advertised or compiled (output
+    /// route and projection, injected root bound, keyset page argument,
+    /// continuation page-info fields and relationship-argument depth).
+    /// Operation assurance is not part of it: it is enforced at execution.
     ///
     /// Unlike [`Self::fingerprint`] it omits the finished-schema and
     /// semantic-catalogue fingerprints, so an edit that leaves this root's
@@ -1204,35 +1208,7 @@ impl AiGraphqlQueryCapability {
     }
 
     fn keyset_page_info_fields(&self) -> Option<KeysetPageInfoFields> {
-        generated_keyset_page_argument(&self.schema, &self.operation)?;
-        if !matches!(&self.output, QueryOutput::Entity { route, .. }
-            if route.first().is_some_and(|segment| !segment.field_name.is_empty()))
-        {
-            return None;
-        }
-        let root = self
-            .schema
-            .operation_root_field(GraphqlOperationKind::Query, &self.operation.field_name)
-            .ok()?;
-        let Some(SchemaType::Object(connection)) =
-            self.schema.types.get(named_type(&root.ty).ok()?)
-        else {
-            return None;
-        };
-        let field = unique_case_insensitive_field;
-        let (page_info, page_info_field) = field(connection, "pageInfo", None)?;
-        let Some(SchemaType::Object(page_info_type)) =
-            self.schema.types.get(named_type(&page_info_field.ty).ok()?)
-        else {
-            return None;
-        };
-        let (has_next_page, _) = field(page_info_type, "hasNextPage", Some("Boolean!"))?;
-        let (end_cursor, _) = field(page_info_type, "endCursor", Some("String"))?;
-        Some(KeysetPageInfoFields {
-            page_info,
-            has_next_page,
-            end_cursor,
-        })
+        keyset_page_info_fields(&self.schema, &self.operation, &self.output)
     }
 
     /// Compiles one compact plan as a continuable keyset page.
@@ -3620,6 +3596,80 @@ impl AiCompiledGraphqlQuery {
     }
 }
 
+/// Page-info fields of a continuable generated keyset root, or `None` when
+/// the root cannot continue.
+fn keyset_page_info_fields(
+    schema: &FinishedSchema,
+    operation: &GraphqlSemanticOperationDescriptor,
+    output: &QueryOutput,
+) -> Option<KeysetPageInfoFields> {
+    generated_keyset_page_argument(schema, operation)?;
+    if !matches!(output, QueryOutput::Entity { route, .. }
+        if route.first().is_some_and(|segment| !segment.field_name.is_empty()))
+    {
+        return None;
+    }
+    let root = schema
+        .operation_root_field(GraphqlOperationKind::Query, &operation.field_name)
+        .ok()?;
+    let Some(SchemaType::Object(connection)) = schema.types.get(named_type(&root.ty).ok()?) else {
+        return None;
+    };
+    let field = unique_case_insensitive_field;
+    let (page_info, page_info_field) = field(connection, "pageInfo", None)?;
+    let Some(SchemaType::Object(page_info_type)) =
+        schema.types.get(named_type(&page_info_field.ty).ok()?)
+    else {
+        return None;
+    };
+    let (has_next_page, _) = field(page_info_type, "hasNextPage", Some("Boolean!"))?;
+    let (end_cursor, _) = field(page_info_type, "endCursor", Some("String"))?;
+    Some(KeysetPageInfoFields {
+        page_info,
+        has_next_page,
+        end_cursor,
+    })
+}
+
+/// Model-facing contract inputs of one resolved output: its route and how
+/// its result is projected, which shape what the compiled document selects.
+fn output_contract(output: &QueryOutput) -> Value {
+    match output {
+        QueryOutput::Entity {
+            entity,
+            route,
+            result_floor,
+        } => json!({
+            "entity": entity,
+            "route": route
+                .iter()
+                .map(|segment| json!({"field": segment.field_name, "list": segment.is_list}))
+                .collect::<Vec<_>>(),
+            "resultFloor": result_floor,
+        }),
+        QueryOutput::Scalar {
+            classification,
+            maximum_items,
+        } => json!({
+            "scalar": classification,
+            "maximumItems": maximum_items,
+        }),
+        QueryOutput::Aggregate {
+            entity,
+            projection,
+            groups_field,
+            metrics_field,
+            value_fields,
+        } => json!({
+            "aggregate": entity,
+            "projection": projection,
+            "groups": groups_field,
+            "metrics": metrics_field,
+            "values": value_fields,
+        }),
+    }
+}
+
 #[derive(Clone, Debug)]
 enum QueryOutput {
     Entity {
@@ -4068,6 +4118,19 @@ fn compile_capability(
         "argument_schema": argument_schema,
         "compact_argument_schema": compact_argument_schema,
         "limits": limits,
+        // Resolved per-root inputs that change what is advertised or
+        // compiled: the output route and projection, the injected root
+        // bound, the server-owned keyset page argument, continuation and
+        // the relationship-argument depth.
+        "output": output_contract(&output),
+        "root_bound": root_bound_argument(schema, root_field, &output)?,
+        "keyset_page_argument": generated_keyset_page_argument(schema, operation),
+        "continuation": keyset_page_info_fields(schema, operation, &output).map(|fields| json!({
+            "pageInfo": fields.page_info,
+            "hasNextPage": fields.has_next_page,
+            "endCursor": fields.end_cursor,
+        })),
+        "relationship_argument_depth": options.maximum_relationship_argument_depth(),
     }));
     Ok(CompiledCapability::Included(Box::new(
         AiGraphqlQueryCapability {
@@ -9383,6 +9446,91 @@ mod tests {
         assert_eq!(
             custom.compile_compact(declared_plan).unwrap().variables(),
             &json!({"v0": {"after": "cursor"}})
+        );
+    }
+
+    /// The keyset fixture's `SubscriptionsKeyset` root, with `connection` as
+    /// the body of `SubscriptionConnection`.
+    fn keyset_root_with_connection(connection: &str) -> AiGraphqlQueryCapability {
+        let (sdl, base) = input_collision_fixture(false);
+        let sdl = sdl
+            .replace(
+                "type SubscriptionConnection { edges: [SubscriptionEdge!]! }",
+                &format!(
+                    "type SubscriptionConnection {{ {connection} }}
+                     type PageInfo {{ hasNextPage: Boolean!, endCursor: String }}"
+                ),
+            )
+            .replace(
+                "type Query {",
+                "type Query {
+                    SubscriptionsKeyset(page: KeysetPageInput!): SubscriptionConnection!
+                 ",
+            )
+            + "\ninput KeysetPageInput { after: String, limit: Int, includeTotalCount: Boolean! = false }";
+        let keyset = GraphqlSemanticOperationDescriptor::generated(
+            GraphqlOperationKind::Query,
+            GeneratedGraphqlOperationCategory::KeysetList,
+            "Subscription",
+            "SubscriptionsKeyset",
+            "Read a bounded keyset page.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "page".to_owned(),
+                description: "Page settings.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "KeysetPageInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            GraphqlSemanticTypeRef::named(
+                "SubscriptionConnection",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+            true,
+        )
+        .unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_descriptors(
+            base.entities,
+            base.operations.into_iter().chain([keyset]),
+        )
+        .unwrap();
+        input_collision_capabilities(&sdl, &semantics)
+            .capabilities()
+            .find(|capability| capability.field_name() == "SubscriptionsKeyset")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn contract_fingerprint_covers_continuation_and_the_output_route() {
+        let continuable =
+            keyset_root_with_connection("edges: [SubscriptionEdge!]!, pageInfo: PageInfo!");
+        let without_page_info = keyset_root_with_connection("edges: [SubscriptionEdge!]!");
+        let renamed_route =
+            keyset_root_with_connection("entries: [SubscriptionEdge!]!, pageInfo: PageInfo!");
+        assert!(continuable.supports_continuation());
+        assert!(!without_page_info.supports_continuation());
+        assert!(renamed_route.supports_continuation());
+        for changed in [&without_page_info, &renamed_route] {
+            // The plan schemas the model is shown are the same; only the
+            // resolved continuation or output route differs.
+            assert_eq!(changed.argument_schema(), continuable.argument_schema());
+            assert_eq!(
+                changed.compact_argument_schema(),
+                continuable.compact_argument_schema()
+            );
+            assert_ne!(
+                changed.contract_fingerprint(),
+                continuable.contract_fingerprint()
+            );
+        }
+        // The same inputs give the same contract.
+        assert_eq!(
+            keyset_root_with_connection("edges: [SubscriptionEdge!]!, pageInfo: PageInfo!")
+                .contract_fingerprint(),
+            continuable.contract_fingerprint()
         );
     }
 

@@ -305,12 +305,15 @@ Each batch decision names the capability it decides, and the broker refuses
 the batch unless decision `i` names ranked match `i`. Matches are decided in
 rank order, in batches of at most `AI_CAPABILITY_BROWSE_POLICY_BATCH` (256)
 decisions, or the host's `with_maximum_discovery_authorizations` when it is
-lower; an entity with more grouped roots is decided alone. The default
+lower. No single call receives more: an entity with more grouped roots is
+decided alone, split across calls, and admitted only once every part is
+decided. The default
 `authorize_discovery` calls `authorize` per match with up to 16 calls in
 flight; hosts with an expensive check override it to decide each batch from
 one current lookup. A broad query can send up to the index set's
 `maximum_entries` matches to policy.
 
+The index limits bound how many matches a query scans and sends to policy.
 `with_maximum_discovery_authorizations` also sets a ceiling on the
 **authorized view**: the admitted matches with their admitted grouped roots
 (and, per root, each admitted entity). A query whose authorized view exceeds
@@ -580,7 +583,8 @@ Nothing in a browse result depends on what the principal may not see:
 - Policy decides the listed entries in order, in batches of at most
   `AI_CAPABILITY_BROWSE_POLICY_BATCH` (256) decisions, or the host's
   `with_maximum_discovery_authorizations` when it is lower (an entity with
-  more grouped roots is decided alone). Browse stops as soon as the
+  more grouped roots is decided alone, split across calls). Browse stops as
+  soon as the
   requested page is decided: the first `offset + limit + 1` admitted
   results, or at `namespaces` the first namespaces with an admitted
   capability (so namespaces carry no count). The response is exactly that
@@ -937,23 +941,35 @@ Both outcomes are retryable, execute nothing, and carry a fixed `correction`
 | `capability_stale` | The run holds the candidate or loaded capability, and what this principal is shown of it has changed since (at describe, `describe_type` or execute). | Discover again, describe the new candidate, use the new signatures and `loadedReference`. |
 | `selection_stale` | The run does not hold the selection: discovery or browse never returned that candidate reference to it (including a reference issued to another run or attempt, and an earlier contract's `candidateFingerprint`), the `loadedReference` is unknown or expired, or the continuation handle is unknown, expired or belongs to another `loadedReference`. | Discover (or describe) again. |
 
-When any exact server-side fingerprint has moved, the broker loads the
-capability again from the current index under current policy and compares
-its **visible fingerprint**: the capability's model-facing metadata and
+Every describe, `describe_type`, execute and continued page loads the
+capability again from the current index under current policy, whether or
+not anything has changed, and compares its **visible fingerprint** with the
+one the principal was shown: the capability's model-facing metadata and
 contract fingerprint and, for an entity, exactly the roots this principal is
 admitted to, each with its own metadata and contract fingerprint. A contract
 fingerprint (`AiGraphqlQueryCapability::contract_fingerprint`) covers the
 root's identity, target, semantic operation, plan schemas and limits, and
-leaves out the catalogue-wide schema and semantic fingerprints. When the
-visible fingerprint is unchanged, the change lies only in state the
-principal cannot see (a root it is denied, another capability, another
-target, the target policy or a host-policy fingerprint that admits the same
-view): describe loads from the current index, and `describe_type`, execute
-and continued pages replace the session's binding with the refreshed one,
-under the same `loadedReference` and expiry, and proceed against the exact
-current capability. Execution always binds the exact current capability,
-plan compiler and disclosure schema. Otherwise the call is
-`capability_stale`.
+the resolved inputs that shape what is advertised or compiled: the output
+route and projection, the injected root bound, the server-owned keyset page
+argument, whether the root offers continuation (and its page-info fields)
+and the relationship-argument depth. It leaves out the catalogue-wide schema
+and semantic fingerprints.
+
+A denied entry, entity or chosen root is `authorization_denied`. A change to
+the visible fingerprint, such as a sibling root newly denied or admitted, is
+`capability_stale`. Anything else lies only in state the principal cannot
+see (a root it is denied, another capability, another target, the target
+policy or a host-policy fingerprint that admits the same view): describe
+loads from the current index, and `describe_type`, execute and continued
+pages replace the session's binding with the current one, under the same
+`loadedReference` and expiry, and proceed against the exact current
+capability. The outcome is therefore the same whether or not hidden state
+drifted. Execution always binds the exact current capability, plan compiler
+and disclosure schema.
+
+Operation assurance is not part of the contract. A change to assurance alone
+does not invalidate a candidate, loaded reference or continuation handle:
+assurance is enforced at execution, by the owning resolver path.
 
 `capability_stale` is reported only for a candidate the current principal was
 already shown, or a capability it already loaded, and only for a change to

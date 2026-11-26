@@ -27,8 +27,11 @@ supersedes: []
   (its visible fingerprint, built from AI tool profiles 0.34.0 contract
   fingerprints); a change only to hidden state refreshes the loaded binding
   under the same reference, and continued pages match on the root's contract
-  fingerprint. `with_maximum_discovery_authorizations` caps the authorized
-  view instead of every match, and policy is decided in batches. A legacy
+  fingerprint. The admitted view, sibling roots included, is compared on
+  every call, so a revoked sibling is stale whether or not hidden state also
+  changed. `with_maximum_discovery_authorizations` caps the authorized
+  view instead of every match, and policy is decided in calls of at most
+  that bound (and 256), splitting a larger entity. A legacy
   `candidateFingerprint`, `null` included, is `selection_stale`.
   Client-deferred discovery is unchanged.
 - **Breaking (#551).** Generated mutations can join the fixed capability

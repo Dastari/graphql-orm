@@ -279,32 +279,41 @@ before.
    in this same release as broker version 3. `AI_CAPABILITY_BROKER_VERSION`
    stays 3. Admit the current five broker fingerprints wherever you list
    them by value.
-5. **Staleness follows what the principal is shown.** `capability_stale` at
-   describe, `describe_type`, execute and continued pages now means that
-   something this principal was shown of the capability changed: its
-   model-facing metadata or contract fingerprint, or, for an entity, its
-   admitted roots and theirs (AI tool profiles 0.34.0 adds
-   `contract_fingerprint`, which leaves out catalogue-wide fingerprints).
-   When only state it cannot see changed (a root it is denied, another
-   capability or target, the target policy, or a host-policy fingerprint
-   that admits the same view), the broker loads the capability again from
-   the current index and the call proceeds: describe returns the
-   description, and `describe_type`, execute and continued pages refresh the
-   session's binding under the same `loadedReference` and expiry. Execution
-   always binds the exact current capability. Tests that expected
-   `capability_stale` after a policy-fingerprint-only or target-policy-only
-   change now see the call succeed. Continued pages require the root's
-   contract fingerprint, not its exact capability fingerprint, to match
-   the first page's.
+5. **Staleness follows what the principal is shown.** Every describe,
+   `describe_type`, execute and continued page loads the capability again
+   from the current index under current policy and compares what this
+   principal is shown with what it was shown: the capability's model-facing
+   metadata and contract fingerprint and, for an entity, every admitted root
+   and theirs (AI tool profiles 0.34.0 adds `contract_fingerprint`, which
+   leaves out catalogue-wide fingerprints and covers the resolved output
+   route, continuation and other compiled per-root inputs). A denied entry,
+   entity or chosen root is `authorization_denied`; any visible change,
+   including a sibling root newly denied or admitted after describe, is
+   `capability_stale`, whether or not hidden state also changed. Previously
+   a revoked sibling did not affect execute of another root. When only state
+   the principal cannot see changed (a root it is denied, another capability
+   or target, the target policy, or a host-policy fingerprint that admits the
+   same view), the call proceeds and `describe_type`, execute and continued
+   pages refresh the session's binding under the same `loadedReference` and
+   expiry. Execution always binds the exact current capability. Tests that
+   expected `capability_stale` after a policy-fingerprint-only or
+   target-policy-only change now see the call succeed. Continued pages
+   require the root's contract fingerprint, not its exact capability
+   fingerprint, to match the first page's. A change to operation assurance
+   alone does not invalidate handles: assurance is enforced at execution.
 6. **Discovery ceiling.** `with_maximum_discovery_authorizations` now
    applies to the authorized view (admitted matches with their admitted
    grouped roots) instead of every match, so a restricted principal is no
-   longer refused because of matches it may not see. Policy is decided in
-   rank order in batches of at most that bound (and at most
-   `AI_CAPABILITY_BROWSE_POLICY_BATCH`, 256): a host that overrides
-   `authorize_discovery` can receive several batches per discover call. The
-   refusal and the response depend only on what the principal may see;
-   timing is not constant.
+   longer refused because of matches it may not see. The index limits
+   (`maximum_entries`) bound how many matches a query scans and sends to
+   policy; the configured ceiling bounds only the admitted view. Policy is
+   decided in rank order in calls of at most that bound (and at most
+   `AI_CAPABILITY_BROWSE_POLICY_BATCH`, 256); an entity with more grouped
+   roots is split across calls and admitted only once every part is
+   decided. A host that overrides `authorize_discovery` can therefore
+   receive several calls per discover or browse. The refusal and the
+   response depend only on what the principal may see; timing is not
+   constant.
 7. **Known limitation: brokered mutation admission.** Rules admit a brokered
    mutation by its exact capability fingerprint, which covers the whole
    catalogue's schema and semantic fingerprints. A catalogue edit, even an
