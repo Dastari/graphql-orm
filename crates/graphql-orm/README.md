@@ -10,9 +10,16 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.228.0 moves the authorization sequence of generated GraphQL writes
+Version 0.231.0 moves the authorization sequence of generated GraphQL writes
 into shared runtime functions, with unchanged checks and order.
-[Migration](../../MIGRATION.md#02270-to-02280-generated-write-pipeline)
+[Migration](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
+Version 0.230.0 shares offset list and aggregate execution across generated
+resolvers.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
+Version 0.228.0 redacts validation messages for generated transient mutation
+arguments. [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 
 Version 0.227.0 uses Unicode string binds for SQL Server filters, including
 VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
@@ -860,6 +867,10 @@ See the [migration guide](../../MIGRATION.md#0641-to-0650-scalar-policies-with-g
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).
+
+Generated keyset reads can order by sortable portable Decimal fields and
+resume with exact values. See
+[Decimal keyset ordering](../../docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering).
 
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current

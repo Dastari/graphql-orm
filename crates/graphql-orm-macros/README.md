@@ -10,9 +10,16 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.228.0 generates GraphQL writes that call the ORM's shared
-[write pipeline](../../MIGRATION.md#02270-to-02280-generated-write-pipeline)
+Version 0.231.0 generates GraphQL writes that call the ORM's shared
+[write pipeline](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
 instead of inlining their authorization sequence.
+
+Version 0.230.0 splits query emission by operation family and delegates offset
+list and aggregate execution to the ORM runtime.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
+Version 0.228.0 aligns with the ORM's
+[transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
 
 Version 0.227.0 validates SQL Server unsigned inputs before selecting targets
 for updates and upserts, including updates that would affect zero rows.
@@ -774,6 +781,9 @@ See the [migration guide](../../MIGRATION.md#0641-to-0650-scalar-policies-with-g
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).
+
+Derived keyset order inputs include sortable portable Decimal fields. See
+[Decimal keyset ordering](../../docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering).
 
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current

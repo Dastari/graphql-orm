@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.228.0
+## Unreleased - ORM/macros 0.231.0
 
 - **Changed (#724).** Generated GraphQL create, update, upsert, delete, bulk
   and nested-create mutations call a shared runtime write pipeline for request
@@ -24,7 +24,26 @@ for historical context.
   only with an authority that pipeline's admission issued. The hidden
   macro-internal `MutationContext::__run_generated_mutation_hook` is removed,
   which is a source break for host code that called it.
-  [Migration](MIGRATION.md#02270-to-02280-generated-write-pipeline)
+  [Migration](MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
+## Unreleased - ORM/macros 0.230.0
+
+- Generated list and aggregate execution moved to shared runtime helpers; no
+  measurable compile-cost change (groundwork for #677/#358).
+
+## Unreleased - ORM/macros 0.229.0
+
+- **No action** — Sortable portable Decimal fields are available in generated
+  keyset order inputs. Continuation compares their exact stored values on
+  SQLite, PostgreSQL, and SQL Server (#920).
+  [Migration](MIGRATION.md#02280-to-02290-decimal-keyset-ordering)
+
+## Unreleased - ORM/macros 0.228.0
+
+- **No action** — Generated schemas redact validation messages for transient
+  arguments, the defaults of their variables, and other arguments that share
+  those variables (#913).
+  [Migration](MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 
 ## Unreleased - ORM/macros 0.227.0
 

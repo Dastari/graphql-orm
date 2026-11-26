@@ -1309,6 +1309,8 @@ pub fn __bind_principal_key<K: PrincipalKeyBinding>(
 /// The fixed message of a refused principal-key binding.
 pub const PRINCIPAL_KEY_BINDING_REFUSAL: &str = "the request principal could not be bound";
 
+pub(crate) const TRANSIENT_INPUT_INVALID: &str = "transient input is not a valid value";
+
 /// Marks a generated argument as a transient mutation input in the schema:
 /// `@transientInput`. Tool-profile compilers refuse to map such an argument.
 #[async_graphql::TypeDirective(name = "transientInput", location = "ArgumentDefinition")]
@@ -1431,9 +1433,9 @@ where
         }
         // `T`'s own coercion error can quote the value it rejected, and a
         // response error is something hosts log. Report the failure only.
-        T::parse(value).map(Self).map_err(|_| {
-            async_graphql::InputValueError::custom("transient input is not a valid value")
-        })
+        T::parse(value)
+            .map(Self)
+            .map_err(|_| async_graphql::InputValueError::custom(TRANSIENT_INPUT_INVALID))
     }
 
     fn to_value(&self) -> async_graphql::Value {

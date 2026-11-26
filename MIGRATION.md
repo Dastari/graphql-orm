@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.227.0 to 0.228.0: Generated write pipeline
+## 0.230.0 to 0.231.0: Generated write pipeline
 
 **No action** for supported callers: hosts that use the derives, the
 repository API, `Database::transaction` and
@@ -34,6 +34,33 @@ Request authority for a hook now requires a `GeneratedWriteAuthority`, which
 only the write pipeline's admission issues. The pipeline's entry points are
 macro-internal and hidden; they are not a supported replacement. See
 [what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
+
+## 0.229.0 to 0.230.0: Shared generated read execution
+
+**No action.** Upgrade ORM and macros together. Generated list and aggregate
+resolvers use shared execution helpers. Their schema, catalogue and
+authorization contracts are unchanged.
+
+## 0.228.0 to 0.229.0: Decimal keyset ordering
+
+**No action.** Generated keyset `OrderBy` inputs now include sortable,
+readable portable Decimal fields (#920). The SDL diff consists of those
+additional input members. The corresponding input shapes and catalogue
+fingerprints that include them change. Existing cursor order and filter
+bindings carry through the upgrade.
+Hand-written `AuthorizedKeysetEntity` implementations whose configured keyset
+order contains a non-MONEY Decimal column must encode that value as canonical
+Decimal text at the declared scale; the former scaled-integer encoding now
+returns `CURSOR_INVALID`. `KeysetOrderByInput::ordered` now accepts sortable
+Decimal fields instead of refusing them.
+[Decimal keyset ordering](docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering)
+
+## 0.227.0 to 0.228.0: Transient input validation errors
+
+**No action.** Generated schema builders now return a fixed message when
+async-graphql rejects a transient argument, its variable default, or another
+argument that shares the variable.
+[Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
 
 ## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
 
@@ -121,7 +148,7 @@ assurance or target admission. Host code that dispatches hooks itself uses
 `run_mutation_hook`, which attaches none.
 ORM/macros 0.228.0 remove that entry and issue the authority from the
 runtime's own admission: see
-[generated write pipeline](#02270-to-02280-generated-write-pipeline).
+[generated write pipeline](#02300-to-02310-generated-write-pipeline).
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 
