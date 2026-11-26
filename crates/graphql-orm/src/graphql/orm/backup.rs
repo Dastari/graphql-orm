@@ -875,7 +875,11 @@ fn backup_value_to_sql_value(
             if backend == DatabaseBackend::Postgres
                 && logical_type == BackupValueKind::DateTime =>
         {
-            parse_backup_date_time(value)?.native_timestamp_bind()
+            let canonical = parse_backup_date_time(value)?;
+            let timestamp = canonical
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            SqlValue::native_timestamp(canonical, timestamp)
         }
         BackupValue::String(value) => SqlValue::String(value.clone()),
         BackupValue::Uuid(value) => SqlValue::Uuid(*value),

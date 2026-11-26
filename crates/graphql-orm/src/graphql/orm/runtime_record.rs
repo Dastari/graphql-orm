@@ -372,7 +372,7 @@ impl RuntimeDateTime {
         // Our canonical form includes extended years for previously stored values.
         let value = self
             .0
-            .parse::<chrono::DateTime<Utc>>()
+            .parse::<chrono::DateTime<chrono::Utc>>()
             .expect("canonical runtime timestamp");
         // Match PostgreSQL's leap-second input semantics while encoding a
         // normal instant on the wire.
