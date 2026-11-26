@@ -9,7 +9,7 @@ use graphql_orm_storage::{
 use secrecy::SecretString;
 use uuid::Uuid;
 
-#[path = "support/listing_contract.rs"]
+#[path = "../support/listing_contract.rs"]
 mod listing_contract;
 
 fn test_config(root_prefix: String) -> SmbStorageConfig {

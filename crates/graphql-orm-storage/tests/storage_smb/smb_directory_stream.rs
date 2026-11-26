@@ -1,6 +1,5 @@
 //! Actual SDK query regressions for the test-owned Samba fixture.
 //! Never use against a live or application-owned share.
-#![cfg(feature = "smb")]
 use futures_util::StreamExt;
 use smb::{Client, ClientConfig, ConnectionConfig, Directory, FileCreateArgs, UncPath};
 use smb_fscc::{

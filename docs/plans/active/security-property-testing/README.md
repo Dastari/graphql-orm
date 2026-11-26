@@ -52,7 +52,7 @@ Every acceptance-gate surface has a seeded, bounded suite in ordinary CI:
   executed round trips on in-memory SQLite and the owned PostgreSQL and SQL
   Server containers (`crates/graphql-orm/tests/identifier_quoting_properties.rs`).
 - Storage keys: validators against an independent contract model, plus a
-  local-provider containment round trip (`crates/graphql-orm-storage/tests/key_properties.rs`).
+  local-provider containment round trip (`crates/graphql-orm-storage/tests/storage_core/key_properties.rs`).
 - Canonical JSON: write/read, canonical identity, one spelling, fixed points
   and limits (`crates/graphql-orm/tests/canonical_json_properties.rs`).
 - JWT and claims: cargo-fuzz targets with an independent oracle, a retained

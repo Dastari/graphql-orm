@@ -11,7 +11,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-#[path = "support/listing_contract.rs"]
+#[path = "../support/listing_contract.rs"]
 mod listing_contract;
 
 #[tokio::test]

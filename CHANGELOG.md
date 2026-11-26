@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.232.0
+
+- **No action** — ORM receiver-admission tests share the workspace's
+  jsonwebtoken 11 dependency. The full-stack macro fixture builds only its
+  selected database driver and uses the ORM's TLS settings (#498).
+  [Migration](MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
+
 ## Unreleased - ORM/macros 0.231.0
 
 - **Changed (#724).** Generated GraphQL create, update, upsert, delete, bulk

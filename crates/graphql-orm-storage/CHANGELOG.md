@@ -10,6 +10,11 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.19.0
+
+- Run the storage integration tests from the core, local, S3 and SMB
+  test binaries. ([#771](https://github.com/Dastari/graphql-orm/issues/771))
+
 ## Unreleased - 0.18.3
 
 - Install from a reviewed Git revision using the package inventory and release manifest.

@@ -1,5 +1,3 @@
-#![cfg(feature = "s3")]
-
 use bytes::Bytes;
 use graphql_orm_storage::{
     BlobPutOptions, BlobStore, S3StorageBackend, S3StorageConfig, StorageByteStream,
