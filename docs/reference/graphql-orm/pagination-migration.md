@@ -377,22 +377,16 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   negate it.
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
-  search and subscription delivery re-reads. SQLite renders every closure,
-  single-level and nested, in the original form: the recursive tuple carries
-  the target's truth, so pointers that compare equal under the pointer
-  column's collation (for example `NOCASE` or `RTRIM`) but carry different
-  truths are all followed, even where the key column distinguishes them
-  (#876). SQL
-  Server can project the governed and reached rows into one target
-  expression for a standalone closure. PostgreSQL keeps the traversal join
-  and can encode scalar truth at each site with a single target expression.
-  On PostgreSQL and SQL Server, when a root closure directly wraps another
-  closure over built-in column comparisons and NULL tests, it can use the
-  inner walk's nullable verdict as its target. SQL Server can share that
-  verdict across the governed and reached rows; PostgreSQL uses it once at
-  each site. Other compositions use separate TRUE and FALSE tests. Each form
-  admits the same rows. Every test keeps the target's bind order. Nested closures get distinct names. The database
-  evaluates the closure per row. Unsupported backends are refused with
+  search and subscription delivery re-reads. Nested closures over built-in
+  column comparisons and NULL tests can share one target expression across
+  the governed and reached rows, including under negation and boolean
+  composition. SQLite and PostgreSQL carry the target's truth in the
+  recursive tuple. This keeps collation-equal pointers with different
+  truths distinct even when the pointer and key use different collations
+  (#876). Standalone closures and targets with hand-written SQL, generated
+  filters or relations retain their existing evaluation sites. Nested
+  closures get distinct names. The database evaluates the closure per row.
+  Unsupported backends are refused with
   `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
@@ -542,8 +536,8 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     closure adds two subquery levels and one relation. At the default bound,
     the standalone projection uses 66 subquery levels. The original
     composition rendering uses 67 levels for one closure and leaves room for
-    four relations around it. A directly nested closure counts as five
-    relations and leaves room for one surrounding relation. Putting a
+    four relations around it. A shared rendering counts each inner walk
+    once, while the original rendering counts each copy. Putting a
     relation between two closures uses 73 levels and exhausts the
     nine-relation budget. A relation chain alone may be nine deep, and a
     relation filter or count ordering may add five relations to a statement.

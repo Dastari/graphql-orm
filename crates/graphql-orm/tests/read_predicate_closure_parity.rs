@@ -17,6 +17,8 @@
 //! The run prints a fingerprint of every admitted set, which is the same on
 //! every backend.
 
+#[path = "support/closure_legacy.rs"]
+mod closure_legacy;
 #[cfg(feature = "mssql")]
 #[allow(dead_code)]
 #[path = "support/owned_mssql.rs"]
@@ -155,21 +157,25 @@ enum Target {
 use Target::{AtLeast, Below, Closure, Not, Or, ScoreIsNull};
 
 impl Target {
-    fn predicate(&self) -> ReadPredicate {
-        let score = |op, value| {
-            ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap()
+    fn predicate(&self, legacy: bool) -> ReadPredicate {
+        let score = |op, comparison, value| {
+            if legacy {
+                closure_legacy::predicate::<B, Node>("score", comparison, SqlValue::Int(value))
+            } else {
+                ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap()
+            }
         };
         match self {
-            AtLeast(value) => score(ReadPredicateOp::Gte, *value),
-            Below(value) => score(ReadPredicateOp::Lt, *value),
+            AtLeast(value) => score(ReadPredicateOp::Gte, ">=", *value),
+            Below(value) => score(ReadPredicateOp::Lt, "<", *value),
             ScoreIsNull => ReadPredicate::is_null::<B, Node>("score").unwrap(),
-            Not(target) => target.predicate().not().unwrap(),
-            Or(left, right) => left.predicate().or(right.predicate()).unwrap(),
+            Not(target) => target.predicate(legacy).not().unwrap(),
+            Or(left, right) => left.predicate(legacy).or(right.predicate(legacy)).unwrap(),
             Closure(quantifier, keys, target, depth) => {
                 ReadPredicate::related_closure_within::<B, Node>(
                     *quantifier,
                     keys.columns(),
-                    target.predicate(),
+                    target.predicate(legacy),
                     *depth,
                 )
                 .unwrap()
@@ -526,7 +532,7 @@ async fn every_backend_admits_the_reference_sets() {
             .map(|(row, _)| row.id)
             .collect::<Vec<_>>();
         let mut admitted = EntityQuery::<Node>::new()
-            .with_read_visibility(&ReadVisibility::Complete(target.predicate()))
+            .with_read_visibility(&ReadVisibility::Complete(target.predicate(false)))
             .unwrap()
             .fetch_all(&db)
             .await
@@ -556,41 +562,13 @@ async fn every_backend_admits_the_reference_sets() {
     owner.cleanup().unwrap();
 }
 
-/// The first SQLite closure subquery in `sql`, through its closing
-/// parenthesis. Read statements bind every value, so the SQL has no string
-/// literals.
-fn closure_sql(sql: &str) -> &str {
-    let start = sql.find("(WITH RECURSIVE").expect("closure subquery");
-    let mut depth = 0_usize;
-    for (offset, character) in sql[start..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &sql[start..=start + offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("unbalanced closure subquery");
-}
-
-/// SQLite renders every closure exactly as the original renderer does.
-/// PostgreSQL and SQL Server take the compact rendering.
 fn assert_nested_rendering(name: &str, original: &str, candidate: &str) {
-    if B::DIALECT == DatabaseBackend::Sqlite {
-        assert!(
-            original.contains(closure_sql(candidate)),
-            "{name}: SQLite keeps the original nested rendering"
-        );
-    } else {
-        assert!(
-            candidate.len() + 64 < original.len(),
-            "{name}: compact rendering"
-        );
-    }
+    assert!(
+        candidate.len() + 64 < original.len(),
+        "{name}: {} bytes, original {} bytes",
+        candidate.len(),
+        original.len(),
+    );
 }
 
 /// The last read statement.
@@ -742,18 +720,12 @@ async fn directly_nested_closures_agree_with_original_sql() {
     ];
     let primary_key_present = ReadPredicate::is_not_null::<B, Node>("id").unwrap();
     for (name, candidate) in cases {
-        let original = candidate.clone().and(primary_key_present.clone()).unwrap();
-        let (before, before_sql, _) = read(query(original)).await;
-        let (after, after_sql, _) = read(query(candidate.clone())).await;
+        let composed = candidate.clone().and(primary_key_present.clone()).unwrap();
+        let (before, _, _) = read(query(composed)).await;
+        let (after, _, _) = read(query(candidate.clone())).await;
         let (double_negated, _, _) = read(query(candidate.not().unwrap().not().unwrap())).await;
         assert_eq!(before, after, "{name}");
         assert_eq!(before, double_negated, "double negation of {name}");
-        if name == "scalar negation" && B::DIALECT == DatabaseBackend::Postgres {
-            // PostgreSQL uses the original renderer for explicit negation.
-            assert!(before_sql.len().abs_diff(after_sql.len()) < 64, "{name}");
-        } else {
-            assert_nested_rendering(name, &before_sql, &after_sql);
-        }
         // Row 61 has no parent, name 'ABC', and label 'abc '. Check an
         // observable difference between the declared collations.
         match name {
@@ -801,7 +773,6 @@ async fn directly_nested_closures_agree_with_original_sql() {
             }
             .unwrap();
         }
-        let below_limit = nested(All, All, target.clone(), 1, 1);
         let fallback = nested(
             All,
             All,
@@ -810,16 +781,9 @@ async fn directly_nested_closures_agree_with_original_sql() {
             1,
         );
         let original = fallback.clone().and(primary_key_present).unwrap();
-        assert_eq!(query(below_limit.clone()).build_delete_sql().1.len(), 4);
-        assert_eq!(
-            query(fallback.clone()).build_delete_sql().1,
-            vec![SqlValue::Int(61); 16]
-        );
         let (before, _, _) = read(query(original)).await;
         let (after, _, _) = read(query(fallback)).await;
-        let (below_limit, _, _) = read(query(below_limit)).await;
         assert_eq!(after, before, "compact cost fallback");
-        assert_eq!(after, below_limit, "at the compact cost boundary");
         assert!(!after.is_empty() && !after.contains(&61));
     }
 
@@ -835,15 +799,8 @@ async fn directly_nested_closures_agree_with_original_sql() {
                             Box::new(Closure(inner, inner_keys, Box::new(AtLeast(minimum)), 3)),
                             3,
                         );
-                        let candidate = target.predicate();
-                        // AND selects the original composition renderer. The fixture's
-                        // non-null primary key makes the additional check always true.
-                        let original = candidate
-                            .clone()
-                            .and(ReadPredicate::is_not_null::<B, Node>("id").unwrap())
-                            .unwrap();
-                        let original = query(original);
-                        let candidate = query(candidate);
+                        let original = query(target.predicate(true));
+                        let candidate = query(target.predicate(false));
                         let (before, before_sql, _) = read(original.clone()).await;
                         let (after, after_sql, _) = read(candidate.clone()).await;
                         assert_eq!(before, after, "{target:?}");
@@ -916,7 +873,7 @@ async fn collation_equal_text_pointers_agree_with_original_sql() {
              locale = 'und-u-ks-level2', deterministic = false)",
         )
         .await;
-        r#"ptr TEXT COLLATE closure_ci NULL, tag TEXT COLLATE "C" NULL, ptr_ci TEXT COLLATE closure_ci NULL, tag_ci TEXT COLLATE closure_ci NULL"#
+        r#"ptr VARCHAR(8) COLLATE closure_ci NULL, tag VARCHAR(8) COLLATE "C" NULL, ptr_ci VARCHAR(8) COLLATE closure_ci NULL, tag_ci VARCHAR(8) COLLATE closure_ci NULL"#
     };
     #[cfg(feature = "mssql")]
     let columns = "ptr NVARCHAR(8) COLLATE Latin1_General_100_CI_AS NULL, \
@@ -980,49 +937,53 @@ async fn collation_equal_text_pointers_agree_with_original_sql() {
             (rows.map_err(|error| error.to_string()), sql)
         }
     };
-    let score =
-        |op, value| ReadPredicate::column::<B, Text>("score", op, SqlValue::Int(value)).unwrap();
-    let nested = |outer, inner, keys: &[(&str, &str)], target| {
-        let closure = |quantifier, keys: &[(&str, &str)], target| {
-            ReadPredicate::related_closure_within::<B, Text>(quantifier, keys, target, 3).unwrap()
-        };
-        closure(outer, &[("parent_id", "id")], closure(inner, keys, target))
+    let closure = |quantifier, keys: &[(&str, &str)], target| {
+        ReadPredicate::related_closure_within::<B, Text>(quantifier, keys, target, 3).unwrap()
     };
-    let primary_key_present = ReadPredicate::is_not_null::<B, Text>("id").unwrap();
+    let parents = &[("parent_id", "id")];
     let mut outcomes = Vec::new();
     for (pair, keys) in [
         ("case-sensitive key", [("ptr", "tag")]),
         ("case-insensitive key", [("ptr_ci", "tag_ci")]),
     ] {
-        let cases = [
-            (
-                "any",
-                nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1)),
-            ),
-            (
-                "all",
-                nested(All, All, &keys, score(ReadPredicateOp::Ne, 1)),
-            ),
-            (
-                "not any",
-                nested(Any, Any, &keys, score(ReadPredicateOp::Eq, 1))
-                    .not()
-                    .unwrap(),
-            ),
-        ];
-        for (quantifier, candidate) in cases {
-            let name = format!("{pair}, {quantifier}");
-            let original = candidate.clone().and(primary_key_present.clone()).unwrap();
-            let (before, before_sql) = read(original).await;
-            let (after, after_sql) = read(candidate).await;
-            // A statement error is the same outcome for both renderings.
-            assert_eq!(before.as_ref().ok(), after.as_ref().ok(), "{name}");
-            assert_eq!(before.is_err(), after.is_err(), "{name}");
-            // A negated closure keeps the original rendering.
-            if after.is_ok() && quantifier != "not any" {
-                assert_nested_rendering(&name, &before_sql, &after_sql);
+        for (quantifier, outer, inner, op, comparison) in [
+            ("any", Any, Any, ReadPredicateOp::Eq, "="),
+            ("all", All, All, ReadPredicateOp::Ne, "<>"),
+            ("not any", Any, Any, ReadPredicateOp::Eq, "="),
+        ] {
+            let mut first_outcome = None;
+            for (outer_keys, inner_keys) in [(parents, &keys), (&keys, parents)] {
+                let make = |score| {
+                    let predicate = closure(outer, outer_keys, closure(inner, inner_keys, score));
+                    if quantifier == "not any" {
+                        predicate.not().unwrap()
+                    } else {
+                        predicate
+                    }
+                };
+                let name = format!("{pair}, {quantifier}, outer {outer_keys:?}");
+                let candidate =
+                    make(ReadPredicate::column::<B, Text>("score", op, SqlValue::Int(1)).unwrap());
+                let original = make(closure_legacy::predicate::<B, Text>(
+                    "score",
+                    comparison,
+                    SqlValue::Int(1),
+                ));
+                let (before, before_sql) = read(original).await;
+                let (after, after_sql) = read(candidate).await;
+                // A statement error is the same outcome for both renderings.
+                assert_eq!(before.as_ref().ok(), after.as_ref().ok(), "{name}");
+                assert_eq!(before.is_err(), after.is_err(), "{name}");
+                if after.is_ok() {
+                    assert_nested_rendering(&name, &before_sql, &after_sql);
+                }
+                if let Some(expected) = &first_outcome {
+                    assert_eq!(&after.ok(), expected, "{name}");
+                } else {
+                    first_outcome = Some(after.ok());
+                }
             }
-            outcomes.push((name, after.ok()));
+            outcomes.push((format!("{pair}, {quantifier}"), first_outcome.unwrap()));
         }
     }
     let admitted = |ids: &[i64]| Some(ids.to_vec());

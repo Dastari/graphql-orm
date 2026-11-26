@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.231.0 shares the SQL of nested closure read predicates built from
+column tests. [Migration](../../MIGRATION.md#02300-to-02310-nested-closure-sql).
+
 Version 0.230.0 shares offset list and aggregate execution across generated
 resolvers.
 See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).

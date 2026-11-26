@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.231.0 aligns with the ORM's
+[nested closure SQL update](../../MIGRATION.md#02300-to-02310-nested-closure-sql).
+
 Version 0.230.0 splits query emission by operation family and delegates offset
 list and aggregate execution to the ORM runtime.
 See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).

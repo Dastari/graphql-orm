@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.230.0 to 0.231.0: Nested closure SQL
+
+**No action.** Upgrade ORM and macros together. A nested read-predicate
+closure built from column comparisons and NULL tests can share the inner
+walk across the governed and reached rows. The verdict is still TRUE,
+FALSE or UNKNOWN. Hand-written or generated filters and relation targets
+retain their existing evaluation sites. The hop and composition limits
+continue to apply.
+
 ## 0.229.0 to 0.230.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate
