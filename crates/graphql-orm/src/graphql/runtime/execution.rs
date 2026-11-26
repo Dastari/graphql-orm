@@ -2482,7 +2482,9 @@ mod alias_tests {
             RuntimeValue::String(String::new()),
             RuntimeValue::String("\u{1}\"é\\".repeat(50)),
             RuntimeValue::Uuid(uuid::Uuid::from_bytes([7; 16])),
-            RuntimeValue::DateTime(RuntimeDateTime::from_utc(chrono::DateTime::UNIX_EPOCH)),
+            RuntimeValue::DateTime(RuntimeDateTime::from_utc(
+                time::macros::datetime!(1970-01-01 0:00),
+            )),
             decimal("-12345678901234.5000"),
             decimal("0"),
             RuntimeValue::Json(serde_json::Value::Null),

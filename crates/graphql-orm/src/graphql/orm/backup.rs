@@ -357,21 +357,18 @@ fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> 
 /// Reject parsed leap seconds before the record engine's canonicalization can round them away,
 /// then keep the UTC result inside the range both backup backends can store. Offsets and
 /// microsecond rounding can move a four-digit input outside this range, so check the output year.
-fn parse_backup_date_time(text: &str) -> crate::Result<super::RuntimeDateTime> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(text)
+fn parse_backup_date_time(text: &str) -> crate::Result<String> {
+    let parsed = crate::temporal::parse_rfc3339(text)
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-    // Chrono represents seconds 60 as second 59 with nanoseconds >= 1_000_000_000.
-    // Inspect that representation before rounding: .9999995 within the leap second would
-    // otherwise carry into the next minute and lose the evidence needed for this refusal.
-    if chrono::Timelike::nanosecond(&parsed) >= 1_000_000_000 {
+    // Rounding .9999995 within a leap second carries into the next minute.
+    if parsed.subsec_nanos() >= 1_000_000_000 {
         return Err(sqlx::Error::Protocol(
             "backup date-time cannot contain a leap second".to_owned(),
         ));
     }
-    let canonical = super::RuntimeDateTime::from_utc(parsed.with_timezone(&chrono::Utc));
-    // Canonical UTC text has exactly 27 bytes for a four-digit year. Chrono can also represent
-    // year zero and signed extended years, which PostgreSQL's portable range excludes.
-    if canonical.as_str().len() != 27 || canonical.as_str().starts_with("0000-") {
+    let canonical = parsed.canonical_utc();
+    // Canonical UTC text has exactly 27 bytes for a four-digit year.
+    if canonical.len() != 27 || canonical.starts_with("0000-") {
         return Err(sqlx::Error::Protocol(
             "backup date-time is outside the portable range 0001-9999".to_owned(),
         ));
@@ -1266,7 +1263,10 @@ mod tests {
         ] {
             let parsed = parse_backup_date_time(raw).unwrap();
             assert_eq!(parsed.as_str(), expected, "{raw}");
-            assert_eq!(parsed, super::super::RuntimeDateTime::parse(raw).unwrap());
+            assert_eq!(
+                parsed,
+                super::super::RuntimeDateTime::parse(raw).unwrap().as_str()
+            );
         }
         assert!(parse_backup_date_time("9999-12-31T23:59:59.9999995Z").is_err());
     }

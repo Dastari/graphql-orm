@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
+chrono fields and stored date-time formats carry forward without migration.
+See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).
+
 Version 0.233.0 shares the SQL of nested closure read predicates built from
 column tests. [Migration](../../MIGRATION.md#02320-to-02330-nested-closure-sql).
 

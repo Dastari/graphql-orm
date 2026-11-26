@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.234.0 aligns with the ORM's internal date-time engine update.
+See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).
+
 Version 0.233.0 aligns with the ORM's
 [nested closure SQL update](../../MIGRATION.md#02320-to-02330-nested-closure-sql).
 

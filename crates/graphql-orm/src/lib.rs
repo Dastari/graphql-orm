@@ -392,6 +392,8 @@ pub mod prelude;
 /// Shared scalar and input helper types used by generated GraphQL surfaces.
 pub mod types;
 
+mod temporal;
+
 /// Compile-time probes proving that certain generated APIs are deliberately absent.
 ///
 /// These use `compile_fail` doctests instead of full-diagnostic snapshots so the assertions

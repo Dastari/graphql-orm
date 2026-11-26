@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm"
-version = "0.233.0"
+version = "0.234.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -35,6 +35,7 @@ postgres = [
 mssql = [
   "graphql-orm-macros/mssql",
   "dep:tiberius",
+  "tiberius/time",
   "dep:quick-xml",
   "dep:connection-string",
   "dep:tokio-util",
@@ -65,7 +66,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.233.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.234.0", default-features = false }
 graphql-orm-operation-catalog = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }
@@ -73,6 +74,7 @@ serde_json = "1"
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 tiberius = { workspace = true, optional = true }
+time = { version = "0.3.53", features = ["macros", "parsing"] }
 tokio = { version = "1", features = ["sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { workspace = true, optional = true }
@@ -87,7 +89,6 @@ jsonwebtoken = { workspace = true }
 graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }
-time = "0.3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util"] }
 trybuild = "1"
 proptest = { workspace = true }

@@ -5963,8 +5963,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         if self.requires_in_memory_filtering() {
-            let calendar_today =
-                chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive();
+            let calendar_today = crate::temporal::calendar_today();
             entities = entities
                 .into_iter()
                 .filter_map(
@@ -6070,8 +6069,7 @@ where
     /// residual in-memory predicates. Rows are never dropped, so a caller can
     /// count every candidate it read.
     fn decode_candidates(&self, rows: &[B::Row]) -> crate::Result<Vec<(T, bool)>> {
-        let calendar_today =
-            chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).date_naive();
+        let calendar_today = crate::temporal::calendar_today();
         rows.iter()
             .map(|row| {
                 let entity = T::from_row(row)?;

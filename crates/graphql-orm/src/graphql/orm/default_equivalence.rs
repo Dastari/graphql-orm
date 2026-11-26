@@ -110,8 +110,7 @@ pub(super) fn postgres_typed_defaults_equal(
         Class::Bytea => hex_bytea(&live)? == hex_bytea(&target)?,
         Class::Timestamptz => {
             let (live, target) = (timestamptz(&live)?, timestamptz(&target)?);
-            (live.timestamp(), live.timestamp_subsec_nanos())
-                == (target.timestamp(), target.timestamp_subsec_nanos())
+            live.ordering_key() == target.ordering_key()
         }
     })
 }
@@ -133,14 +132,15 @@ fn hex_bytea(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Parse an RFC 3339 instant or PostgreSQL ISO `DateStyle` timestamptz output.
-fn timestamptz(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(text) {
+fn timestamptz(text: &str) -> Option<crate::temporal::Timestamp> {
+    use crate::temporal;
+
+    if let Ok(value) = temporal::parse_rfc3339(text) {
         return Some(value);
     }
     // `YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM[:SS]]`; BC years and other styles fail.
     let split = text.get(19..)?.find(['+', '-'])? + 19;
-    let naive =
-        chrono::NaiveDateTime::parse_from_str(text.get(..split)?, "%Y-%m-%d %H:%M:%S%.f").ok()?;
+    let local = text.get(..split)?;
     let offset = text.get(split..)?;
     let sign = if offset.starts_with('-') { -1 } else { 1 };
     let parts = offset[1..].split(':').collect::<Vec<_>>();
@@ -158,8 +158,19 @@ fn timestamptz(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
         .map(|(part, scale)| part.parse::<i32>().map(|value| value * scale))
         .sum::<Result<i32, _>>()
         .ok()?;
+    if let Some(naive) = temporal::parse_naive(local, b' ')
+        && let Ok(offset) = time::UtcOffset::from_whole_seconds(sign * seconds)
+        && seconds < 24 * 3600
+        && let Some(utc) = temporal::utc_in_time(naive, offset)
+    {
+        return Some(temporal::Timestamp::from_utc(utc));
+    }
+    let naive = chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f").ok()?;
     let offset = chrono::FixedOffset::east_opt(sign * seconds)?;
-    naive.and_local_timezone(offset).single()
+    naive
+        .and_local_timezone(offset)
+        .single()
+        .map(temporal::Timestamp::from_chrono)
 }
 
 /// Rewrites deparsed default text to the spelling it has with
@@ -292,6 +303,54 @@ fn constant(class: Class, expression: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::postgres_typed_defaults_equal as equal;
+
+    #[test]
+    fn timestamptz_keys_match_chrono_for_postgres_iso_defaults() {
+        use chrono::{DateTime, FixedOffset, NaiveDateTime};
+
+        for (local, suffix, offset_seconds) in [
+            ("1969-12-31 23:00:00", "-01", -3600),
+            ("2000-02-29 05:30:00.123456", "+05:30", 19_800),
+            ("2000-02-29 00:00:00.000001", "-00:19:32", -1172),
+            ("2016-12-31 23:59:60.5", "+00", 0),
+            ("2017-01-01 00:59:60.5", "+01", 3600),
+            ("9999-12-31 23:59:59", "-01", -3600),
+            ("-9999-01-01 00:00:00", "+01", 3600),
+            ("+10000-01-01 00:00:00", "+01", 3600),
+            ("-10000-12-31 23:59:59", "-01", -3600),
+            ("+262142-12-31 23:59:59", "-01", -3600),
+            ("-262143-01-01 00:00:00", "+01", 3600),
+        ] {
+            let local_value = NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+            let expected = local_value
+                .and_local_timezone(FixedOffset::east_opt(offset_seconds).unwrap())
+                .single()
+                .map(|value| (value.timestamp(), value.timestamp_subsec_nanos()));
+            let text = format!("{local}{suffix}");
+            assert_eq!(
+                super::timestamptz(&text).map(|value| value.ordering_key()),
+                expected,
+                "{text}"
+            );
+        }
+        for text in [
+            "2000-02-29T00:00:00.123456789+05:30",
+            "2016-12-31T23:59:60.5Z",
+            "1900-02-29T00:00:00Z",
+            "0001-01-01 00:00:00+00 BC",
+            "2000-02-29 00:00:00+24",
+            "infinity",
+        ] {
+            let expected = DateTime::parse_from_rfc3339(text)
+                .ok()
+                .map(|value| (value.timestamp(), value.timestamp_subsec_nanos()));
+            assert_eq!(
+                super::timestamptz(text).map(|value| value.ordering_key()),
+                expected,
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn deparsed_literals_read_the_same_under_either_string_setting() {

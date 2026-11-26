@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.234.0
+
+- **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time
+  normalization, calendar arithmetic, and database codecs. **No action.**
+  [Migration](MIGRATION.md#02330-to-02340-internal-date-time-engine)
+
 ## Unreleased - ORM/macros 0.233.0
 
 - **No action** — Nested closure read predicates over built-in column tests
