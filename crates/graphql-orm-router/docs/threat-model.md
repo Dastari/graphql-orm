@@ -78,9 +78,11 @@ and RLS remain authoritative after router preflight.
   adds `nosniff` and a sandbox content policy, and bounds size, concurrency,
   rate, connect, idle, and total time. An abort closes the client connection,
   so a truncated body never looks complete.
-- Default logs exclude variables/tokens and use structured info events. Safe
-  admin errors omit endpoints, SDL, keys, headers, tokens, and downstream
-  bodies.
+- The router omits variables and bearer tokens from structured log fields.
+  Subgraph error warnings truncate messages by default. Subgraphs can embed
+  sensitive values in their messages, so use
+  [redacted logging](configuration.md#subgraph-errors) when needed. Safe
+  admin errors omit endpoints, SDL, keys, headers, tokens and downstream bodies.
 
 ## Residual deployment responsibilities
 

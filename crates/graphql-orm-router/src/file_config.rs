@@ -1,5 +1,10 @@
 use std::{
-    collections::BTreeMap, fs::File, io::Read, net::SocketAddr, path::Path, sync::Arc,
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::Read,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -14,7 +19,8 @@ use crate::{
     AdminConfig, AuthenticationProvider, ByteRoute, ExactScopeMatcher, JwksAuthenticationConfig,
     JwksAuthenticationProvider, LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig,
     RequestLimits, RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind,
-    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
+    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubgraphErrorLogConfig,
+    SubgraphErrorMasking, SubscriptionConfig, TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -37,6 +43,12 @@ pub struct RouterFileConfig {
     introspection: bool,
     #[serde(default)]
     refusal_outcome: bool,
+    #[serde(default)]
+    mask_subgraph_errors: FileSubgraphErrorMasking,
+    #[serde(default)]
+    subgraph_error_code_allowlist: BTreeSet<String>,
+    #[serde(default)]
+    subgraph_error_logging: SubgraphErrorLogConfig,
     #[serde(default)]
     allow_plaintext_http: bool,
     #[serde(default)]
@@ -63,6 +75,15 @@ pub struct RouterFileConfig {
     persisted_documents: Option<FilePersistedDocuments>,
     #[serde(default)]
     byte_routes: Vec<FileByteRoute>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum FileSubgraphErrorMasking {
+    #[default]
+    All,
+    None,
+    AllowlistByCode,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -108,6 +129,16 @@ impl RouterFileConfig {
         self,
         environment: impl Fn(&str) -> Result<Option<String>, RouterError>,
     ) -> Result<RouterConfig, RouterError> {
+        if !self.subgraph_error_code_allowlist.is_empty()
+            && !matches!(
+                self.mask_subgraph_errors,
+                FileSubgraphErrorMasking::AllowlistByCode
+            )
+        {
+            return Err(invalid(
+                "subgraphErrorCodeAllowlist requires maskSubgraphErrors `allowlist-by-code`",
+            ));
+        }
         let listener = environment(PUBLIC_LISTENER_ENV)?
             .map(|value| parse_listener(&value, PUBLIC_LISTENER_ENV))
             .transpose()?
@@ -117,6 +148,16 @@ impl RouterFileConfig {
             .allow_anonymous_development(self.anonymous_development)
             .with_introspection(self.introspection)
             .with_refusal_outcome(self.refusal_outcome)
+            .with_subgraph_error_masking(match self.mask_subgraph_errors {
+                FileSubgraphErrorMasking::All => SubgraphErrorMasking::All,
+                FileSubgraphErrorMasking::None => SubgraphErrorMasking::None,
+                FileSubgraphErrorMasking::AllowlistByCode => {
+                    SubgraphErrorMasking::AllowlistByCode {
+                        codes: self.subgraph_error_code_allowlist,
+                    }
+                }
+            })
+            .with_subgraph_error_logging(self.subgraph_error_logging)
             .allow_plaintext_http(self.allow_plaintext_http)
             .use_environment_proxy(self.use_environment_proxy);
         if let Some(documents) = self.persisted_documents {
@@ -1165,6 +1206,58 @@ mod tests {
         );
         assert!(!config.scope_matcher.matches("products.*", "products.read"));
         assert!(!format!("{config:?}").contains("schema-secret"));
+    }
+
+    #[test]
+    fn subgraph_error_allowlist_requires_the_allowlist_mode() {
+        let parse = |fields: &str| {
+            RouterFileConfig::from_json(&format!(
+                r#"{{"listener":"127.0.0.1:1","anonymousDevelopment":true,"subgraphs":[{{"name":"products","graphqlUrl":"https://products.example/graphql","sdlUrl":"https://products.example/sdl"}}],{fields}}}"#
+            ))
+            .unwrap()
+            .into_router_config_with(|_| Ok(None))
+            .and_then(RouterConfig::validate)
+        };
+        for mode in ["none", "all"] {
+            let error = parse(&format!(
+                r#""maskSubgraphErrors":"{mode}","subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("allowlist-by-code"), "{error}");
+        }
+        let error = parse(r#""subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#).unwrap_err();
+        assert!(error.to_string().contains("allowlist-by-code"), "{error}");
+        let error = parse(r#""maskSubgraphErrors":"allowlist-by-code""#).unwrap_err();
+        assert!(error.to_string().contains("at least one code"), "{error}");
+        let error =
+            parse(r#""maskSubgraphErrors":"allowlist-by-code","subgraphErrorCodeAllowlist":[]"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("at least one code"), "{error}");
+        let config = parse(
+            r#""maskSubgraphErrors":"allowlist-by-code","subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.subgraph_error_masking,
+            SubgraphErrorMasking::AllowlistByCode {
+                codes: BTreeSet::from(["INVALID_INPUT".to_owned()])
+            }
+        );
+        for fields in [
+            r#""maskSubgraphErrors":"all""#,
+            r#""maskSubgraphErrors":"all","subgraphErrorCodeAllowlist":[]"#,
+        ] {
+            assert_eq!(
+                parse(fields).unwrap().subgraph_error_masking,
+                SubgraphErrorMasking::All
+            );
+        }
+        assert_eq!(
+            parse(r#""maskSubgraphErrors":"none""#)
+                .unwrap()
+                .subgraph_error_masking,
+            SubgraphErrorMasking::None
+        );
     }
 
     #[test]
