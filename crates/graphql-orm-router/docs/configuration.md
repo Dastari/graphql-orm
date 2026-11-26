@@ -162,9 +162,18 @@ pinned engine omits the subgraph execution hooks for those streams.
 | `none` | Passes through all original downstream GraphQL error messages. Use only in trusted deployments. |
 
 Both opt-in modes retain the existing response `path` and `extensions.code`
-and drop other error extensions. A downstream message can disclose internal
-details or sensitive data even for a familiar error code. Review every code
-before adding it to the allowlist.
+and drop other error extensions, including `outcome`. A downstream message can
+disclose internal details or sensitive data even for a familiar error code.
+Review every code before adding it to the allowlist.
+
+The allowlist applies to every subgraph; it is not scoped per subgraph.
+Matching trusts the code a subgraph supplies, so any subgraph, or any upstream
+error that a subgraph forwards verbatim with an allowlisted code, discloses its
+message. Use the allowlist only when every configured subgraph is trusted to
+assign codes.
+
+The router refuses to start when `subgraphErrorCodeAllowlist` is set without
+`allowlist-by-code`, or when `allowlist-by-code` has an empty allowlist.
 
 ```json
 {
@@ -188,9 +197,12 @@ request variables, other request headers, bearer tokens, or response data
 as event fields. A subgraph can embed sensitive information in its error
 message.
 
-Set `subgraphErrorLogging.message` to `full`, `truncated` (default, the first
-256 Unicode characters), or `redacted` (the fixed string `[redacted]`). Use
-`redacted` where downstream messages may contain sensitive details.
+Set `subgraphErrorLogging.message` to `full` (the whole message, with no
+length bound), `truncated` (default, the first 256 Unicode characters), or
+`redacted` (the fixed string `[redacted]`). Use `redacted` where downstream
+messages may contain sensitive details. While warnings are enabled, every router
+log line for a request with a valid operation name (ASCII letters, digits and
+`_`, at most 128 characters) also carries `client_operation_name`.
 `maxEventsPerSecond` is a positive integer, defaults to 20, and applies
 across all downstream fetches on one router instance. Periodic summary
 events report the number of error events dropped by the limiter.

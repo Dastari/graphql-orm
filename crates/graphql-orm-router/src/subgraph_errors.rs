@@ -199,7 +199,7 @@ impl SubgraphErrorLogger {
             graphql_request_id = identifiers.as_deref().map(|ids| ids.req_id()),
             operation_name = operation_name.as_deref(),
             subgraph,
-            response_path = %response_path,
+            response_path = response_path.as_str(),
             "extensions.code" = error.extensions.code.as_deref(),
             subgraph_error_message = message,
             "downstream GraphQL error"

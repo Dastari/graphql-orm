@@ -18,6 +18,13 @@ GraphQL errors with messages truncated to 256 characters. See the
 [subgraph error settings](docs/configuration.md#subgraph-errors) for log
 redaction and optional client message disclosure.
 
+When you opt into `allowlist-by-code` or `none`, downstream error extensions
+other than `code` are dropped, so clients read `outcome` as unknown. While
+warnings are enabled, every router log line for a request with a valid
+operation name also carries `client_operation_name`. The
+router rejects `subgraphErrorCodeAllowlist` without `allowlist-by-code`, and
+`allowlist-by-code` without any code.
+
 ## 0.18.0 to 0.19.0: Changed replay gateway coverage
 
 **No action.** The router forwards the optional resume argument and

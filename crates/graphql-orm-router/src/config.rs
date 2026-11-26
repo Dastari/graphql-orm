@@ -427,6 +427,14 @@ impl RouterConfig {
                 ));
             }
         }
+        if let SubgraphErrorMasking::AllowlistByCode { codes } = &self.subgraph_error_masking
+            && codes.is_empty()
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                "subgraph error masking `allowlist-by-code` requires at least one code",
+            ));
+        }
         self.request_limits.validate()?;
         if let Some(admin) = &self.admin {
             let Some(public) = &self.authentication else {

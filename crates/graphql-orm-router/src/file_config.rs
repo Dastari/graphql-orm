@@ -129,6 +129,16 @@ impl RouterFileConfig {
         self,
         environment: impl Fn(&str) -> Result<Option<String>, RouterError>,
     ) -> Result<RouterConfig, RouterError> {
+        if !self.subgraph_error_code_allowlist.is_empty()
+            && !matches!(
+                self.mask_subgraph_errors,
+                FileSubgraphErrorMasking::AllowlistByCode
+            )
+        {
+            return Err(invalid(
+                "subgraphErrorCodeAllowlist requires maskSubgraphErrors `allowlist-by-code`",
+            ));
+        }
         let listener = environment(PUBLIC_LISTENER_ENV)?
             .map(|value| parse_listener(&value, PUBLIC_LISTENER_ENV))
             .transpose()?
@@ -1196,6 +1206,49 @@ mod tests {
         );
         assert!(!config.scope_matcher.matches("products.*", "products.read"));
         assert!(!format!("{config:?}").contains("schema-secret"));
+    }
+
+    #[test]
+    fn subgraph_error_allowlist_requires_the_allowlist_mode() {
+        let parse = |fields: &str| {
+            RouterFileConfig::from_json(&format!(
+                r#"{{"listener":"127.0.0.1:1","anonymousDevelopment":true,"subgraphs":[{{"name":"products","graphqlUrl":"https://products.example/graphql","sdlUrl":"https://products.example/sdl"}}],{fields}}}"#
+            ))
+            .unwrap()
+            .into_router_config_with(|_| Ok(None))
+            .and_then(RouterConfig::validate)
+        };
+        for mode in ["none", "all"] {
+            let error = parse(&format!(
+                r#""maskSubgraphErrors":"{mode}","subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("allowlist-by-code"), "{error}");
+        }
+        let error = parse(r#""subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#).unwrap_err();
+        assert!(error.to_string().contains("allowlist-by-code"), "{error}");
+        let error = parse(r#""maskSubgraphErrors":"allowlist-by-code""#).unwrap_err();
+        assert!(error.to_string().contains("at least one code"), "{error}");
+        let error =
+            parse(r#""maskSubgraphErrors":"allowlist-by-code","subgraphErrorCodeAllowlist":[]"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("at least one code"), "{error}");
+        let config = parse(
+            r#""maskSubgraphErrors":"allowlist-by-code","subgraphErrorCodeAllowlist":["INVALID_INPUT"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.subgraph_error_masking,
+            SubgraphErrorMasking::AllowlistByCode {
+                codes: BTreeSet::from(["INVALID_INPUT".to_owned()])
+            }
+        );
+        assert_eq!(
+            parse(r#""maskSubgraphErrors":"none""#)
+                .unwrap()
+                .subgraph_error_masking,
+            SubgraphErrorMasking::None
+        );
     }
 
     #[test]
