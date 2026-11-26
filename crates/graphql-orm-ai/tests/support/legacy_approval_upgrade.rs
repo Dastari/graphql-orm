@@ -448,7 +448,13 @@ pub(crate) async fn legacy_approval_upgrade(database: &Database<AiOrmBackend>) {
             .plan_migration_to_entities("catalog-index", "upgrade catalog fixture", &entities)
             .await
             .expect("plan upgrade for catalog fixture");
-        assert_eq!(plan.source_schema_hash, upgrade.source_schema_hash);
+        // SQLite and PostgreSQL include the predicate in the schema hash.
+        // SQL Server still relies on the catalog check for included columns.
+        if suffix.is_empty() || cfg!(feature = "mssql") {
+            assert_eq!(plan.source_schema_hash, upgrade.source_schema_hash);
+        } else {
+            assert_ne!(plan.source_schema_hash, upgrade.source_schema_hash);
+        }
         let options = module
             .admit_index_replacements_with_live_schema(database, &plan, ApplyOptions::default())
             .await

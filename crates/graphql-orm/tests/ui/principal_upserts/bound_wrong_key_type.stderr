@@ -1,0 +1,43 @@
+error[E0308]: mismatched types
+  --> tests/ui/principal_upserts/bound_wrong_key_type.rs:18:25
+   |
+18 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^
+   |                         |
+   |                         expected `&String`, found `&i64`
+   |                         arguments to this function are incorrect
+   |                         this return type influences the call expression's return type
+   |
+   = note: expected reference `&std::string::String`
+              found reference `&i64`
+note: method defined here
+  --> $RUST/core/src/clone.rs
+   |
+   |     fn clone(&self) -> Self;
+   |        ^^^^^
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: can't compare `std::string::String` with `i64`
+  --> tests/ui/principal_upserts/bound_wrong_key_type.rs:18:25
+   |
+18 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^ no implementation for `std::string::String == i64`
+   |
+   = help: the trait `PartialEq<i64>` is not implemented for `std::string::String`
+   = help: `std::string::String` implements trait `PartialEq<Rhs>`:
+             PartialEq<&str>
+             PartialEq<ByteStr>
+             PartialEq<ByteString>
+             PartialEq<Cow<'_, str>>
+             PartialEq<Path>
+             PartialEq<PathBuf>
+             PartialEq<async_graphql::Name>
+             PartialEq<bytes::bytes::Bytes>
+             PartialEq<bytes::bytes_mut::BytesMut>
+             PartialEq<graphql_orm::serde_json::Value>
+             PartialEq<http::header::value::HeaderValue>
+             PartialEq<http::uri::authority::Authority>
+             PartialEq<http::uri::path::PathAndQuery>
+             PartialEq<str>
+             PartialEq
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)

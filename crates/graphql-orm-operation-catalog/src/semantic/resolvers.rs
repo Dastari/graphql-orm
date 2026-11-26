@@ -116,6 +116,12 @@ pub struct GraphqlRelationResolverDescriptor {
     /// semantic catalogue.
     pub arguments: Vec<String>,
     /// Whether the field has an authoritative field policy.
+    ///
+    /// The subgraph enforces that policy on every traversal, so the policy is
+    /// stricter than any root's requirement. A consumer defers to the
+    /// subgraph whenever this is `true`, including for older exports that
+    /// still report [`GraphqlResolverAuthorization::SameAsRoot`] for such a
+    /// relation.
     pub has_field_policy: bool,
     /// What a traversal is required to hold.
     pub authorization: GraphqlResolverAuthorization,
@@ -174,8 +180,12 @@ pub enum GraphqlResolverAuthorization {
     /// authentication mode and the same fixed scopes. A consumer that knows
     /// that root's requirement, for example from
     /// [`crate::GraphqlOperationCatalog`], knows this one. The subgraph
-    /// applies more on top: the authentication mode of the type that owns a
-    /// relationship field, and field, row and database policy.
+    /// applies the owning type's authentication mode and any field, row and
+    /// database policy before returning data.
+    ///
+    /// A relation whose `has_field_policy` is `true` is never described by
+    /// this mode. A consumer defers to the subgraph when `has_field_policy`
+    /// is `true`, including for older exports that say `same_as_root`.
     SameAsRoot {
         /// Root operation kind; always `query`.
         kind: GraphqlOperationKind,
@@ -185,7 +195,8 @@ pub enum GraphqlResolverAuthorization {
     /// The requirement is enforced by the subgraph and is not published: the
     /// matching root is not exposed, the related type is not a generated
     /// entity of this schema, the requirement binds root arguments this
-    /// resolver does not have, or it differs from the root's.
+    /// resolver does not have, it differs from the root's, or the relation
+    /// declares its own field policy.
     SubgraphOnly,
 }
 
@@ -507,7 +518,9 @@ impl GraphqlResolverCatalog {
                 {
                     continue;
                 }
-                let authorization = match source(&relationship.target) {
+                let target_source =
+                    source(&relationship.target).filter(|_| !field.has_field_policy);
+                let authorization = match target_source {
                     Some(target) => match relationship.cardinality {
                         GraphqlSemanticRelationshipCardinality::Many => published(
                             &target.to_many_root,
@@ -1219,11 +1232,11 @@ mod tests {
         let parent = resolvers.relation("Child", "Parent").unwrap();
         assert_eq!(parent.authorization, same_as("Parent"));
         assert!(!parent.has_field_policy);
-        assert!(
-            resolvers
-                .relation("Child", "Guarded")
-                .unwrap()
-                .has_field_policy
+        let guarded = resolvers.relation("Child", "Guarded").unwrap();
+        assert!(guarded.has_field_policy);
+        assert_eq!(
+            guarded.authorization,
+            GraphqlResolverAuthorization::SubgraphOnly
         );
 
         let entity = resolvers.entity("Parent").unwrap();
@@ -1238,6 +1251,23 @@ mod tests {
         assert_eq!(entity.authorization, same_as("Parent"));
         assert!(resolvers.entity("Child").is_none());
         assert!(resolvers.relation("Parent", "Id").is_none());
+    }
+
+    #[test]
+    fn older_field_guarded_exports_keep_their_wire_contract() {
+        let catalog = catalog();
+        let mut legacy = compose(&catalog, sources()).unwrap();
+        let guarded = legacy
+            .relations
+            .iter_mut()
+            .find(|relation| relation.field_name == "Guarded")
+            .unwrap();
+        guarded.authorization = same_as("Parent");
+        let legacy = resealed(legacy);
+        let decoded =
+            GraphqlResolverCatalog::from_export_json(&legacy.export_json().unwrap()).unwrap();
+        decoded.validate_against(&catalog).unwrap();
+        assert_eq!(decoded, legacy);
     }
 
     #[test]
@@ -1358,6 +1388,10 @@ mod tests {
             resolvers.fingerprint, catalog.fingerprint,
         );
         assert_eq!(resolvers.export_json().unwrap(), expected);
+        assert_eq!(
+            resolvers.fingerprint,
+            "6b258c999f47a11e616d3e2ef4498b3ece2e7b7cb91c5a46c6b50b4e28601714"
+        );
         assert_eq!(
             GRAPHQL_RESOLVER_CATALOG_FINGERPRINT_ALGORITHM,
             "graphql-orm-resolver-catalog-rfc8785-sha256-v1"
@@ -1482,14 +1516,18 @@ mod tests {
         let catalog = catalog();
         let mut duplicated = sources();
         duplicated.push(GraphqlGeneratedResolverSource::new("Parent"));
-        assert!(compose(&catalog, duplicated).is_err());
+        assert_eq!(
+            compose(&catalog, duplicated).unwrap_err().to_string(),
+            "resolver catalogue entity source is duplicated"
+        );
 
         for key in ["PolicyKey", "Children", "Unknown"] {
             let source = GraphqlGeneratedResolverSource::new("Parent")
                 .with_federation_keys(vec![vec![key.into()]]);
-            assert!(
-                compose(&catalog, [source]).is_err(),
-                "{key} was accepted as a key"
+            assert_eq!(
+                compose(&catalog, [source]).unwrap_err().to_string(),
+                "resolver catalogue entity resolver does not match the catalogue",
+                "{key}"
             );
         }
         // A source for an entity the catalogue does not publish is ignored.

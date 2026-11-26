@@ -3,19 +3,62 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-Version 0.223.0 uses Unicode string binds for SQL Server filters, including
+Version 0.227.0 uses Unicode string binds for SQL Server filters, including
 VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
 under legacy `SQL_` collations. Windows-collation VARCHAR indexes can seek
-with Unicode binds. See the [migration guide](../../MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation)
+with Unicode binds. See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
 if you relied on the 0.215.0 seek. Opt-in integer widths and unsigned
 range validation remain.
+
+Version 0.225.0 preserves opaque partial-index predicates in SQLite and
+PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+Version 0.223.0 lets SQL Server seek on BIN2 Unicode key columns when using
+generated exact string filters (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+Version 0.222.0 lets a generated upsert bind a private conflict key from the
+verified request, carry a typed transient input for its transform and hooks,
+and acknowledge a retry without writing.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
+Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
+full backups. Call `Database::enable_canonical_change_journal_keys` as the
+schema owner and start a fresh incremental chain. The legacy encoding remains
+the default. See the [migration procedure](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
+
+Version 0.219.0 enforces target query assurance on indirect runtime GraphQL
+reads and generated Federation entity lookups.
+See the [migration guide](../../MIGRATION.md#02180-to-02190-indirect-query-assurance).
+
+Version 0.218.0 lets a composite relation join on a server-only partition key
+that stays off every generated GraphQL surface.
+See [server-only partition keys](../../docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys).
+
+Version 0.217.0 enforces required query assurance when traversing generated
+relations into the protected entity.
+See the [migration guide](../../MIGRATION.md#02160-to-02170-relation-target-assurance).
+
+Version 0.216.0 lets PostgreSQL choose the join for native search on
+generated `#[graphql_rls]` entities with a column-based default sort. Both
+RLS policies stay in force. See the [PostgreSQL search performance notes](../../docs/reference/graphql-orm/postgres.md#search-performance).
 
 Version 0.215.0 adds opt-in declared SQL Server parameter types and corrects
 column identifier parsing in ALTER COLUMN collation lookups.
@@ -1122,6 +1165,8 @@ README remains project-neutral.
 - **Generated operations:** `GraphQLOperations` emits potential root fields;
   `schema_roots!` chooses which generated mutations are exposed and creates the
   schema builders plus discovery catalog.
+- **Nested create:** opt a collection relation and its child entity into
+  [atomic typed child creation](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
 - **Authorization:** generated resolver authentication is `required`,
   `optional`, or `none`; row, field, repository, and database policy remain
   separate authoritative checks.

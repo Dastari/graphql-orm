@@ -3,7 +3,7 @@ title: Cumulative upgrade guide
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-15
 supersedes: []
 ---
@@ -70,17 +70,62 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.215.0**; **`graphql-orm-macros` 0.215.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.227.0**; **`graphql-orm-macros` 0.227.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
 
-- **Action needed** — ORM/macros 0.223.0 removes the 0.215.0 ASCII VARCHAR conversion and validates unsigned update inputs before selecting targets (#860). Hosts relying on that seek under a legacy `SQL_` collation can move to a Windows collation or index a persisted computed Unicode column. [Migration](../../MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation)
+- **Action needed** — ORM/macros 0.227.0 removes the 0.215.0 ASCII VARCHAR conversion and validates unsigned inputs before selecting update and upsert targets (#860). Hosts relying on that seek under a legacy `SQL_` collation can move to a Windows collation or index a persisted computed Unicode column. [Migration](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
+- **No action** unless opting in to generated nested create in ORM/macros 0.226.0 (#353). Opted-in parents expose typed child lists on their create input. [Migration](../../MIGRATION.md#02250-to-02260-generated-nested-create)
+- **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`); **no action** for hosts using the built-in AI approval service. AI 0.167.0 verifies the stored provider plan hash when executing an approved generated mutation. Hosts that construct a binding for a prepared generated mutation must use its plan digest. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01660-to-01670-approved-generated-mutations)
+- **Action needed** — ORM/macros 0.225.0 keep unparseable partial-index predicates opaque on SQLite and PostgreSQL and mark filtered SQL Server indexes whose definition is unavailable (#880). Existing databases with such indexes see new plan steps or reports. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+- **No action** for AI 0.166.0. The legacy approval-index upgrade still admits the original plain index with ORM 0.225.0. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01650-to-01660)
+- **No action** — ORM/macros 0.224.0 add an opt-in that lets a mutation hook's nested writes be authorized from the originating request, and pass an explicit `PolicyAuthority` to entity, row and repository field policies (#291). [Migration](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers)
+- **No action** — AI 0.165.0: host-owned repository field decisions on the crate's internal handle go to the host policy's authority-aware methods (#291). A host that overrides those methods should check it admits them. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions)
+- **Action needed** for drifted SQL Server columns in ORM/macros 0.223.0 and AI 0.164.0. Check live types for opted-in columns and review plan guides and Query Store forced plans. Generated exact string filters can seek on declared BIN2 Unicode key columns, including AI run state (#867). [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01630-to-01640)
+- **No action** — ORM/macros 0.222.0 adds three opt-in options for generated upserts: a private conflict key bound from the verified request (`upsert_bound_key`), a typed, size-bounded transient input for the transform and hooks (`transient_input`), and a hook acknowledgement that answers a retry without writing (`upsert_acknowledge`) (#908). [Migration](../../MIGRATION.md#02210-to-02220-principal-bound-upserts)
+- **No action** — AI tool profiles 0.32.0 refuses GraphQL tool profiles, loaded manifests and typed capabilities that would carry a transient mutation argument (`@transientInput`), so AI runs never retain one (#908). Validate loaded manifests against the owning SDL before registering them. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0320-transient-mutation-arguments)
+- **No action** — ORM/macros 0.221.0 and operation catalogue 0.16.0 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02200-to-02210-generated-changed-replay)
+
+### workspace-2026.11.25.2
+
+Commit `b3fead984bde` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.25.2)
+
+Packages (changed in bold): **`graphql-orm` 0.220.0**; **`graphql-orm-macros` 0.220.0**; `graphql-orm-operation-catalog` 0.15.0; `graphql-orm-storage` 0.18.3; **`graphql-orm-backup` 0.31.0**; **`graphql-orm-ai-tool-profiles` 0.31.0**; **`graphql-orm-ai` 0.163.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+
+- **No action** — ORM/macros 0.220.0 and backup 0.31.0 keep legacy journal keys by default. PostgreSQL hosts can opt into canonical keys and start a new full backup chain (#592). [ORM migration](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys) · [backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys)
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration` from adapter construction, or when `provider_profile_endpoint_issues` lists profiles. No schema or data migration. AI 0.163.0 identifies legacy skill schemas and validates endpoint paths on profile saves. AI tool profiles 0.31.0 adds the typed path error (#816, #817). Listed profiles already failed adapter initialization before this release. Adapter path failures now return `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any edit to a grandfathered profile, including a display-name-only edit, fails until its URL is corrected. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints) · [AI tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0310-provider-endpoint-path-error)
+- **Action needed** — ORM/macros 0.219.0 enforces target query assurance on runtime node lookups, runtime relations and generated Federation entity lookups (#902). Handle step-up errors on these reads. [Migration](../../MIGRATION.md#02180-to-02190-indirect-query-assurance)
+
+### workspace-2026.11.25.1
+
+Commit `7e5df65822ab` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.25.1)
+
+Packages (changed in bold): **`graphql-orm` 0.218.0**; **`graphql-orm-macros` 0.218.0**; **`graphql-orm-operation-catalog` 0.15.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; **`graphql-orm-ai-tool-profiles` 0.30.0**; **`graphql-orm-ai` 0.162.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.18.0.
+
+- **No action** — ORM/macros 0.218.0 adds the opt-in `server_only_key` relation option: a composite relation joins on a private partition key that stays off every generated GraphQL surface; handwritten resolvers, trusted SQL ordering and search documents remain the host's responsibility (#898). [Migration](../../MIGRATION.md#02170-to-02180-server-only-relation-join-keys)
+- **Action needed** — ORM/macros 0.217.0 fixes relation traversal assurance (#899). Handle step-up errors when a relation target has required query assurance. [Migration](../../MIGRATION.md#02160-to-02170-relation-target-assurance)
+- **No action** — Operation catalogue 0.15.0 marks field-policy-guarded relationships as `subgraph_only` (#544). [Migration](../../MIGRATION.md#operation-catalogue-0150)
+- **No action** — ORM/macros 0.216.0 let PostgreSQL choose the join for RLS search documents (#555). [Migration](../../MIGRATION.md#02150-to-02160-postgresql-rls-search)
 - **No action** — AI tool profiles 0.30.0 and AI 0.162.0 speed up capability catalogue compilation without changing fingerprints, provider definitions or describe output (#865). [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0300-capability-catalogue-compilation)
 - **No action** — ORM/macros 0.215.0 adds opt-in declared SQL Server parameter types and parses column identifiers in the ALTER COLUMN collation lookup (#522, #849). [Migration](../../MIGRATION.md#02140-to-02150-sql-server-parameter-types-and-column-identifiers)
 - **No action** — AI 0.161.0 uses ORM 0.215.0 and adapts one internal SQL Server call; no AI migration (#522). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01600-to-01610)
+
+### workspace-2026.11.24.4
+
+Commit `cf7800e200f4` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.24.4)
+
+Packages (changed in bold): **`graphql-orm` 0.214.0**; **`graphql-orm-macros` 0.214.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.160.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.18.0**.
+
 - **Action needed** — ORM/macros 0.214.0, AI 0.160.0 and router 0.18.0 use `agql-auth` `v0.27.0` (#857). Upgrade direct Auth dependencies with these packages and review the Auth store and validator changes. [ORM migration](../../MIGRATION.md#02130-to-02140-agql-auth-v0270) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01590-to-01600) · [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0170-to-0180-agql-auth-v0270)
 - **No action** — ORM/macros 0.213.0 fixes parallel compile UI and consumer fixture setup (#887, #888). [Migration](../../MIGRATION.md#02120-to-02130-test-harness-coordination)
 - **No action** — AI 0.159.0 adds opt-in resolved entity-reference delivery
   for Codex app-server (#721).
   [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01580-to-01590)
+
+### workspace-2026.11.24.3
+
+Commit `5452163efcba` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.24.3)
+
+Packages (changed in bold): **`graphql-orm` 0.212.0**; **`graphql-orm-macros` 0.212.0**; `graphql-orm-operation-catalog` 0.14.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.30.0; `graphql-orm-ai-tool-profiles` 0.29.0; **`graphql-orm-ai` 0.158.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.17.0.
+
 - **No action** — ORM/macros 0.212.0 enables an admitted owned SQLite plan to drop one unused column while preserving unrelated indexes and incoming foreign keys (#882). [Migration](../../MIGRATION.md#02110-to-02120-scoped-sqlite-column-drop)
 - **Action needed** for AI 0.158.0. Apply the guarded external run-state index migration on SQL Server and drain workers on all backends before epoch rotation (#848). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01570-to-01580)
 

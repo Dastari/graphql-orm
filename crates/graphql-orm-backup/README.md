@@ -230,6 +230,12 @@ Composite-key tables, including many-to-many link tables, are covered by full
 snapshots only: their rows are identified by a JSON array of key parts, and
 `compact_chain` refuses incremental changes to them.
 
+PostgreSQL hosts can enable the `canonical-journal-keys` feature and use
+`OrmBackupAdapter::with_canonical_change_journal_keys` after cutting over the
+database. Treat the exported key strings as opaque when assembling changes.
+Use a build with the same feature to compact canonical chains. Start a new full backup and checkpoint before producing
+incrementals. See the [opt-in procedure](MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys).
+
 ## Configuration and operations
 
 [Configuration and limits](docs/configuration.md) covers execution concurrency,

@@ -110,3 +110,63 @@ fn deserialization_cannot_widen_automatic_profile_admission() {
         assert!(compile(decoded).is_err(), "tampered {field}");
     }
 }
+
+/// A transient mutation argument is request-only data; tool arguments are
+/// retained with the run, so no profile may map one.
+#[test]
+fn profiles_refuse_transient_mutation_arguments() {
+    fn compile_with(
+        arguments: &str,
+        plans: &[&str],
+    ) -> Result<AiGraphqlToolManifest, graphql_orm_ai_tool_profiles::AiError> {
+        let sdl = format!(
+            r#"
+            directive @transientInput on ARGUMENT_DEFINITION
+            schema {{ query: Query, mutation: Mutation }}
+            type Query {{ record: Record! }}
+            type Mutation {{ changeRecord({arguments}): Record! }}
+            type Record {{ id: ID! }}
+            "#
+        );
+        let profile =
+            profile(AiToolRisk::NonIdempotentWrite)?.with_arguments(plans.iter().map(|name| {
+                AiGraphqlArgumentPlan::new(*name, AiGraphqlArgumentValue::input("Value"))
+            }));
+        let mut builder = AiGraphqlToolManifestBuilder::new(
+            "records-service",
+            GraphqlExecutionTargetId::parse("application-graph").unwrap(),
+            &sdl,
+        )?;
+        builder.add_custom_profile(profile)?;
+        builder.build()
+    }
+    let refusal = |result: Result<AiGraphqlToolManifest, graphql_orm_ai_tool_profiles::AiError>| {
+        result.unwrap_err().to_string()
+    };
+
+    // Mapping the transient argument is refused, required or optional.
+    for proof in ["String!", "String"] {
+        let arguments = format!("value: String!, proof: {proof} @transientInput");
+        assert!(
+            refusal(compile_with(&arguments, &["value", "proof"])).contains("transient"),
+            "{proof}"
+        );
+    }
+    // A required one cannot be left out either, so the mutation has no profile.
+    assert!(
+        refusal(compile_with(
+            "value: String!, proof: String! @transientInput",
+            &["value"]
+        ))
+        .contains("required")
+    );
+    // An optional one is simply never sent.
+    let manifest =
+        compile_with("value: String!, proof: String @transientInput", &["value"]).unwrap();
+    let document = &manifest.entries[0].descriptor.document;
+    assert!(
+        document.contains("changeRecord(value: $Value)"),
+        "{document}"
+    );
+    assert!(!document.contains("proof"), "{document}");
+}

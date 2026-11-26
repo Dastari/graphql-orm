@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -26,7 +26,7 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 run_backup_postgres() {
-  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,graphql-orm/change-journal \
+  cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,canonical-journal-keys,graphql-orm/change-journal \
     --test orm_016_postgres_conformance -- --include-ignored --test-threads=1
 }
 
@@ -47,6 +47,11 @@ run_identifier_quoting() {
   cargo test -p graphql-orm --locked --no-default-features --features "$1" \
     --test identifier_quoting_properties --test qualified_read_predicates --test read_predicate_row_binding --test read_predicate_row_scopes \
     -- --test-threads=1
+}
+
+run_nested_create() {
+  cargo test -p graphql-orm --locked --no-default-features --features "$1" \
+    --test nested_create -- --include-ignored --test-threads=1
 }
 
 run_sqlite() {
@@ -80,9 +85,14 @@ run_sqlite() {
 }
 
 run_postgres() {
+  run_nested_create postgres
   run_bounded_set_delete postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --lib postgres_rls_search_planner_chooses_the_join -- --ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test postgres_rls_coverage base_row_first_search_preserves_rls_results -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting postgres
@@ -114,7 +124,7 @@ run_postgres() {
     --no-default-features --features postgres --locked --test runtime_strings \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \
-    --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --test point_read_visibility_backends --locked -- --ignored --test-threads=1
+    --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --test point_read_visibility_backends --test server_only_relation_keys --test principal_bound_upserts --locked -- --ignored --test-threads=1
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features postgres --locked --test owned_backend --test portable_groups --test host_timestamps --test host_integer_key \
@@ -193,6 +203,7 @@ run_migration_journal() {
 }
 
 run_mssql() {
+  run_nested_create mssql
   run_bounded_set_delete mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test search_filter_binding -- --test-threads=1
@@ -211,7 +222,7 @@ run_mssql() {
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --lib the_probe_reads_the_rows_the_filtered_index_covers -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test computed_field_invalidation --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
+    --test mssql_owned_writes --test mssql_restore_marker --test mssql_owned_queries --test computed_field_invalidation --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --test read_predicate_closure --test read_predicate_closure_parity --test read_predicate_closure_delivery --test read_predicate_budget_shapes --test point_read_visibility_backends --test server_only_relation_keys --test principal_bound_upserts --test visible_row_pages --test query_loader_batch --test order_aggregate_visibility --test page_limit_contract --locked -- --ignored --test-threads=1
   # Closure rendering and depth refusals need no server.
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test read_predicate_closure
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
@@ -265,6 +276,13 @@ case "${lane}" in
     for backend in sqlite postgres; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
         --test conditional_indexes -- --include-ignored --test-threads=1
+    done
+    cargo test -p graphql-orm --locked --no-default-features --features mssql \
+      --test mssql_restore_marker opaque_partial_index_differs_from_plain_index -- --ignored
+    ;;
+  nested-create)
+    for backend in sqlite postgres mssql; do
+      run_nested_create "${backend}"
     done
     ;;
   dependent-deletes) run_dependent_deletes ;;
@@ -368,6 +386,8 @@ case "${lane}" in
   mssql-typed-parameters)
     cargo test -p graphql-orm --locked --no-default-features --features mssql \
       --test mssql_owned_queries typed_parameters:: -- --ignored --test-threads=1
+    cargo test -p graphql-orm --locked --no-default-features --features mssql \
+      --test mssql_owned_queries exact_string_filters:: -- --include-ignored --test-threads=1
     ;;
   ai-postgres) run_ai_postgres ;;
   ai-mssql) run_ai_parity mssql ;;

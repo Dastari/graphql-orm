@@ -871,9 +871,9 @@ column. After reviewing comparison rules, move the column to a Windows
 collation or direct the affected comparison to an indexed persisted
 computed Unicode column.
 
-Generated single-row and bulk repository updates validate unsigned inputs
-before selecting targets, including in transactions and when zero rows
-would be updated.
+Generated updates and upserts validate unsigned inputs before selecting
+targets, including in transactions. Updates validate the input even when
+zero rows match.
 
 ### Native temporal parameters
 
@@ -956,6 +956,12 @@ it, for review or for a host's own tooling.
   collation. Plans also render `COLLATE Latin1_General_100_BIN2` on the
   entity's generated Unicode key columns: primary keys, unique columns,
   relation foreign-key sources and index members.
+  - On those declared BIN2 Unicode columns, exact `eq` and nonempty
+    `in_list` add a plain equality or membership predicate so the optimizer
+    can seek. The residual BIN2 comparison appends the same non-space
+    character to both Unicode operands, so trailing spaces remain significant
+    without changing the SQL text or bind count for different operand values.
+    Other exact comparisons check both BIN2 equality and Unicode byte length.
   - SQL Server requires both sides of a string foreign key to share a
     collation, so opt in the referencing and referenced entities together.
   - On an existing table the planner emits `ALTER COLUMN … COLLATE`, which

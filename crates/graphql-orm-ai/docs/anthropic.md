@@ -32,8 +32,9 @@ set a URL, header, or plaintext credential.
 targets an exact Messages endpoint instead of the official one, for example an
 approved gateway, a regional endpoint or a local fake server in tests. The
 endpoint must be `http` or `https` with a host, no user information, query or
-fragment, and a non-root path, and `AiProviderEndpointPolicy::authorize_endpoint`
-must approve its normalized form for `AiProviderKindInput::Anthropic`. The
+fragment, and a non-root normalized path of at most 2,048 bytes.
+`AiProviderEndpointPolicy::authorize_endpoint` must approve its normalized
+form for `AiProviderKindInput::Anthropic`. The
 request shape, version header and disabled redirects are unchanged. Every
 egress manifest for a request through this provider must name the normalized
 endpoint as its destination, so data approved for the official destination

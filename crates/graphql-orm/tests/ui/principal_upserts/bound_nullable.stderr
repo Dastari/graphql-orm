@@ -1,0 +1,5 @@
+error: upsert_bound_key field `machine_key` must not be nullable: a NULL key never conflicts, so every upsert would insert another row
+  --> tests/ui/principal_upserts/bound_nullable.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

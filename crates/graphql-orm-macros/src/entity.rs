@@ -29,6 +29,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) repository_mutations: bool,
     pub(crate) aggregate: bool,
     pub(crate) dependent_deletes: bool,
+    pub(crate) nested_create_keys: Option<(Vec<String>, proc_macro2::Span)>,
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
@@ -77,6 +78,7 @@ pub(crate) struct EntityMetadata {
     /// `changed_started = true`: the `Changed` root accepts `Started: true`
     /// and then sends one started frame before any event (#341).
     pub(crate) changed_started: bool,
+    pub(crate) changed_replay: Option<proc_macro2::Span>,
     /// `aggregate_source = true`: the aggregate root returns
     /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
     /// the entity (#372).
@@ -87,7 +89,49 @@ pub(crate) struct EntityMetadata {
     /// `update_assurance(select = "...", levels = "...")`: the generated
     /// update selects its assurance level per request (#851).
     pub(crate) update_assurance: Option<UpdateAssuranceMetadata>,
+    /// `upsert_bound_key(field = "...", binding = "...")`: conflict-key
+    /// columns the generated GraphQL upsert binds from the request principal
+    /// (#908).
+    pub(crate) upsert_bound_keys: Vec<UpsertBoundKeyMetadata>,
+    /// `transient_input(type = "...", on = "upsert")`: a typed, non-persisted
+    /// argument the mutation exposes to its transform and hooks (#908, #221).
+    pub(crate) transient_input: Option<TransientInputMetadata>,
+    /// `upsert_acknowledge = true`: the generated GraphQL upsert's `Before`
+    /// hook may acknowledge a request without writing (#908).
+    pub(crate) upsert_acknowledge: Option<proc_macro2::Span>,
 }
+
+/// A declared principal-bound upsert conflict key.
+#[derive(Clone)]
+pub(crate) struct UpsertBoundKeyMetadata {
+    /// Rust field name or column of the conflict-key member.
+    pub(crate) field: String,
+    /// Type implementing `PrincipalKeyBinding`.
+    pub(crate) binding: syn::Type,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// A declared typed transient mutation input.
+#[derive(Clone)]
+pub(crate) struct TransientInputMetadata {
+    /// The argument's `async_graphql::InputType`.
+    pub(crate) ty: syn::Type,
+    /// The argument name before the schema's argument case is applied.
+    pub(crate) name: String,
+    pub(crate) required: bool,
+    /// Largest accepted request value, in bytes.
+    pub(crate) max_bytes: usize,
+    /// Largest accepted request value, in values.
+    pub(crate) max_nodes: usize,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// Default and ceiling of a transient input's `max_bytes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_BYTES_CEILING: usize = 1024 * 1024;
+/// Default and ceiling of a transient input's `max_nodes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_NODES: usize = 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_NODES_CEILING: usize = 65_536;
 
 /// A declared conditional update-assurance selector.
 #[derive(Clone)]
@@ -295,6 +339,15 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("nested_create_keys") {
+                    if attribute_name != "graphql_entity" || metadata.nested_create_keys.is_some() {
+                        return Err(meta.error("nested_create_keys requires a single declaration on a GraphQL entity"));
+                    }
+                    let names = parse_relation_columns(meta.value()?)?;
+                    if names.is_empty() || names.iter().enumerate().any(|(index, name)| names[..index].contains(name)) {
+                        return Err(meta.error("nested_create_keys requires distinct field names"));
+                    }
+                    metadata.nested_create_keys = Some((names, meta.path.span()));
                 } else if meta.path.is_ident("dependent_deletes") {
                     metadata.dependent_deletes = true;
                 } else if meta.path.is_ident("mutation_error_codes") {
@@ -334,6 +387,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("changed_replay") {
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    if lit.value {
+                        metadata.changed_replay = Some(lit.span());
+                    }
                 } else if meta.path.is_ident("update_expected_version") {
                     if attribute_name == "repository_entity" {
                         return Err(meta.error("update_expected_version requires a GraphQL entity"));
@@ -397,6 +455,151 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         syn::Error::new(span, "update_assurance requires levels = \"<policy id>,<policy id>\"")
                     })?;
                     metadata.update_assurance = Some(UpdateAssuranceMetadata { select, levels, span });
+                } else if meta.path.is_ident("upsert_bound_key") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("upsert_bound_key requires a GraphQL entity; repository code supplies a private key in its create input"));
+                    }
+                    let span = meta.path.span();
+                    let mut field = None;
+                    let mut binding = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("field") {
+                            if field.is_some() {
+                                return Err(option.error("upsert_bound_key field may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            field = Some(lit.value());
+                        } else if option.path.is_ident("binding") {
+                            if binding.is_some() {
+                                return Err(option.error("upsert_bound_key binding may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            binding = Some(lit.parse::<syn::Type>()?);
+                        } else {
+                            return Err(option.error("unsupported upsert_bound_key option; expected field or binding"));
+                        }
+                        Ok(())
+                    })?;
+                    let field = field.ok_or_else(|| {
+                        syn::Error::new(span, "upsert_bound_key requires field = \"<conflict-key field>\"")
+                    })?;
+                    let binding = binding.ok_or_else(|| {
+                        syn::Error::new(span, "upsert_bound_key requires binding = \"<path to a PrincipalKeyBinding type>\"")
+                    })?;
+                    if metadata.upsert_bound_keys.iter().any(|key| key.field == field) {
+                        return Err(syn::Error::new(span, "upsert_bound_key may bind each conflict-key field only once"));
+                    }
+                    metadata.upsert_bound_keys.push(UpsertBoundKeyMetadata { field, binding, span });
+                } else if meta.path.is_ident("transient_input") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("transient_input requires a GraphQL entity; transaction code calls MutationContext::set_transient_input"));
+                    }
+                    if metadata.transient_input.is_some() {
+                        return Err(meta.error("transient_input may only be declared once per entity"));
+                    }
+                    let span = meta.path.span();
+                    let mut ty = None;
+                    let mut name = None;
+                    let mut on = None;
+                    let mut required = None;
+                    let mut max_bytes = None;
+                    let mut max_nodes = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("type") {
+                            if ty.is_some() {
+                                return Err(option.error("transient_input type may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            ty = Some(lit.parse::<syn::Type>()?);
+                        } else if option.path.is_ident("name") {
+                            if name.is_some() {
+                                return Err(option.error("transient_input name may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            let value = lit.value();
+                            let mut characters = value.chars();
+                            let valid = characters
+                                .next()
+                                .is_some_and(|first| first.is_ascii_alphabetic())
+                                && characters.all(|character| character.is_ascii_alphanumeric() || character == '_');
+                            if !valid || value.eq_ignore_ascii_case("input") {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "transient_input name must be an ASCII GraphQL argument name other than `input`",
+                                ));
+                            }
+                            name = Some(value);
+                        } else if option.path.is_ident("on") {
+                            if on.is_some() {
+                                return Err(option.error("transient_input on may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            if lit.value() != "upsert" {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "transient_input supports on = \"upsert\" only; other generated mutations do not carry a transient input yet",
+                                ));
+                            }
+                            on = Some(());
+                        } else if option.path.is_ident("required") {
+                            if required.is_some() {
+                                return Err(option.error("transient_input required may only be declared once"));
+                            }
+                            let lit: syn::LitBool = option.value()?.parse()?;
+                            required = Some(lit.value);
+                        } else if option.path.is_ident("max_bytes") || option.path.is_ident("max_nodes") {
+                            let bytes = option.path.is_ident("max_bytes");
+                            let (slot, ceiling) = if bytes {
+                                (&mut max_bytes, TRANSIENT_INPUT_MAX_BYTES_CEILING)
+                            } else {
+                                (&mut max_nodes, TRANSIENT_INPUT_MAX_NODES_CEILING)
+                            };
+                            if slot.is_some() {
+                                return Err(option.error("transient_input size limits may only be declared once each"));
+                            }
+                            let lit: syn::LitInt = option.value()?.parse()?;
+                            let value = lit.base10_parse::<usize>()?;
+                            if value == 0 || value > ceiling {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!(
+                                        "transient_input {} must be between 1 and {ceiling}",
+                                        if bytes { "max_bytes" } else { "max_nodes" }
+                                    ),
+                                ));
+                            }
+                            *slot = Some(value);
+                        } else {
+                            return Err(option.error("unsupported transient_input option; expected type, on, name, required, max_bytes or max_nodes"));
+                        }
+                        Ok(())
+                    })?;
+                    let ty = ty.ok_or_else(|| {
+                        syn::Error::new(span, "transient_input requires type = \"<path to an InputType>\"")
+                    })?;
+                    on.ok_or_else(|| {
+                        syn::Error::new(span, "transient_input requires on = \"upsert\": name the generated mutation that carries it")
+                    })?;
+                    metadata.transient_input = Some(TransientInputMetadata {
+                        ty,
+                        name: name.unwrap_or_else(|| "transient".to_owned()),
+                        required: required.unwrap_or(true),
+                        max_bytes: max_bytes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_BYTES),
+                        max_nodes: max_nodes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_NODES),
+                        span,
+                    });
+                } else if meta.path.is_ident("upsert_acknowledge") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("upsert_acknowledge requires a GraphQL entity"));
+                    }
+                    if metadata.upsert_acknowledge.is_some() {
+                        return Err(meta.error("upsert_acknowledge may only be declared once per entity"));
+                    }
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    if !lit.value {
+                        return Err(syn::Error::new(lit.span(), "upsert_acknowledge accepts only true; omit it to keep every upsert a write"));
+                    }
+                    metadata.upsert_acknowledge = Some(meta.path.span());
                 } else if meta.path.is_ident("lifetime") {
                     if metadata.lifetime.is_some() {
                         return Err(meta.error("lifetime may only be declared once per entity"));
@@ -1689,7 +1892,11 @@ fn scalar_output_is_readable(
 
 // Resolve target references as generated SQL does. Metadata column names are
 // physical names; PostgreSQL folds only unquoted SQL references.
-fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
+pub(crate) fn relation_column_identity(
+    backend: BackendKind,
+    name: &str,
+    reference: bool,
+) -> String {
     let rendered = reference.then(|| backend_render_identifier_path(backend, name));
     let name = rendered.as_deref().map_or(name, |rendered| {
         crate::backend::identifier_path_parts(backend, rendered)
@@ -1714,8 +1921,222 @@ fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -
     }
 }
 
+/// Resolve a relation's `server_only_key` declarations to key-pair positions.
+///
+/// A server-only pair narrows a complete-tuple join on the server; it never
+/// becomes a public key. Each declaration must name one declared `from`/`to`
+/// pair, at least one pair must stay public, and capabilities that would
+/// evaluate the join outside the relation field itself are refused.
+pub(crate) fn relation_server_only_key_mask(
+    metadata: &FieldMetadata,
+    fields: &[ParsedField],
+    source_columns: &[String],
+    target_columns: &[String],
+) -> syn::Result<Vec<bool>> {
+    let mut mask = vec![false; source_columns.len()];
+    let declarations = &metadata.relation_server_only_keys;
+    if declarations.is_empty() {
+        return Ok(mask);
+    }
+    for key in declarations {
+        let Some(index) = source_columns
+            .iter()
+            .zip(target_columns)
+            .position(|(from, to)| *from == key.from && *to == key.to)
+        else {
+            return Err(syn::Error::new(
+                key.span,
+                format!(
+                    "server_only_key(from = \"{}\", to = \"{}\") must name one declared from/to key pair of this relation, in the same position",
+                    key.from, key.to
+                ),
+            ));
+        };
+        if std::mem::replace(&mut mask[index], true) {
+            return Err(syn::Error::new(key.span, "duplicate server_only_key"));
+        }
+    }
+    let source_field = |name: &str| {
+        fields.iter().find(|parsed| {
+            parsed
+                .field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == name)
+        })
+    };
+    // The loader regroups batched rows by each member's text. Floating-point
+    // text is not a lossless identity, so a near-equal value could attach a
+    // row to another parent that shares the public members.
+    for column in source_columns {
+        // A SQLite boolean is decoded from any nonzero integer and bound
+        // back as `1`, so the bound value need not be the stored one.
+        let kind = source_field(column)
+            .and_then(|parsed| crate::relations::classify_relation_value_type(&parsed.field.ty));
+        let refused = match kind {
+            Some((crate::relations::RelationValueKind::Float, _)) => Some("floating-point"),
+            Some((crate::relations::RelationValueKind::Bool, _)) => Some("boolean"),
+            _ => None,
+        };
+        if let Some(refused) = refused {
+            return Err(syn::Error::new(
+                declarations[0].span,
+                format!(
+                    "server_only_key relations require exactly comparable key members; `{column}` is {refused}, use an integer, string or UUID key"
+                ),
+            ));
+        }
+    }
+    // The bound value must be the stored partition value: a skipped field is
+    // defaulted on hydration, a read transform rewrites it, and JSON, date,
+    // boolean-field, decimal and spatial mappings decode it into another
+    // representation before it is bound again.
+    for key in declarations {
+        match source_field(&key.from) {
+            Some(parsed)
+                if !parsed.meta.is_relation
+                    && !parsed.meta.skip_db
+                    && parsed.meta.transform_read.is_none()
+                    && !parsed.meta.is_json_field
+                    && !parsed.meta.is_date_field
+                    && !parsed.meta.is_boolean_field
+                    && parsed.meta.decimal.is_none()
+                    && !parsed.meta.mssql_money
+                    && parsed.meta.spatial.is_none() => {}
+            _ => {
+                return Err(syn::Error::new(
+                    key.span,
+                    format!(
+                        "server_only_key source `{}` must be a persisted scalar field read as stored, so the join binds the stored value: no skip_db, read transform, json, date, boolean-field, decimal or spatial mapping",
+                        key.from
+                    ),
+                ));
+            }
+        }
+    }
+    let refuse = |message: &str| Err(syn::Error::new(declarations[0].span, message));
+    if mask.iter().all(|server_only| *server_only) {
+        return refuse(
+            "a server_only_key relation needs at least one public, GraphQL-readable key pair; server-only keys only narrow a complete-tuple join",
+        );
+    }
+    if metadata.relation_filter {
+        return refuse(
+            "server_only_key relations cannot declare `filter`: related-row filters would evaluate the server-only join from the parent's WhereInput",
+        );
+    }
+    if metadata.relation_order_aggregate.is_some() {
+        return refuse(
+            "server_only_key relations cannot declare `order_aggregate`: parent ordering would evaluate the server-only join",
+        );
+    }
+    if metadata.search_relation.is_some() {
+        return refuse(
+            "server_only_key relations cannot declare graphql_orm(search_relation(...)): search documents are maintained outside request authorization",
+        );
+    }
+    if metadata
+        .relation_propagate_change
+        .as_deref()
+        .is_some_and(|value| value != "none")
+    {
+        return refuse(
+            "server_only_key relations cannot propagate Changed events; generated propagation authorizes public subscribable keys only",
+        );
+    }
+    Ok(mask)
+}
+
+/// The physical columns this entity certifies as server-only relation keys.
+///
+/// Eligibility belongs to the normalized physical column, not to one Rust
+/// field: every field mapping the column must be declared `private` with no
+/// other surface, and the column must not be a member of the effective
+/// primary key (the implicit `id` included). When the GraphQL object is not
+/// generated by this derive, every mapping must also skip its object getter.
+pub(crate) fn relation_server_only_columns(
+    backend: BackendKind,
+    table: &str,
+    fields: &[ParsedField],
+    require_object_skip: bool,
+) -> Vec<String> {
+    let persisted = || {
+        fields
+            .iter()
+            .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)
+    };
+    // Resolve every mapping as the generated SQL does: table qualifiers
+    // dropped, quoting removed and bare PostgreSQL names case-folded, so an
+    // alias that reaches the same column through other spelling is found.
+    let physical = |parsed: &ParsedField| {
+        let rust_name = parsed.field.ident.as_ref().unwrap().to_string();
+        relation_column_identity(
+            backend,
+            parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
+            true,
+        )
+    };
+    let same = |left: &str, right: &str| {
+        if backend == BackendKind::Postgres {
+            left == right
+        } else {
+            left.eq_ignore_ascii_case(right)
+        }
+    };
+    let mut primary_keys = persisted()
+        .filter(|parsed| parsed.meta.is_primary_key)
+        .map(physical)
+        .collect::<Vec<_>>();
+    if primary_keys.is_empty() {
+        primary_keys.push(relation_column_identity(
+            backend,
+            &implicit_id_db_column(fields).unwrap_or_else(|| "id".to_string()),
+            true,
+        ));
+    }
+    // Fail closed where names cannot be told apart reliably, or could meet
+    // the by-match loader's own aliases: PostgreSQL truncates identifiers
+    // past 63 bytes, catalogue collations decide non-ASCII equality, and
+    // generated statements reserve the `__gom_` prefix.
+    let reserved = |name: &str| {
+        name.get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("__gom_"))
+    };
+    let table_name = relation_column_identity(backend, table, true);
+    if reserved(&table_name)
+        || persisted()
+            .map(physical)
+            .any(|column| !column.is_ascii() || column.len() > 63 || reserved(&column))
+    {
+        return Vec::new();
+    }
+    let mut columns: Vec<String> = Vec::new();
+    for candidate in persisted() {
+        let column = physical(candidate);
+        if columns.iter().any(|known| same(known, &column))
+            || primary_keys.iter().any(|key| same(key, &column))
+        {
+            continue;
+        }
+        let eligible = persisted()
+            .filter(|parsed| same(&physical(parsed), &column))
+            .all(|parsed| {
+                parsed.meta.is_private
+                    && parsed.meta.graphql_server_only()
+                    && (!require_object_skip || has_graphql_object_skip(&parsed.field))
+            });
+        if eligible {
+            columns.push(column);
+        }
+    }
+    columns
+}
+
 /// Refuse generated relation reads that disclose statically unreadable keys.
 /// Validate local and self-target columns available in this derive's input AST.
+/// `server_only` marks `server_only_key` pairs: their local member is exempt
+/// and their target member must be a server-only column.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_graphql_relation_keys(
     backend: BackendKind,
     entity: &syn::Ident,
@@ -1724,10 +2145,20 @@ pub(crate) fn validate_graphql_relation_keys(
     fields: &[ParsedField],
     source_columns: &[String],
     target_columns: &[String],
+    server_only: &[bool],
+    server_only_columns: &[String],
 ) -> syn::Result<()> {
     if !metadata.graphql_readable() {
         return Ok(());
     }
+    let public = |columns: &[String]| {
+        columns
+            .iter()
+            .zip(server_only)
+            .filter(|(_, server_only)| !**server_only)
+            .map(|(column, _)| column.clone())
+            .collect::<Vec<_>>()
+    };
     let check = |columns: &[String], side: &str, physical: bool| -> syn::Result<()> {
         for column in columns {
             let target_name = physical.then(|| relation_column_identity(backend, column, true));
@@ -1772,7 +2203,7 @@ pub(crate) fn validate_graphql_relation_keys(
         }
         Ok(())
     };
-    check(source_columns, "local key", false)?;
+    check(&public(source_columns), "local key", false)?;
     if let Some(condition) = &metadata.relation_source_condition {
         check(
             std::slice::from_ref(&condition.member),
@@ -1785,13 +2216,58 @@ pub(crate) fn validate_graphql_relation_keys(
         .as_deref()
         .is_some_and(|target| entity == target || target == "Self")
     {
-        check(target_columns, "self-target key", true)?;
+        check(&public(target_columns), "self-target key", true)?;
         if let Some(condition) = &metadata.relation_target_condition {
             check(
                 std::slice::from_ref(&condition.member),
                 "self-target condition column",
                 true,
             )?;
+        }
+        for (column, _) in target_columns
+            .iter()
+            .zip(server_only)
+            .filter(|(_, server_only)| **server_only)
+        {
+            let target_name = relation_column_identity(backend, column, true);
+            let same = |physical: &str| {
+                if backend == BackendKind::Postgres {
+                    physical == target_name
+                } else {
+                    physical.eq_ignore_ascii_case(&target_name)
+                }
+            };
+            let declared = fields.iter().any(|parsed| {
+                !parsed.meta.is_relation
+                    && !parsed.meta.skip_db
+                    && parsed.field.ident.as_ref().is_some_and(|name| {
+                        let rust_name = name.to_string();
+                        same(&relation_column_identity(
+                            backend,
+                            parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
+                            true,
+                        ))
+                    })
+            });
+            match declared {
+                true if server_only_columns.iter().any(|column| same(column)) => {}
+                true => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "server_only_key target `{column}` must have no GraphQL surface; every field mapping the column must be #[graphql_orm(private)] and #[graphql(skip)] without filter, order, subscribe, input or primary-key exposure"
+                        ),
+                    ));
+                }
+                false => {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "cannot resolve self-target key `{column}` to a declared database column; use its physical column name with matching SQL quoting"
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -1805,6 +2281,7 @@ pub(crate) fn graphql_relation_target_checks(
     field: &Field,
     metadata: &FieldMetadata,
     target_columns: &[String],
+    server_only: &[bool],
 ) -> syn::Result<proc_macro2::TokenStream> {
     if !metadata.graphql_readable() {
         return Ok(quote! {});
@@ -1818,12 +2295,38 @@ pub(crate) fn graphql_relation_target_checks(
     })?;
     let relation = field.ident.as_ref().unwrap().to_string();
     let case_sensitive = backend == BackendKind::Postgres;
-    let columns = target_columns.iter().map(|column| (column, "key")).chain(
-        metadata
-            .relation_target_condition
-            .iter()
-            .map(|condition| (&condition.member, "condition")),
-    );
+    let server_only_assertions = target_columns
+        .iter()
+        .zip(server_only)
+        .filter(|(_, server_only)| **server_only)
+        .map(|(column, _)| {
+            let identity = relation_column_identity(backend, column, true);
+            let message = format!(
+                "relation `{entity}.{relation}` declares server_only_key target `{target_name}.{column}`, which is not a server-only column; every target field mapping it must be #[graphql_orm(private)] with no filter, order, subscribe or input exposure, and #[graphql(skip)] when the target derive does not generate its object; it cannot be a primary-key column, and the target metadata must declare it; a target certifies no column when its table or any column name is non-ASCII, longer than 63 bytes or starts with `__gom_`"
+            );
+            quote! {
+                const _: () = assert!(
+                    ::graphql_orm::graphql::orm::generated_relation_column_is_server_only(
+                        <#target as ::graphql_orm::graphql::orm::GeneratedRelationReadability>::SERVER_ONLY_COLUMNS,
+                        #identity,
+                        #case_sensitive,
+                    ),
+                    concat!(#message),
+                );
+            }
+        })
+        .collect::<Vec<_>>();
+    let columns = target_columns
+        .iter()
+        .zip(server_only)
+        .filter(|(_, server_only)| !**server_only)
+        .map(|(column, _)| (column, "key"))
+        .chain(
+            metadata
+                .relation_target_condition
+                .iter()
+                .map(|condition| (&condition.member, "condition")),
+        );
     let assertions = columns.map(|(column, role)| {
         let identity = relation_column_identity(backend, column, true);
         let message = format!(
@@ -1840,7 +2343,7 @@ pub(crate) fn graphql_relation_target_checks(
             );
         }
     });
-    Ok(quote! { #(#assertions)* })
+    Ok(quote! { #(#assertions)* #(#server_only_assertions)* })
 }
 
 /// Whether any `#[graphql(...)]` attribute declares `complex`, wherever it
@@ -1915,6 +2418,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from_fields: Option<Vec<String>>,
     pub(crate) relation_to_fields: Option<Vec<String>>,
     pub(crate) relation_multiple: bool,
+    pub(crate) relation_nested_create: bool,
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
@@ -1923,6 +2427,9 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_filter: bool,
     pub(crate) relation_order_aggregate: Option<RelationOrderAggregateMetadata>,
+    /// `server_only_key(from = "...", to = "...")` pairs: complete-tuple join
+    /// members whose columns have no GraphQL surface.
+    pub(crate) relation_server_only_keys: Vec<RelationServerOnlyKey>,
     pub(crate) skip_db: bool,
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
     /// the Rust entity, and generated trusted Rust Create/Update input structs.
@@ -1979,6 +2486,15 @@ pub(crate) enum RelationConditionValue {
 pub(crate) struct RelationConditionMetadata {
     pub(crate) member: String,
     pub(crate) value: RelationConditionValue,
+}
+
+/// One relation key pair joined server-side only. `from` is a source Rust
+/// field and `to` a target physical column, as in `from`/`to`.
+#[derive(Clone)]
+pub(crate) struct RelationServerOnlyKey {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) span: proc_macro2::Span,
 }
 
 #[derive(Clone)]
@@ -2100,6 +2616,7 @@ impl Default for FieldMetadata {
             relation_from_fields: None,
             relation_to_fields: None,
             relation_multiple: false,
+            relation_nested_create: false,
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
@@ -2108,6 +2625,7 @@ impl Default for FieldMetadata {
             relation_target_condition: None,
             relation_filter: false,
             relation_order_aggregate: None,
+            relation_server_only_keys: Vec::new(),
             skip_db: false,
             skip_input: false,
             is_private: false,
@@ -3115,6 +3633,39 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                     )
                                 })?,
                             });
+                        } else if nested.path.is_ident("nested_create") {
+                            if meta.relation_nested_create {
+                                return Err(nested.error("duplicate nested_create option"));
+                            }
+                            meta.relation_nested_create = true;
+                        } else if nested.path.is_ident("server_only_key") {
+                            let span = nested.path.span();
+                            let mut from = None;
+                            let mut to = None;
+                            nested.parse_nested_meta(|option| {
+                                let slot = if option.path.is_ident("from") {
+                                    &mut from
+                                } else if option.path.is_ident("to") {
+                                    &mut to
+                                } else {
+                                    return Err(option.error(
+                                        "unsupported server_only_key option; expected from or to",
+                                    ));
+                                };
+                                if slot.is_some() {
+                                    return Err(option.error("duplicate server_only_key option"));
+                                }
+                                let literal: syn::LitStr = option.value()?.parse()?;
+                                *slot = Some(literal.value());
+                                Ok(())
+                            })?;
+                            let (Some(from), Some(to)) = (from, to) else {
+                                return Err(syn::Error::new(
+                                    span,
+                                    "server_only_key requires from = \"source_field\" and to = \"target_column\"",
+                                ));
+                            };
+                            meta.relation_server_only_keys.push(RelationServerOnlyKey { from, to, span });
                         } else if nested.path.is_ident("multiple") {
                             meta.relation_multiple = true;
                         } else {
@@ -3444,6 +3995,25 @@ impl FieldMetadata {
     /// filter/sort capabilities and additional surface-specific restrictions.
     pub(crate) fn graphql_readable(&self) -> bool {
         self.read && !self.is_private && !self.input_only
+    }
+
+    /// A persisted scalar column with no generated GraphQL surface: not
+    /// readable, filterable, orderable, subscribable, searchable, accepted as
+    /// input or a primary-key member. Only such a column may be a relation's
+    /// `server_only_key` target.
+    pub(crate) fn graphql_server_only(&self) -> bool {
+        !self.is_relation
+            && !self.skip_db
+            && !self.is_primary_key
+            && !self.graphql_readable()
+            && !self.input_only
+            && self.skip_input
+            && !(self.filter && self.filterable.is_some())
+            && !(self.sortable && self.order)
+            && !self.subscribe
+            && self.search.is_none()
+            && self.search_json.is_empty()
+            && !self.is_version
     }
 
     pub(crate) fn timestamp_behavior(&self, rust_name: &str) -> TimestampBehavior {
@@ -4483,6 +5053,7 @@ fn generate_entity_tokens(
     // Collect field info
     let mut column_names: Vec<String> = Vec::new();
     let mut search_column_names: Vec<String> = Vec::new();
+    let mut search_base_columns = Vec::new();
     let mut projected_column_names = std::collections::HashSet::new();
     let sql_table = backend_render_identifier_path(backend, &table_name);
     let mut mssql_parameter_types = Vec::new();
@@ -4581,9 +5152,16 @@ fn generate_entity_tokens(
             let readable = parsed.meta.graphql_readable();
             quote! { (#column, #readable) }
         });
+    let relation_server_only_columns = relation_server_only_columns(
+        backend,
+        raw_table_name,
+        &parsed_fields,
+        schema_only_override || externally_owned_object,
+    );
     let relation_readability_impl = quote! {
         impl ::graphql_orm::graphql::orm::GeneratedRelationReadability for #struct_name {
             const COLUMNS: &'static [(&'static str, bool)] = &[#(#relation_readability_columns),*];
+            const SERVER_ONLY_COLUMNS: &'static [&'static str] = &[#(#relation_server_only_columns),*];
         }
     };
     let mut relation_target_checks = Vec::new();
@@ -4822,6 +5400,12 @@ fn generate_entity_tokens(
                         ));
                     }
                 }
+                let server_only_keys = relation_server_only_key_mask(
+                    &field_meta,
+                    &parsed_fields,
+                    &source_columns,
+                    &target_columns,
+                )?;
                 if !schema_only_override && !has_repository_entity_attribute(&input.attrs) {
                     validate_graphql_relation_keys(
                         backend,
@@ -4831,6 +5415,8 @@ fn generate_entity_tokens(
                         &parsed_fields,
                         &source_columns,
                         &target_columns,
+                        &server_only_keys,
+                        &relation_server_only_columns,
                     )?;
                     relation_target_checks.push(graphql_relation_target_checks(
                         backend,
@@ -4838,6 +5424,7 @@ fn generate_entity_tokens(
                         field,
                         &field_meta,
                         &target_columns,
+                        &server_only_keys,
                     )?);
                 }
                 let source_column = source_columns
@@ -5496,6 +6083,9 @@ fn generate_entity_tokens(
             .last()
             .unwrap_or(&db_col_sql);
         let qualified_db_col_sql = format!("{sql_table}.{column_part}");
+        if entity_meta.rls.is_some() {
+            search_base_columns.push(column_part.to_owned());
+        }
         projected_column_names
             .insert(relation_column_identity(backend, &db_col, true).to_ascii_lowercase());
         let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
@@ -5746,6 +6336,7 @@ fn generate_entity_tokens(
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let mut sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let mut mssql_bin2_unicode = false;
         if backend == BackendKind::Mssql
             && field_meta.mssql_type.is_none()
             && sql_type == "NVARCHAR(MAX)"
@@ -5756,6 +6347,7 @@ fn generate_entity_tokens(
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
             if entity_meta.exact_string_filters {
                 sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+                mssql_bin2_unicode = true;
             }
         }
         let decimal_tokens = field_meta
@@ -6043,6 +6635,7 @@ fn generate_entity_tokens(
                     filter_type,
                     &field_meta,
                     entity_meta.exact_string_filters,
+                    mssql_bin2_unicode,
                 )?;
                 where_input_fields.push(input_field);
                 // Unqualified, or `row.<column>` for the row `_gom_table`
@@ -6405,6 +6998,7 @@ fn generate_entity_tokens(
         quote! {
             impl ::graphql_orm::graphql::orm::SearchableEntity for #struct_name {
                 const SEARCH_KEY_IS_BINARY: bool = #search_pk_is_bytes;
+                const POSTGRES_SEARCH_BASE_COLUMNS: &'static [&'static str] = &[#(#search_base_columns),*];
                 const SEARCH_KEY_COLUMN: &'static str = #key_column;
                 const SEARCH_SCORE_COLUMN: &'static str = #score_column;
 
@@ -8124,6 +8718,7 @@ fn generate_filter_field(
     filter_type: &str,
     field_meta: &FieldMetadata,
     exact_string_filters: bool,
+    mssql_bin2_unicode: bool,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -8414,7 +9009,13 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
-            let render_call = if backend == BackendKind::Mssql && exact_string_filters {
+            let render_call = if mssql_bin2_unicode {
+                quote! {
+                    ::graphql_orm::graphql::orm::__gom_render_bin2_mssql_string_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
+                }
+            } else if backend == BackendKind::Mssql && exact_string_filters {
                 quote! {
                     ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter(
                         f, #backend_expr, #db_col, &mut conditions, &mut values,

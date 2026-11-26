@@ -1,0 +1,5 @@
+error: a server_only_key relation needs at least one public, GraphQL-readable key pair; server-only keys only narrow a complete-tuple join
+  --> tests/ui/server_only_keys/every_key_server_only.rs:27:9
+   |
+27 |         server_only_key(from = "partition", to = "partition"),
+   |         ^^^^^^^^^^^^^^^

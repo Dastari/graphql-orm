@@ -84,6 +84,54 @@ pub trait EntityRelations {
 pub trait GeneratedRelationReadability {
     /// Every persisted physical column and its static GraphQL readability.
     const COLUMNS: &'static [(&'static str, bool)];
+    /// Persisted physical columns with no generated GraphQL surface at all: not
+    /// readable, filterable, orderable, subscribable, accepted as input or part
+    /// of the primary key. Only these may be a relation's `server_only_key`
+    /// target. The default is empty, so a hand-written target fails closed.
+    const SERVER_ONLY_COLUMNS: &'static [&'static str] = &[];
+}
+
+/// Compare two unquoted physical column names, folding ASCII case unless
+/// `case_sensitive`.
+const fn generated_relation_column_name_eq(left: &str, right: &str, case_sensitive: bool) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut byte = 0;
+    while byte < left.len() {
+        let mut a = left[byte];
+        let mut b = right[byte];
+        if !case_sensitive {
+            a = a.to_ascii_lowercase();
+            b = b.to_ascii_lowercase();
+        }
+        if a != b {
+            return false;
+        }
+        byte += 1;
+    }
+    true
+}
+
+/// Check a relation's `server_only_key` target column at compile time: it must
+/// be declared server-only by the target's generated metadata. Unknown columns
+/// and every column with any GraphQL surface fail closed.
+#[doc(hidden)]
+pub const fn generated_relation_column_is_server_only(
+    columns: &[&str],
+    column: &str,
+    case_sensitive: bool,
+) -> bool {
+    let mut index = 0;
+    while index < columns.len() {
+        if generated_relation_column_name_eq(columns[index], column, case_sensitive) {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Check a generated relation's physical target column at compile time.
@@ -778,7 +826,11 @@ where
         let (mut this, metadata) = self.authorize().await?;
         // Resolve the read decision once. Its predicate narrows the base query,
         // so the initial SQL window and the scan both carry it.
-        let mode = repository_read_plan::<T, B>(this.db, Some(&mut this.query)).await?;
+        let mode = repository_read_plan::<T, B>(
+            super::core::PolicyView::of(this.db),
+            Some(&mut this.query),
+        )
+        .await?;
         let config = this
             .db
             .pagination_config()
@@ -1006,6 +1058,33 @@ pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
     split_sort_terms(clause)
         .into_iter()
         .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
+}
+
+/// Whether a default sort can be evaluated against a projection of these
+/// physical columns. Keep arbitrary SQL on the original table scope.
+pub(crate) fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str]) -> bool {
+    use super::dialect::{SqlTokenKind, postgres_resolved_identifier, scan_sql};
+
+    clause.trim().is_empty()
+        || split_sort_terms(clause).into_iter().all(|term| {
+            let mut first = None;
+            let mut qualified = false;
+            let scanned = scan_sql(DatabaseBackend::Postgres, term, |token| {
+                if token.kind != SqlTokenKind::Comment {
+                    first.get_or_insert(&term[token.start..token.end]);
+                    qualified |= &term[token.start..token.end] == ".";
+                }
+            });
+            scanned.is_ok()
+                && !qualified
+                && sort_term_column(term).is_some()
+                && first.is_some_and(|first| {
+                    let name = postgres_resolved_identifier(first);
+                    columns
+                        .iter()
+                        .any(|col| postgres_resolved_identifier(col) == name)
+                })
+        })
 }
 
 /// The terms of `clause` that do not order directly by a column one of
@@ -2208,15 +2287,20 @@ pub(crate) enum RowCheckMode {
 /// one, the read's executor does not receive the predicate, so the row
 /// callback stays the authority and `Complete` is residual for paging.
 pub(crate) async fn repository_read_plan<T, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
     query: Option<&mut EntityQuery<T, B>>,
 ) -> crate::Result<RowCheckMode>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     B: OrmBackend,
 {
+    let db = view.db;
     let visibility = db
-        .read_visibility::<T>(None, super::core::EntityAccessSurface::Repository)
+        .read_visibility_as::<T>(
+            view.authority,
+            None,
+            super::core::EntityAccessSurface::Repository,
+        )
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     let applies_predicate = query.is_some();
@@ -5088,14 +5172,16 @@ where
 }
 
 async fn ensure_projection_access<P, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
 ) -> crate::Result<super::ReadVisibility>
 where
     B: OrmBackend,
     P: ReadProjection<B>,
 {
     let metadata = P::Entity::metadata();
-    db.ensure_entity_access(
+    let db = view.db;
+    db.ensure_entity_access_as(
+        view.authority,
         None,
         metadata.entity_name,
         metadata.read_policy,
@@ -5125,7 +5211,7 @@ where
         .map_err(crate::graphql::errors::sqlx_error_from_public)?;
     }
     let visibility = db
-        .projection_read_visibility::<P>()
+        .projection_read_visibility::<P>(view.authority)
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     if visibility.requires_residual_checks() {
@@ -5237,7 +5323,8 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5261,7 +5348,8 @@ where
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5286,7 +5374,8 @@ where
     }
 
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5410,7 +5499,8 @@ where
     }
 
     async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
+        let policy = self.context.__policy();
+        let visibility = ensure_projection_access::<P, B>(policy.view()).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -8016,6 +8106,34 @@ mod grouped_aggregate_tests {
 #[cfg(test)]
 mod visible_row_scan_tests {
     use super::*;
+
+    #[test]
+    fn postgres_sort_projection_admits_only_unqualified_physical_columns() {
+        let columns = ["id", r#""Mixed.Case""#, r#""odd""name""#];
+        for clause in [
+            "id DESC NULLS LAST",
+            r#""Mixed.Case" ASC NULLS LAST, "odd""name" DESC"#,
+        ] {
+            assert!(
+                postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+        for clause in [
+            "records.id ASC",
+            "public.records.id",
+            "lower(id)",
+            "id /* comment */ DESC",
+            "id DESC -- comment",
+            r#""mixed.case" ASC"#,
+            "missing NULLS LAST",
+        ] {
+            assert!(
+                !postgres_sort_uses_projected_columns(clause, &columns),
+                "{clause}"
+            );
+        }
+    }
 
     #[test]
     fn key_tiebreak_needs_a_direct_key_term() {

@@ -1,0 +1,5 @@
+error: upsert_bound_key requires the generated GraphQL upsert mutation: declare upsert = "..." over public or bound key fields, keep mutations enabled and select upsert in mutation_shapes
+  --> tests/ui/principal_upserts/bound_upsert_not_selected.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

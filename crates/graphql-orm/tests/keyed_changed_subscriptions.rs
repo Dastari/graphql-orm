@@ -17,7 +17,7 @@
 //! ```
 
 use graphql_orm::async_graphql::{Request, Response};
-use graphql_orm::futures::{Stream, StreamExt, future::poll_fn};
+use graphql_orm::futures::{FutureExt, Stream, StreamExt, future::poll_fn};
 use graphql_orm::prelude::*;
 use std::task::Poll;
 use tokio::time::{Duration, timeout};
@@ -98,6 +98,7 @@ struct KeyedChild {
     #[filterable(type = "string")]
     parent_id: String,
     body: String,
+    ticket_id: Option<String>,
     #[graphql(skip)]
     #[relation(
         target = "KeyedParent",
@@ -106,6 +107,14 @@ struct KeyedChild {
         propagate_change = "up"
     )]
     parent: Option<KeyedParent>,
+    #[graphql(skip)]
+    #[relation(
+        target = "KeyedTicket",
+        from = "ticket_id",
+        to = "id",
+        propagate_change = "up"
+    )]
+    ticket: Option<KeyedTicket>,
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -160,7 +169,8 @@ struct KeyedSlot {
         table = "keyed_tickets",
         plural = "KeyedTickets",
         key_only_deletes,
-        changed_started = true
+        changed_started = true,
+        changed_replay = true
     )
 )]
 #[cfg_attr(
@@ -170,7 +180,8 @@ struct KeyedSlot {
         table = "keyed_tickets",
         plural = "KeyedTickets",
         key_only_deletes,
-        changed_started = true
+        changed_started = true,
+        changed_replay = true
     )
 )]
 #[cfg_attr(
@@ -181,7 +192,8 @@ struct KeyedSlot {
         table = "keyed_tickets",
         plural = "KeyedTickets",
         key_only_deletes,
-        changed_started = true
+        changed_started = true,
+        changed_replay = true
     )
 )]
 struct KeyedTicket {
@@ -195,9 +207,9 @@ struct KeyedTicket {
 }
 
 #[cfg(feature = "sqlite")]
-schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
+schema_roots! { backend: "sqlite", query_custom_ops: [], client_metadata: true, entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
 #[cfg(feature = "postgres")]
-schema_roots! { backend: "postgres", query_custom_ops: [], entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
+schema_roots! { backend: "postgres", query_custom_ops: [], client_metadata: true, entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket], }
 // SQL Server generates no GraphQL mutations for composite keys; the test writes
 // slots through the repository on every backend.
 #[cfg(feature = "mssql")]
@@ -205,6 +217,7 @@ schema_roots! {
     backend: "mssql",
     schema_policy: "external_writable",
     query_custom_ops: [],
+    client_metadata: true,
     entities: [KeyedParent, KeyedChild, KeyedSlot, KeyedTicket],
     generated_mutations: "denylist",
     generated_mutation_denylist: [KeyedSlot],
@@ -330,7 +343,7 @@ async fn fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
             "CREATE TABLE keyed_parents (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
              owner NVARCHAR(64) NOT NULL, label NVARCHAR(64) NOT NULL); \
              CREATE TABLE keyed_children (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
-             parent_id NVARCHAR(64) NOT NULL, body NVARCHAR(64) NOT NULL); \
+             parent_id NVARCHAR(64) NOT NULL, body NVARCHAR(64) NOT NULL, ticket_id NVARCHAR(64) NULL); \
              CREATE TABLE keyed_slots (site NVARCHAR(64) NOT NULL, name NVARCHAR(64) NOT NULL, \
              owner NVARCHAR(64) NOT NULL, label NVARCHAR(64) NOT NULL, PRIMARY KEY (site, name)); \
              CREATE TABLE keyed_tickets (id NVARCHAR(64) NOT NULL PRIMARY KEY, \
@@ -635,6 +648,7 @@ async fn propagated_parent_events_match_the_parents_key(db: &Database) -> TestRe
                 id: id.to_string(),
                 parent_id: parent_id.to_string(),
                 body: "child".to_string(),
+                ticket_id: None,
             },
         )
         .await?;
@@ -892,6 +906,7 @@ async fn a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters(
                     id: format!("c{index}"),
                     parent_id: "p2".to_string(),
                     body: "child".to_string(),
+                    ticket_id: None,
                 },
             )
             .await?;
@@ -978,6 +993,7 @@ async fn subscriber_loss_ends_direct_and_propagated_streams(db: &Database) -> Te
                     id: format!("child-{keyed}"),
                     parent_id: "p1".into(),
                     body: "hidden".into(),
+                    ticket_id: None,
                 };
                 KeyedChild::insert(&db, input).await?;
             } else {
@@ -1292,6 +1308,647 @@ async fn key_only_deletes_require_entity_and_key_field_access(db: &Database) -> 
     Ok(())
 }
 
+fn replay_subscription(after: Option<&str>) -> String {
+    replay_subscription_with_key(after, None)
+}
+
+fn replay_subscription_with_key(after: Option<&str>, key: Option<&str>) -> String {
+    replay_query(after, key, None)
+}
+
+fn replay_subscription_with_action(after: Option<&str>, action: &str) -> String {
+    replay_query(after, None, Some(action))
+}
+
+fn replay_query(after: Option<&str>, key: Option<&str>, action: Option<&str>) -> String {
+    let root = resolver_name("keyedTicketChanged");
+    let mut args = [("after", after), ("key", key)]
+        .into_iter()
+        .filter_map(|(arg, value)| {
+            value.map(|value| format!("{}: \"{value}\"", argument_name(arg)))
+        })
+        .collect::<Vec<_>>();
+    if let Some(action) = action {
+        let filter = argument_name("filter");
+        let actions = field_name("actions");
+        args.push(format!("{filter}: {{ {actions}: [{action}] }}"));
+    }
+    let args = if args.is_empty() {
+        String::new()
+    } else {
+        format!("({})", args.join(", "))
+    };
+    let [id, cursor, started, ticket, label] =
+        ["id", "cursor", "started", "keyedTicket", "label"].map(field_name);
+    let kind = field_name("changeKind");
+    format!(
+        "subscription {{ {root}{args} {{ {id} {cursor} {started} {kind} {ticket} {{ {label} }} }} }}"
+    )
+}
+
+async fn replay_ticket(db: &Database, id: &str, owner: &str) -> graphql_orm::Result<()> {
+    KeyedTicket::insert(
+        db,
+        CreateKeyedTicketInput {
+            id: id.into(),
+            owner: owner.into(),
+            label: "visible".into(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn replay_then_live_uses_current_row_authority(db: &Database) -> TestResult {
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let changed = resolver_name("keyedTicketChanged");
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "first", "alice").await?;
+    let first = next_event(&mut stream, changed).await;
+    let cursor = first[field_name("cursor")].as_str().expect("opaque cursor");
+    drop(stream);
+    replay_ticket(&db, "revoked", "alice").await?;
+    replay_ticket(&db, "second", "alice").await?;
+    KeyedTicket::update_by_id(
+        &db,
+        &"revoked".into(),
+        UpdateKeyedTicketInput {
+            owner: Some("bob".into()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    replay_ticket(&db, "third", "alice").await?;
+
+    let mut resumed = open(&db, replay_subscription(Some(cursor)), "alice");
+    assert_eq!(id_of(&next_event(&mut resumed, changed).await), "second");
+    assert_eq!(id_of(&next_event(&mut resumed, changed).await), "third");
+    assert_eq!(
+        next_event(&mut resumed, changed).await[field_name("started")],
+        true
+    );
+    replay_ticket(&db, "live", "alice").await?;
+    assert_eq!(id_of(&next_event(&mut resumed, changed).await), "live");
+    Ok(())
+}
+
+async fn replay_rechecks_field_visibility(db: &Database) -> TestResult {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct LabelVisibility(Arc<AtomicBool>);
+
+    impl FieldPolicy for LabelVisibility {
+        fn can_read_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database,
+            _: &'static str,
+            field: &'static str,
+            _: Option<&'static str>,
+            row: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async move {
+                let restricted = field.eq_ignore_ascii_case("label")
+                    && row
+                        .and_then(|row| row.downcast_ref::<KeyedTicket>())
+                        .is_some_and(|row| row.id == "restricted-label");
+                Ok(!restricted || self.0.load(Ordering::SeqCst))
+            })
+        }
+
+        fn can_write_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+            _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+    }
+
+    let allowed = Arc::new(AtomicBool::new(true));
+    let mut db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    db.set_field_policy(LabelVisibility(allowed.clone()));
+    let root = resolver_name("keyedTicketChanged");
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "label-checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    replay_ticket(&db, "restricted-label", "alice").await?;
+    assert_eq!(
+        id_of(&next_event(&mut stream, root).await),
+        "restricted-label"
+    );
+    drop(stream);
+
+    allowed.store(false, Ordering::SeqCst);
+    replay_ticket(&db, "unrestricted-label", "alice").await?;
+    let mut resumed = open(
+        &db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    assert_eq!(
+        id_of(&next_event(&mut resumed, root).await),
+        "unrestricted-label"
+    );
+    assert_eq!(
+        next_event(&mut resumed, root).await[field_name("started")],
+        true
+    );
+    Ok(())
+}
+
+fn advertised_replay_bound() -> usize {
+    use graphql_orm::graphql::orm::{GraphqlChangedReplayScope, GraphqlSubscriptionReplayMode};
+    let root = resolver_name("keyedTicketChanged");
+    let metadata = graphql_orm_client_metadata();
+    let replay = metadata
+        .entities
+        .iter()
+        .find_map(|entity| {
+            entity
+                .changed_stream
+                .as_ref()
+                .filter(|stream| stream.root_field == root)
+        })
+        .expect("ticket stream")
+        .replay
+        .as_ref()
+        .expect("opted-in replay metadata");
+    assert!(
+        metadata
+            .entities
+            .iter()
+            .filter_map(|entity| entity.changed_stream.as_ref())
+            .filter(|stream| stream.root_field != root)
+            .all(|stream| stream.replay.is_none())
+    );
+    assert_eq!(replay.scope, GraphqlChangedReplayScope::Process);
+    let semantic = graphql_orm_semantic_catalog();
+    let operation = semantic
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == root)
+        .expect("ticket operation");
+    assert_eq!(
+        operation
+            .subscription_observation
+            .as_ref()
+            .expect("observation")
+            .replay_mode,
+        GraphqlSubscriptionReplayMode::BestEffort
+    );
+    replay.maximum_events
+}
+
+async fn replay_loss_and_cursor_binding(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_REPLAY_RESET;
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let changed = resolver_name("keyedTicketChanged");
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "loss-checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, changed).await;
+    let cursor = checkpoint[field_name("cursor")]
+        .as_str()
+        .expect("opaque cursor");
+    drop(stream);
+
+    let mut different_principal = open(&db, replay_subscription(Some(cursor)), "bob");
+    ends_with(&mut different_principal, SUBSCRIPTION_REPLAY_RESET).await;
+    let tampered = format!("A{}", &cursor[1..]);
+    let tampered = if tampered == cursor {
+        format!("B{}", &cursor[1..])
+    } else {
+        tampered
+    };
+    let mut invalid = open(&db, replay_subscription(Some(&tampered)), "alice");
+    ends_with(&mut invalid, SUBSCRIPTION_REPLAY_RESET).await;
+    let mut different_key = open(
+        &db,
+        replay_subscription_with_key(Some(cursor), Some("loss-checkpoint")),
+        "alice",
+    );
+    ends_with(&mut different_key, SUBSCRIPTION_REPLAY_RESET).await;
+
+    // These writes are all hidden from Alice. Capacity loss must wait for the
+    // independent tick even though no event in the gap is visible to her.
+    for n in 0..=advertised_replay_bound() {
+        replay_ticket(&db, &format!("hidden-{n}"), "bob").await?;
+    }
+    let clock = subscription_time::ManualTime::pause();
+    let mut resumed = open(&db, replay_subscription(Some(cursor)), "alice");
+    admitted(&mut resumed).await;
+    tokio::time::advance(Duration::from_millis(950)).await;
+    admitted(&mut resumed).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    ends_with(&mut resumed, SUBSCRIPTION_REPLAY_RESET).await;
+    drop(clock);
+    Ok(())
+}
+
+async fn replay_preserves_the_exact_key_delete_rule(db: &Database) -> TestResult {
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    let mut keyed = open(
+        &db,
+        replay_subscription_with_key(None, Some("delete-key")),
+        "alice",
+    );
+    let mut unkeyed = open(&db, replay_subscription(None), "alice");
+    admitted(&mut keyed).await;
+    admitted(&mut unkeyed).await;
+    replay_ticket(&db, "delete-key", "alice").await?;
+    let keyed_checkpoint = next_event(&mut keyed, root).await;
+    let unkeyed_checkpoint = next_event(&mut unkeyed, root).await;
+    drop(keyed);
+    drop(unkeyed);
+    KeyedTicket::delete_by_id(&db, &"delete-key".to_owned()).await?;
+
+    let mut keyed = open(
+        &db,
+        replay_subscription_with_key(
+            keyed_checkpoint[field_name("cursor")].as_str(),
+            Some("delete-key"),
+        ),
+        "alice",
+    );
+    let mut unkeyed = open(
+        &db,
+        replay_subscription(unkeyed_checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    let deleted = next_event(&mut keyed, root).await;
+    assert_eq!(id_of(&deleted), "delete-key");
+    assert!(deleted[field_name("keyedTicket")].is_null());
+    assert!(deleted[field_name("cursor")].is_string());
+    assert_eq!(
+        next_event(&mut keyed, root).await[field_name("started")],
+        true
+    );
+    assert_eq!(
+        next_event(&mut unkeyed, root).await[field_name("started")],
+        true
+    );
+    Ok(())
+}
+
+async fn replay_and_live_visibility_and_reset_ticks_match(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_REPLAY_RESET;
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    let mut alice = open(&db, replay_subscription(None), "alice");
+    let mut bob = open(&db, replay_subscription(None), "bob");
+    admitted(&mut alice).await;
+    admitted(&mut bob).await;
+    replay_ticket(&db, "alice-checkpoint", "alice").await?;
+    replay_ticket(&db, "bob-checkpoint", "bob").await?;
+    let alice_checkpoint = next_event(&mut alice, root).await;
+    let bob_checkpoint = next_event(&mut bob, root).await;
+    let alice_query = replay_subscription(alice_checkpoint[field_name("cursor")].as_str());
+    let bob_query = replay_subscription(bob_checkpoint[field_name("cursor")].as_str());
+    drop((alice, bob));
+
+    for n in 0..2 {
+        replay_ticket(&db, &format!("bob-replay-{n}"), "bob").await?;
+        replay_ticket(&db, &format!("alice-replay-{n}"), "alice").await?;
+    }
+    let mut alice = open(&db, alice_query.clone(), "alice");
+    let mut bob = open(&db, bob_query.clone(), "bob");
+    {
+        let clock = subscription_time::ManualTime::pause();
+        admitted(&mut alice).await;
+        admitted(&mut bob).await;
+        tokio::time::advance(Duration::from_millis(1150)).await;
+        drop(clock);
+    }
+    for (actor, stream) in [("alice", &mut alice), ("bob", &mut bob)] {
+        for n in 0..2 {
+            assert_eq!(
+                id_of(&next_event(stream, root).await),
+                format!("{actor}-replay-{n}")
+            );
+        }
+        assert_eq!(next_event(stream, root).await[field_name("started")], true);
+    }
+    for n in 0..2 {
+        replay_ticket(&db, &format!("alice-live-{n}"), "alice").await?;
+        replay_ticket(&db, &format!("bob-live-{n}"), "bob").await?;
+        assert_eq!(
+            id_of(&next_event(&mut bob, root).await),
+            format!("bob-live-{n}")
+        );
+        assert_eq!(
+            id_of(&next_event(&mut alice, root).await),
+            format!("alice-live-{n}")
+        );
+    }
+    drop((alice, bob));
+
+    for n in 0..advertised_replay_bound() {
+        replay_ticket(&db, &format!("other-{n}"), "carol").await?;
+    }
+    let clock = subscription_time::ManualTime::pause();
+    let mut alice = open(&db, alice_query, "alice");
+    let mut bob = open(&db, bob_query, "bob");
+    admitted(&mut alice).await;
+    admitted(&mut bob).await;
+    tokio::time::advance(Duration::from_millis(950)).await;
+    admitted(&mut alice).await;
+    admitted(&mut bob).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    ends_with(&mut alice, SUBSCRIPTION_REPLAY_RESET).await;
+    ends_with(&mut bob, SUBSCRIPTION_REPLAY_RESET).await;
+    drop(clock);
+    Ok(())
+}
+
+fn separate_handle(db: &Database) -> Database {
+    let mut other = Database::new(db.pool().clone());
+    other.set_entity_policy(AllowEntityPolicy);
+    other.set_row_policy(OwnerRowPolicy);
+    other
+}
+
+async fn replay_refuses_cursors_from_another_handle_or_action_filter(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_REPLAY_RESET;
+    let root = resolver_name("keyedTicketChanged");
+    let mut stream = open(
+        db,
+        replay_subscription_with_action(None, "CREATED"),
+        "alice",
+    );
+    admitted(&mut stream).await;
+    replay_ticket(db, "checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    let cursor = checkpoint[field_name("cursor")].as_str();
+
+    let mut changed_filter = open(
+        db,
+        replay_subscription_with_action(cursor, "UPDATED"),
+        "alice",
+    );
+    ends_with(&mut changed_filter, SUBSCRIPTION_REPLAY_RESET).await;
+
+    let other = separate_handle(db);
+    let mut other_handle = open(
+        &other,
+        replay_subscription_with_action(cursor, "CREATED"),
+        "alice",
+    );
+    ends_with(&mut other_handle, SUBSCRIPTION_REPLAY_RESET).await;
+    Ok(())
+}
+
+async fn replay_rechecks_entity_access_at_the_tick(db: &Database) -> TestResult {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let allowed = Arc::new(AtomicBool::new(true));
+    let mut db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    db.set_entity_policy(CurrentSubscriber(allowed.clone()));
+    let root = resolver_name("keyedTicketChanged");
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    drop(stream);
+    replay_ticket(&db, "unreleased", "alice").await?;
+
+    let clock = subscription_time::ManualTime::pause();
+    let mut resumed = open(
+        &db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    admitted(&mut resumed).await;
+    allowed.store(false, Ordering::SeqCst);
+    admitted(&mut resumed).await;
+    tokio::time::advance(Duration::from_millis(1150)).await;
+    ends_with(&mut resumed, "FORBIDDEN").await;
+    drop(clock);
+    Ok(())
+}
+
+async fn replay_resets_an_age_expired_cursor_immediately(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_REPLAY_RESET;
+    let root = resolver_name("keyedTicketChanged");
+    let clock = subscription_time::ManualTime::pause();
+    let mut stream = open(db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(db, "checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    drop(stream);
+    tokio::time::advance(Duration::from_secs(120)).await;
+    let mut resumed = open(
+        db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    let response = resumed
+        .next()
+        .now_or_never()
+        .expect("no authority tick for an expired cursor")
+        .expect("reset item");
+    assert_eq!(response.data, async_graphql::Value::Null, "{response:?}");
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code")),
+        Some(&async_graphql::Value::from(SUBSCRIPTION_REPLAY_RESET)),
+    );
+    assert!(resumed.next().await.is_none());
+    drop(clock);
+    Ok(())
+}
+
+async fn eviction_during_replay_ends_with_continuity_lost(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_CONTINUITY_LOST;
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    drop(stream);
+
+    for n in 0..advertised_replay_bound() {
+        replay_ticket(&db, &format!("retained-{n}"), "alice").await?;
+    }
+
+    let clock = subscription_time::ManualTime::pause();
+    let mut resumed = open(
+        &db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    admitted(&mut resumed).await;
+    tokio::time::advance(Duration::from_millis(1150)).await;
+    assert_eq!(id_of(&next_event(&mut resumed, root).await), "retained-0");
+
+    // Evict both the witness just delivered and the next unread witness.
+    replay_ticket(&db, "new-0", "bob").await?;
+    replay_ticket(&db, "new-1", "bob").await?;
+    admitted(&mut resumed).await;
+    tokio::time::advance(Duration::from_millis(1150)).await;
+    ends_with(&mut resumed, SUBSCRIPTION_CONTINUITY_LOST).await;
+    drop(clock);
+    Ok(())
+}
+
+type TicketWitness =
+    graphql_orm::graphql::subscriptions::SubscriptionEvent<KeyedTicketChangedEvent, DefaultBackend>;
+
+async fn replay_enabled_live_stream_refuses_foreign_ring_witness(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_CONTINUITY_LOST;
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let other =
+        separate_handle(&db).with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let sender = tokio::sync::broadcast::channel::<TicketWitness>(8).0;
+    db.register_event_sender(sender.clone());
+    other.register_event_sender(sender);
+    let mut stream = open(&other, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+
+    // A separately owned ring starts at the same sequence, on the same channel.
+    replay_ticket(&db, "foreign", "alice").await?;
+    ends_with(&mut stream, SUBSCRIPTION_CONTINUITY_LOST).await;
+    Ok(())
+}
+
+async fn replay_enabled_live_stream_refuses_repeated_witness(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_CONTINUITY_LOST;
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    let (sender, mut copy) = tokio::sync::broadcast::channel::<TicketWitness>(8);
+    db.register_event_sender(sender.clone());
+    let clock = subscription_time::ManualTime::pause();
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "repeat", "alice").await?;
+    assert_eq!(id_of(&next_event(&mut stream, root).await), "repeat");
+    assert!(sender.send(copy.recv().await?).is_ok());
+    // Detect the repeat even if authorizing it could have produced a pending future.
+    // Running the stream through the next tick must yield continuity loss instead.
+    drop(clock);
+    ends_with(&mut stream, SUBSCRIPTION_CONTINUITY_LOST).await;
+    Ok(())
+}
+
+async fn concurrent_publishes_replay_in_live_order(db: &Database) -> TestResult {
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    let mut live = open(&db, replay_subscription(None), "alice");
+    admitted(&mut live).await;
+    replay_ticket(&db, "checkpoint", "alice").await?;
+    let checkpoint = next_event(&mut live, root).await;
+    let (left, right) = tokio::join!(
+        async {
+            for id in ["left-1", "left-2"] {
+                replay_ticket(&db, id, "alice").await?;
+            }
+            Ok::<_, graphql_orm::Error>(())
+        },
+        async {
+            for id in ["right-1", "right-2"] {
+                replay_ticket(&db, id, "alice").await?;
+            }
+            Ok::<_, graphql_orm::Error>(())
+        }
+    );
+    left?;
+    right?;
+    let mut live_order = Vec::new();
+    for _ in 0..4 {
+        live_order.push(id_of(&next_event(&mut live, root).await));
+    }
+    let mut sorted = live_order.clone();
+    sorted.sort();
+    assert_eq!(sorted, ["left-1", "left-2", "right-1", "right-2"]);
+    let mut resumed = open(
+        &db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    for id in live_order {
+        assert_eq!(id_of(&next_event(&mut resumed, root).await), id);
+    }
+    assert_eq!(
+        next_event(&mut resumed, root).await[field_name("started")],
+        true
+    );
+    Ok(())
+}
+
+async fn replay_preserves_propagated_events(db: &Database) -> TestResult {
+    let db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let root = resolver_name("keyedTicketChanged");
+    parent(&db, "parent", "alice").await?;
+    let mut stream = open(&db, replay_subscription(None), "alice");
+    admitted(&mut stream).await;
+    replay_ticket(&db, "ticket", "alice").await?;
+    let checkpoint = next_event(&mut stream, root).await;
+    drop(stream);
+    KeyedChild::insert(
+        &db,
+        CreateKeyedChildInput {
+            id: "child".into(),
+            parent_id: "parent".into(),
+            body: "child".into(),
+            ticket_id: Some("ticket".into()),
+        },
+    )
+    .await?;
+
+    let mut resumed = open(
+        &db,
+        replay_subscription(checkpoint[field_name("cursor")].as_str()),
+        "alice",
+    );
+    let event = next_event(&mut resumed, root).await;
+    assert_eq!(id_of(&event), "ticket");
+    assert_eq!(event[field_name("changeKind")], "PROPAGATED");
+    assert_eq!(
+        next_event(&mut resumed, root).await[field_name("started")],
+        true
+    );
+    Ok(())
+}
+
 macro_rules! scenarios {
     ($($scenario:ident),* $(,)?) => {
         #[cfg(feature = "sqlite")]
@@ -1339,4 +1996,17 @@ scenarios![
     a_replaced_event_channel_ends_its_subscribers,
     key_only_deletes_reach_exact_key_subscribers_only,
     key_only_deletes_require_entity_and_key_field_access,
+    replay_then_live_uses_current_row_authority,
+    replay_rechecks_field_visibility,
+    replay_loss_and_cursor_binding,
+    replay_preserves_the_exact_key_delete_rule,
+    replay_and_live_visibility_and_reset_ticks_match,
+    replay_refuses_cursors_from_another_handle_or_action_filter,
+    replay_rechecks_entity_access_at_the_tick,
+    replay_resets_an_age_expired_cursor_immediately,
+    eviction_during_replay_ends_with_continuity_lost,
+    replay_enabled_live_stream_refuses_foreign_ring_witness,
+    replay_enabled_live_stream_refuses_repeated_witness,
+    concurrent_publishes_replay_in_live_order,
+    replay_preserves_propagated_events,
 ];

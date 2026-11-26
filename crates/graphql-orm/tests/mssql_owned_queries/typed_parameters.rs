@@ -9,6 +9,7 @@ use std::time::Duration;
 #[repository_entity(
     backend = "mssql",
     table = "dbo.ParameterItems",
+    upsert = "id",
     schema_policy = "external_writable"
 )]
 struct ParameterItem {
@@ -292,6 +293,30 @@ async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
     .expect("out-of-range update");
     assert_eq!(
         OrmPublicError::from(update_error).code,
+        OrmErrorCode::InvalidInput
+    );
+    let mut denied_db = Database::<MssqlBackend>::builder(db.pool().clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    denied_db.set_row_policy(CodePolicy("naïve"));
+    let upsert_error = ParameterItem::upsert(
+        &denied_db,
+        CreateParameterItemInput {
+            id: inserted.id,
+            code: updated.code.clone(),
+            windows_code: None,
+            greek_code: None,
+            label: updated.label.clone(),
+            score: None,
+            attempts: Some(32768),
+        },
+    )
+    .await
+    .err()
+    .expect("out-of-range upsert");
+    // If the existing row reaches the row policy, it refuses the write.
+    assert_eq!(
+        OrmPublicError::from(upsert_error).code,
         OrmErrorCode::InvalidInput
     );
     let no_target = code_filter("does-not-exist");

@@ -111,6 +111,17 @@ pub enum BackupError {
         target_schema_hash: String,
     },
 
+    /// A canonical snapshot and its restore target have the same key layout
+    /// entries, but disagree on the PostgreSQL type or type modifier of a key.
+    /// Restore stops before checking target emptiness or writing data.
+    #[error("canonical key storage differs at table {table_name:?}, column {column_name:?}")]
+    CanonicalKeyStorageMismatch {
+        /// Table whose key storage differs.
+        table_name: String,
+        /// Primary-key column whose storage differs.
+        column_name: String,
+    },
+
     #[error("invalid column backup policy override for {table_name}.{column_name}: {reason}")]
     InvalidColumnBackupPolicyOverride {
         table_name: String,

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-19
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.223.0
+## Unreleased - ORM/macros 0.227.0
 
 - **Fixed (#860).** Removed the 0.215.0 ASCII VARCHAR conversion because it
   could match different rows under legacy `SQL_` collations. String filters
@@ -24,10 +24,183 @@ for historical context.
   the 2-read VARCHAR seek in 0.215.0. **Action needed** for hosts that relied
   on the `SQL_` seek. Move the column to a Windows collation or index a
   persisted computed Unicode column for the affected comparison.
-  [Migration](MIGRATION.md#02150-to-02230-sql-server-varchar-and-bulk-update-validation)
-- **Fixed (#860).** SQL Server single-row and bulk repository updates validate
-  unsigned operands before selecting targets, including requests that would
-  affect zero rows. Opt-in native integer widths and BIGINT fallback remain.
+  [Migration](MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
+- **Fixed (#860).** Generated SQL Server updates and upserts validate unsigned
+  inputs before selecting targets, including updates that would affect zero
+  rows. Opt-in native integer widths and BIGINT fallback remain.
+
+## Unreleased - ORM/macros 0.226.0
+
+- **Added (#353).** Generated creates can opt into typed child lists on
+  collection relations. The ORM binds the relation keys, authorizes each row,
+  and commits the parent and up to 50 children in one transaction. When the
+  call includes children, a field-write denial on any row refuses the whole
+  create, even when the field policy allows legacy omission on a standalone
+  create.
+  [Migration](MIGRATION.md#02250-to-02260-generated-nested-create)
+
+## Unreleased - ORM/macros 0.225.0
+
+- **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters
+  during introspection. SQL Server distinguishes a filtered index when the
+  catalog indicates a filter and the definition is unavailable. SQLite and
+  PostgreSQL emit a failing statement if asked to render an opaque predicate.
+  PostgreSQL preserves declared single-value filters through introspection.
+  [Migration](MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+
+## Unreleased - ORM/macros 0.224.0 and AI 0.165.0
+
+- **Added (#291).** A mutation hook's nested writes can be authorized from
+  the request that caused them. With
+  `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, a hook that a
+  generated GraphQL mutation invokes presents a `HookRequestAuthority` (the
+  request's subject, and its accepted agql-auth identity with `auth-agql`) on
+  the entity and row policy checks of the operations it makes through its
+  `MutationContext`. It is off by default and grants nothing by itself.
+  `ScopeEntityPolicy` then holds the originating subject to its scope
+  requirement, so a cleanup hook no longer fails `UNAUTHENTICATED` for a
+  caller that holds the scope. The authority belongs to the transaction: no
+  `Database` handle carries it, so a repository call, another transaction, a
+  spawned task, a post-commit action or a later request never presents it.
+  It is attached only by a generated GraphQL mutation whose request is
+  admitted to write the mutation's entity, never by
+  `MutationContext::run_mutation_hook`, and every read of it checks that the
+  hook invocation is still running. Repository field decisions do not
+  receive it.
+- **Added (#291).** `EntityPolicy`, `RowPolicy` and `FieldPolicy` have
+  `*_with_authority` methods that receive a `PolicyAuthority`: the named
+  `SystemAccess` of the handle or scope, and, for entity and row decisions, a
+  hook's originating request. The ORM always calls them. Their defaults call
+  the existing methods with the same arguments, so existing policies are
+  unchanged. A policy can now refuse a call that presents no authority
+  (`ctx` is `None` and `PolicyAuthority::is_none()`) while admitting a named
+  worker or a hook. `Database::policy_authority()` returns a handle's
+  authority.
+- **Added (#291).** `AgqlCurrentAuthorityPolicy` admits a hook's nested
+  entity decision on the originating request's accepted identity, with the
+  same status and authority revalidation as a request, when the host's
+  `AgqlBindingAuthorizer::authorize_hook_operation` allows it. The default
+  denies, so `ctx = None` calls stay refused until the host implements it.
+- **Fixed (#291), AI 0.164.0.** The AI crate's internal handle forwards
+  host-owned repository field decisions to the host policy's
+  `*_with_authority` methods; see the
+  [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+  **No action.** See the
+  [migration guide](MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+## Unreleased - ORM/macros 0.223.0
+
+- **Fixed (#867).** Generated exact SQL Server equality and membership filters
+  include a seek predicate for Unicode key columns declared with BIN2 collation.
+  SQL text changes for all opted-in exact comparisons, including non-BIN2
+  columns, `ne` and `not_in`, and the AI crate's opted-in entities. Review
+  SQL Server plan guides and Query Store forced plans that match by statement
+  text. The exactness check always uses Unicode. On a live `VARCHAR` column
+  declared as Unicode, exact filters and read policies now accept true matches
+  that the old byte-length check rejected and reject padded false matches.
+  [Migration](MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+## Unreleased - ORM/macros 0.222.0
+
+- **Added (#908).** A generated GraphQL upsert can take a private conflict key
+  from the verified request, carry a typed transient input, and let its hook
+  acknowledge a retry without writing. All three are opt-in entity options.
+  - `upsert_bound_key(field = "...", binding = "path::Type")`: the resolver
+    fills that conflict-key member from `PrincipalKeyBinding::bind` before the
+    conflict lookup, and again after the input transform. The column must be
+    `#[graphql_orm(private)]` with no other GraphQL surface, so no client input
+    can set or replace it. A failed binding refuses the mutation before any
+    policy, read or write, with a fixed `FORBIDDEN` that carries nothing from
+    the binding's own error. A row the database matched but whose stored key
+    is not exactly the bound value is refused with `FORBIDDEN`, so a
+    case-insensitive collation cannot merge two principals. Every ownership
+    refusal is one identical response. Generated updates
+    never assign the column, whatever their input transform does. Every
+    existing write authorization still applies. Unsafe declarations are
+    compile errors, including an entity that also generates `create` or takes
+    part in a nested create, and a key column shared with another field or an
+    implicit timestamp or version writer.
+  - `transient_input(type = "...", on = "upsert")`: a typed argument that
+    `WriteInputContext::transient_input` and `MutationContext::transient_input`
+    expose to the input transform and both hook phases, inside the write
+    transaction. It is never stored or published in `Changed` events or the
+    change journal. The argument is marked `secret`, so async-graphql's
+    rendered execution document redacts it, and `@transientInput`, so AI tool
+    profiles and typed AI capabilities cannot carry it. A request value over
+    `max_bytes` (default 64 KiB) or `max_nodes` (default 1024) is refused
+    before coercion, a value that does not coerce is refused without being
+    quoted, and a defaulted variable in the argument is refused. Transaction
+    code can set one with `MutationContext::set_transient_input`.
+  - `upsert_acknowledge = true`: the `Before` hook may call
+    `MutationContext::acknowledge_without_write` on the update branch. The
+    upsert then writes nothing, publishes nothing and returns the existing row
+    with `action: null`. A call made where it is not allowed also blocks the
+    commit, so a hook that ignores the refusal cannot let the write through.
+
+  [Migration](MIGRATION.md#02210-to-02220-principal-bound-upserts)
+
+## Unreleased - ORM/macros 0.221.0 and operation catalogue 0.16.0
+
+- **Added (#668).** Generated Changed subscriptions can opt in to an opaque
+  cursor and bounded, process-local replay. Replay checks current subscriber
+  authority and signals when a cursor requires a refetch.
+  [Migration](MIGRATION.md#02200-to-02210-generated-changed-replay)
+
+## Unreleased - ORM/macros 0.220.0
+
+- PostgreSQL hosts can opt into canonical change-journal keys (#592). The
+  recorder and full snapshot use the same encoding for single-column keys.
+  The cutover retires legacy cursors and requires a new full backup.
+  [Migration](MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys)
+
+## Unreleased - ORM/macros 0.219.0
+
+- **Security fix (#902).** Runtime node lookups and relation layers enforce the
+  target collection's query assurance before database access. Generated
+  Federation lookups enforce assurance on every enabled query root of the
+  entity. [Migration](MIGRATION.md#02180-to-02190-indirect-query-assurance)
+
+## Unreleased - ORM/macros 0.218.0
+
+- **Added (#898).** A readable composite relation can declare
+  `server_only_key(from = "...", to = "...")` for a key pair whose target
+  column is server-only (`#[graphql_orm(private)]` with no other GraphQL
+  surface). Generated traversal still joins on the complete tuple, so a target
+  in another partition resolves to `null` or an empty list. The column stays
+  out of SDL, inputs, `Changed`, catalogues and client metadata. Combining it
+  with `filter`, `order_aggregate`, `search_relation` or upward propagation is
+  refused at compile time. So are floating-point and boolean key members,
+  targets with non-ASCII, over-long or `__gom_`-prefixed names, and a source
+  member that is skipped, read-transformed or decoded (JSON, date, boolean
+  field, decimal, spatial). A target column is refused when any field mapping
+  exposes it, however its name is spelled, or when it belongs to the primary
+  key. Batched loads of such a relation associate rows with their parent by
+  the database's match of the complete tuple, so they agree with the direct
+  query for every type and collation.
+  [Server-only partition keys](docs/reference/graphql-orm/entities-and-relations.md#server-only-partition-keys)
+
+## Unreleased - ORM/macros 0.217.0
+
+- **Security fix (#899).** Generated relations enforce every required assurance
+  policy on the target's generated query roots before reading target rows or
+  evaluating existence or counts.
+  [Migration](MIGRATION.md#02160-to-02170-relation-target-assurance)
+
+## Unreleased - operation catalogue 0.15.0
+
+- **Fixed (#544).** Authorization-metadata fix. The resolver catalogue
+  described a generated relationship with a declared field policy as needing
+  only the target root's requirement (`same_as_root`), which is looser than
+  the runtime enforces. The runtime always enforced the field policy. Such
+  relationships now export `subgraph_only`. The resolver catalogue fingerprint
+  changes for schemas with such relationships; the operation and semantic
+  catalogue fingerprints are unchanged. **No action.**
+
+## Unreleased - ORM/macros 0.216.0
+
+- **Improved (refs #555).** PostgreSQL native search on generated RLS entities can use
+  a document primary-key lookup or a bulk join, depending on planner
+  estimates. Both RLS policies stay in force. [Migration](MIGRATION.md#02150-to-02160-postgresql-rls-search)
 
 ## Unreleased - ORM/macros 0.215.0
 
