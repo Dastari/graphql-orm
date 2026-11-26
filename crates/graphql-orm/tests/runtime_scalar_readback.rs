@@ -565,6 +565,11 @@ async fn stored_values_beyond_input_bounds_are_returned_and_paged_as_stored() {
             "0002-06-01 00:00:00+00 BC",
             "-0001-06-01T00:00:00.000000Z",
         ),
+        (
+            "7",
+            "262142-12-31 23:59:59.999999+00",
+            "+262142-12-31T23:59:59.999999Z",
+        ),
     ];
     for (id, stored, _) in &rows {
         f.sql(&format!(

@@ -566,13 +566,13 @@ impl DateFilter {
             validate_relative_offset("lteRelative", relative.days)?;
         }
         if let Some(range) = &self.between {
-            let start = parse_comparable_date_value(&range.start).ok_or_else(|| {
+            let start = crate::temporal::parse_calendar(&range.start).ok_or_else(|| {
                 invalid_date_filter("between.start must be an ISO-8601 date or timestamp")
             })?;
-            let end = parse_comparable_date_value(&range.end).ok_or_else(|| {
+            let end = crate::temporal::parse_calendar(&range.end).ok_or_else(|| {
                 invalid_date_filter("between.end must be an ISO-8601 date or timestamp")
             })?;
-            if start > end {
+            if start.ordering_key() > end.ordering_key() {
                 return Err(invalid_date_filter(
                     "between.start must not be after between.end",
                 ));
@@ -831,20 +831,6 @@ fn relative_day_expr(backend: crate::graphql::orm::DatabaseBackend, days: i64) -
     } else {
         backend.days_ahead_expr(days)
     }
-}
-
-fn parse_comparable_date_value(value: &str) -> Option<chrono::NaiveDateTime> {
-    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Some(value.naive_utc());
-    }
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(value) = chrono::NaiveDateTime::parse_from_str(value, format) {
-            return Some(value);
-        }
-    }
-    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .ok()
-        .and_then(|value| value.and_hms_opt(0, 0, 0))
 }
 
 // These declarations belong to the existing filter implementations. SDL only

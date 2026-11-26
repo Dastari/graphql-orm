@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.233.0 to 0.234.0: internal date-time engine
+
+**No action.** Upgrade ORM and macros together. The internal engine uses
+`time` 0.3 and preserves existing chrono signatures, canonical UTC strings,
+backup row hashes, and database parameter formats.
+
 ## 0.232.0 to 0.233.0: Nested closure SQL
 
 **No action.** Upgrade ORM and macros together. A nested read-predicate

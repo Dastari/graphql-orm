@@ -1897,6 +1897,39 @@ async fn temporal_parameters_are_independent_of_session_dateformat()
         .await?;
     assert_eq!(rows[0].try_get::<String, _>("value")?, "2026-09-04");
 
+    let boundary =
+        "9999-12-31T23:59:59.999999900+14:00".parse::<chrono::DateTime<chrono::FixedOffset>>()?;
+    let rows = typed
+        .fetch_rows(
+            "SELECT CONVERT(datetimeoffset(7), @P1) AS value",
+            &[SqlValue::from(boundary)],
+        )
+        .await?;
+    assert_eq!(
+        rows[0].try_get::<String, _>("value")?,
+        boundary.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    );
+    for text in [
+        "-9999-01-01T00:00:00Z",
+        "-10000-01-01T00:00:00Z",
+        "+10000-01-01T00:00:00Z",
+        "-262143-01-01T00:00:00Z",
+        "+262142-01-01T00:00:00Z",
+        "9999-12-31T23:59:59-00:01",
+    ] {
+        let stamp = text.parse::<chrono::DateTime<chrono::FixedOffset>>()?;
+        let result = typed
+            .fetch_rows(
+                "SELECT CONVERT(datetimeoffset(7), @P1) AS value",
+                &[SqlValue::from(stamp)],
+            )
+            .await;
+        assert!(
+            matches!(result, Err(graphql_orm::sqlx::Error::Encode(_))),
+            "{text}"
+        );
+    }
+
     typed.install_restore_marker().await?;
     let database = Database::<MssqlBackend>::builder(typed.clone())
         .schema_policy(SchemaPolicy::ExternalWritable)

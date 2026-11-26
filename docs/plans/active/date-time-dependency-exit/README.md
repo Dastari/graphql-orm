@@ -3,7 +3,7 @@ title: Date-time dependency exit plan
 kind: plan
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-22
+last_reviewed: 2026-11-25
 review_by: 2027-02-17
 supersedes: []
 ---
@@ -17,7 +17,6 @@ notices report no vulnerability. They are recorded as dated exceptions in
 `dependency-audit-dispositions.json` (finding keys listed under
 [Dispositions](#dispositions)), all with review date 2027-02-17. This plan
 holds the inventory, the recommended replacement and the phased path.
-Nothing here is implemented yet.
 
 **Verification basis.** The facts below were gathered at `origin/main`
 3d31436cb (graphql-orm 0.201.0, Rust 1.97.1) with `git grep`, `cargo tree`
@@ -508,12 +507,16 @@ Acceptance gates:
 
 ## Current checkpoint
 
-Inventory re-verified against 0.201.0 and extended with per-lane evidence,
-the missed public API (`TemporalKind`, the `SqlValue` `From` impls,
-`MssqlScalar`) and the lock-file and audit-gate constraints. jiff 1.0 changes
-the recorded rationale but not the recommendation. No code has changed.
+The Phase 1 internal engine migration is complete. The ORM uses `time` 0.3
+for canonicalization, calendar arithmetic, and SQL Server codecs. String
+decoding for SQL Server `date`, `datetime2`, and `datetimeoffset` uses chrono
+when the stored or local year falls outside ±9999.
+The workspace lockfile resolves `time` to 0.3.53. PostgreSQL keeps SQLx's chrono
+codecs, and the compatibility layer preserves chrono payloads and accepted
+legacy spellings.
+The `humantime` exception now identifies its dependency path.
 
-Next boundary: the maintainer confirms the `time` engine, the dual-feature
-shape and the `TemporalKind` shape. Then Phase 1 begins with the
-`humantime` wording fix and the first differential-tested internal area, ahead
-of the 2027-02-17 exception review.
+The maintainer approved the separate host features and explicit
+`OffsetDateTime` mapping on 2026-11-24. That opt-in host API is the next
+additive step. The `TemporalKind` and `CalendarDate` changes follow on
+`next/breaking`. The dependency exceptions retain their 2027-02-17 review.
