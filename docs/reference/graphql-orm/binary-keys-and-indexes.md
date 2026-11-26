@@ -34,6 +34,9 @@ target fields are public, the GraphQL upsert field is generated as before. If an
 field is absent from the public create input, graphql-orm omits that GraphQL field and retains
 repository and `MutationContext::upsert` capability.
 
+To keep the GraphQL upsert and have the server supply the private key from the verified request,
+declare a [principal-bound conflict key](runtime-and-writes.md#principal-bound-conflict-keys).
+
 ## Named directional ordinary indexes
 
 The original shorthand remains available and produces an all-ascending index
@@ -90,10 +93,11 @@ plan drop/recreate work.
 
 Canonicalization recognizes only the complete generated closed-set grammar. Identifier quoting,
 whitespace, redundant balanced outer parentheses, value ordering/deduplication, and PostgreSQL's
-catalog-generated `= ANY (ARRAY[...])` text-literal form are harmless. Leading or trailing boolean
-expressions, functions, comments retained by SQLite, additional predicates, and unsupported casts
-are not interpreted as equivalent. PostgreSQL removes comments from stored index expressions, so a
-comment-only source spelling cannot be observed during live introspection there.
+catalog-generated `= ANY (ARRAY[...])` and single-value `= 'value'::text` forms are harmless.
+Leading or trailing boolean expressions, functions, comments retained by SQLite, additional
+predicates, and unsupported casts are not interpreted as equivalent. PostgreSQL removes comments
+from stored index expressions, so a comment-only source spelling cannot be observed during live
+introspection there.
 
 Adding a unique conditional index can fail when existing rows inside the selected set have duplicate
 keys. Validate and repair data before applying the migration. SQLite and PostgreSQL support this

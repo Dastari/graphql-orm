@@ -1033,3 +1033,42 @@ async fn include_index_differs_from_plain_index() -> Result<(), Box<dyn std::err
     server.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable SQL Server container"]
+async fn opaque_partial_index_differs_from_plain_index() -> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{MigrationStep, build_migration_plan, introspect_mssql_schema};
+
+    let mut server = OwnedSqlServer::start().await?;
+    execute_batch(
+        &server.connection_string,
+        "CREATE TABLE dbo.GraphqlOrmRestoredRecords (id INT PRIMARY KEY, value BIGINT NOT NULL, payload BIGINT NOT NULL);
+         CREATE INDEX idx_restored_value ON dbo.GraphqlOrmRestoredRecords (value) INCLUDE (payload) WHERE value > 1;",
+    )
+    .await?;
+    let db = writable(&server.connection_string).await?;
+    let live = introspect_mssql_schema(&db).await?;
+    let mut target = live.clone();
+    let index = target
+        .tables
+        .iter_mut()
+        .flat_map(|table| &mut table.indexes)
+        .find(|index| index.name == "idx_restored_value")
+        .expect("index should be introspected");
+    assert_eq!(index.included_columns, ["payload"]);
+    let filter = index.predicate.take().expect("partial index filter");
+    assert!(filter.column.is_empty());
+
+    let plan = build_migration_plan(DatabaseBackend::Mssql, &live, &target);
+    assert!(plan.steps.iter().any(|step| matches!(
+        step,
+        MigrationStep::DropIndex { index_name, .. } if index_name == "idx_restored_value"
+    )));
+    assert!(plan.steps.iter().any(|step| matches!(
+        step,
+        MigrationStep::CreateIndex { index, .. }
+            if index.name == "idx_restored_value" && index.predicate.is_none() && index.included_columns == ["payload"]
+    )));
+    server.cleanup()?;
+    Ok(())
+}

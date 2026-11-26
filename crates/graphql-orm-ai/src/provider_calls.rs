@@ -6847,6 +6847,7 @@ mod tests {
         generated_target_policy: AiGeneratedGraphqlTargetPolicySet,
         automatic_mutation_id: Option<AiToolId>,
         automatic_mutation_fingerprint: Option<String>,
+        mutation_catalog: Option<(GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog)>,
     }
 
     const GENERATED_QUERY_SDL: &str = r#"
@@ -6863,39 +6864,9 @@ mod tests {
         type Record { recordId: ID!, subject: String! }
     "#;
 
-    thread_local! {
-        /// Test-only: the generated `CreateRecord` fixture mutation requires
-        /// approval instead of running automatically. Tokio tests run on one
-        /// thread, so this applies to exactly one fixture.
-        static APPROVAL_REQUIRED_GENERATED_MUTATION: std::cell::Cell<bool> =
-            const { std::cell::Cell::new(false) };
-    }
-
-    fn approval_required_generated_mutation() -> bool {
-        APPROVAL_REQUIRED_GENERATED_MUTATION.with(std::cell::Cell::get)
-    }
-
-    thread_local! {
-        /// Test-only: a static-tool fixture also registers the generated
-        /// `CreateRecord` mutation, for native turns that reach it through
-        /// the fixed broker.
-        static BROKERED_GENERATED_MUTATION: std::cell::Cell<bool> =
-            const { std::cell::Cell::new(false) };
-    }
-
-    fn brokered_generated_mutation() -> bool {
-        BROKERED_GENERATED_MUTATION.with(std::cell::Cell::get)
-    }
-
-    /// The automatic-mutation fixture with an approval-required generated
-    /// mutation instead.
-    async fn approval_required_mutation_fixture() -> Fixture {
-        APPROVAL_REQUIRED_GENERATED_MUTATION.with(|cell| cell.set(true));
-        automatic_mutation_fixture().await
-    }
-
-    fn automatic_mutation_catalog() -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog)
-    {
+    fn generated_mutation_catalog(
+        execution_policy: AiMutationExecutionPolicy,
+    ) -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog) {
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
             field_name: field_name.to_owned(),
             description: format!("Reviewed public {field_name}."),
@@ -6942,12 +6913,8 @@ mod tests {
             true,
         )
         .expect("test mutation semantics should validate")
-        .with_ai_mutation_execution(if approval_required_generated_mutation() {
-            AiMutationExecutionPolicy::ApprovalRequired
-        } else {
-            AiMutationExecutionPolicy::Automatic
-        })
-        .expect("automatic classification should validate");
+        .with_ai_mutation_execution(execution_policy)
+        .expect("mutation classification should validate");
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [entity],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
@@ -7196,6 +7163,18 @@ mod tests {
         fixture_with_provider_access_and_static_tools(mock, access_policy, true).await
     }
 
+    async fn approval_required_mutation_fixture() -> Fixture {
+        fixture_with_optional_provider_and_automatic_static_with_start(
+            MockProvider::new(Vec::new()),
+            Arc::new(AllowAccess),
+            Some(AiMutationExecutionPolicy::ApprovalRequired),
+            None,
+            false,
+            true,
+        )
+        .await
+    }
+
     async fn automatic_mutation_fixture() -> Fixture {
         fixture_with_provider_access_and_static_tools(
             MockProvider::new(Vec::new()),
@@ -7239,7 +7218,7 @@ mod tests {
         fixture_with_optional_provider_and_automatic_static_with_start(
             mock,
             access_policy,
-            include_static_tools,
+            (!include_static_tools).then_some(AiMutationExecutionPolicy::Automatic),
             provider,
             automatic_static,
             true,
@@ -7250,11 +7229,12 @@ mod tests {
     async fn fixture_with_optional_provider_and_automatic_static_with_start(
         mock: MockProvider,
         access_policy: Arc<dyn AiAccessPolicy>,
-        include_static_tools: bool,
+        generated_mutation_policy: Option<AiMutationExecutionPolicy>,
         provider: Option<Arc<dyn crate::AiProvider>>,
         automatic_static: bool,
         start: bool,
     ) -> Fixture {
+        let include_static_tools = generated_mutation_policy.is_none() || automatic_static;
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -7586,8 +7566,10 @@ mod tests {
         let mut automatic_mutation_id = None;
         let mut automatic_mutation_fingerprint = None;
         let mut automatic_schema_fingerprint = None;
-        if !include_static_tools || brokered_generated_mutation() {
-            let (mutation_semantics, mutation_catalog) = automatic_mutation_catalog();
+        let mutation_catalog = generated_mutation_policy.map(generated_mutation_catalog);
+        if let Some((execution_policy, (mutation_semantics, mutation_catalog))) =
+            generated_mutation_policy.zip(mutation_catalog.as_ref())
+        {
             let automatic_mutation = mutation_catalog
                 .capabilities()
                 .next()
@@ -7601,17 +7583,17 @@ mod tests {
                 mutation_catalog.finished_schema_fingerprint(),
                 mutation_semantics.fingerprint.clone(),
             )
-            .expect("generated target binding should validate")
-            .allow_automatic_mutations();
+            .expect("generated target binding should validate");
             generated_target_policy
-                .bind(if approval_required_generated_mutation() {
-                    binding.allow_approval_required_mutations()
-                } else {
-                    binding
+                .bind(match execution_policy {
+                    AiMutationExecutionPolicy::ApprovalRequired => {
+                        binding.allow_approval_required_mutations()
+                    }
+                    _ => binding.allow_automatic_mutations(),
                 })
                 .expect("generated target should bind once");
             tool_catalog
-                .register_mutation_capability_catalog(&mutation_catalog)
+                .register_mutation_capability_catalog(mutation_catalog)
                 .expect("automatic mutation catalogue should register");
         }
         let mut targets = GraphqlExecutionTargetRegistry::new();
@@ -7746,6 +7728,7 @@ mod tests {
             generated_target_policy,
             automatic_mutation_id,
             automatic_mutation_fingerprint,
+            mutation_catalog,
         }
     }
 
@@ -8089,6 +8072,76 @@ mod tests {
                     requested.approval_id(),
                     requested.tool_call_id(),
                     automatic_mutation_route()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_approval_required_generated_mutation_executes_once_after_approval() {
+        let fixture = fixture_with_optional_provider_and_automatic_static_with_start(
+            MockProvider::new(Vec::new()),
+            Arc::new(AllowAccess),
+            Some(AiMutationExecutionPolicy::ApprovalRequired),
+            None,
+            false,
+            true,
+        )
+        .await;
+        let result =
+            commit_broker_provider_budget(&fixture, automatic_mutation_result(&fixture)).await;
+        let (service, approvals) = consequential_test_service(&fixture);
+        let requested = service
+            .request_approval(
+                &fixture.lease,
+                &result,
+                automatic_mutation_context(&fixture),
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .expect("direct approval request");
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        approvals
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: approval.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: approval.row_version,
+                },
+            )
+            .await
+            .expect("approve");
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        let outcome = service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                automatic_mutation_route(),
+            )
+            .await
+            .expect("approved execution");
+        assert!(
+            outcome
+                .persisted()
+                .is_some_and(|call| call.state() == AiApplicationToolCallState::Completed),
+            "approved generated mutation did not complete: {outcome:?}"
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        assert!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    automatic_mutation_route(),
                 )
                 .await
                 .is_err()

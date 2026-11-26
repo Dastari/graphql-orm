@@ -18,6 +18,38 @@ In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
 fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.228.0 redacts validation messages for generated transient mutation
+arguments. [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
+
+Version 0.227.0 uses Unicode string binds for SQL Server filters, including
+VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
+under legacy `SQL_` collations. Windows-collation VARCHAR indexes can seek
+with Unicode binds. See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
+if you relied on the 0.215.0 seek. Opt-in integer widths and unsigned
+range validation remain.
+
+Version 0.225.0 preserves opaque partial-index predicates in SQLite and
+PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+Version 0.223.0 lets SQL Server seek on BIN2 Unicode key columns when using
+generated exact string filters (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+Version 0.222.0 lets a generated upsert bind a private conflict key from the
+verified request, carry a typed transient input for its transform and hooks,
+and acknowledge a retry without writing.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version 0.220.0 adds an opt-in PostgreSQL journal key encoding shared with
 full backups. Call `Database::enable_canonical_change_journal_keys` as the
 schema owner and start a fresh incremental chain. The legacy encoding remains
@@ -836,6 +868,10 @@ Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).
 
+Generated keyset reads can order by sortable portable Decimal fields and
+resume with exact values. See
+[Decimal keyset ordering](../../docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering).
+
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current
 field authorization are described in the
@@ -1157,6 +1193,8 @@ README remains project-neutral.
 - **Generated operations:** `GraphQLOperations` emits potential root fields;
   `schema_roots!` chooses which generated mutations are exposed and creates the
   schema builders plus discovery catalog.
+- **Nested create:** opt a collection relation and its child entity into
+  [atomic typed child creation](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
 - **Authorization:** generated resolver authentication is `required`,
   `optional`, or `none`; row, field, repository, and database policy remain
   separate authoritative checks.

@@ -7,14 +7,17 @@ fn brokered_mutation_delivery(
     fixture: &Fixture,
     rules: &AiResolvedRuleSet,
 ) -> AiCapabilityDeliveryTurn {
-    let (semantics, mutation_catalog) = automatic_mutation_catalog();
+    let (semantics, mutation_catalog) = fixture
+        .mutation_catalog
+        .as_ref()
+        .expect("mutation catalogue");
     let index = Arc::new(
         AiCapabilityIndex::compile(
             GraphqlExecutionTargetId::parse("generated-application").unwrap(),
             mutation_catalog.finished_schema_fingerprint(),
-            &semantics,
+            semantics,
             None,
-            Some(&mutation_catalog),
+            Some(mutation_catalog),
             None,
             [],
             "target-policy-v1",

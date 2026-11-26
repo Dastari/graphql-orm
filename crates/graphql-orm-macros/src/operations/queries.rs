@@ -130,7 +130,7 @@ pub(super) fn keyset(
         field.meta.graphql_readable()
             && !field.meta.graphql_skip
             && field.meta.transform_read.is_none()
-            && runtime_keyset_value(&field.field_type).is_some()
+            && runtime_keyset_value(&field.field_type, &field.meta).is_some()
     });
     let keyset_generated = if let Some(parts) = keyset_parts {
         let mut runtime_fields = Vec::new();
@@ -155,7 +155,7 @@ pub(super) fn keyset(
             {
                 continue;
             }
-            let Some(value_tokens) = runtime_keyset_value(&field.ty) else {
+            let Some(value_tokens) = runtime_keyset_value(&field.ty, &meta) else {
                 continue;
             };
             let rust_name = ident.to_string();

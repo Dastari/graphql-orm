@@ -371,6 +371,165 @@ impl<'a> AccessContext<'a> {
     }
 }
 
+/// The authority of the GraphQL request whose generated mutation is running a
+/// mutation hook, presented to entity and row policies for that hook's nested
+/// writes and reads.
+///
+/// The ORM creates one only when the host opted in with
+/// [`DatabaseBuilder::propagate_request_authority_to_hooks`](crate::db::DatabaseBuilder::propagate_request_authority_to_hooks),
+/// when a generated GraphQL mutation whose request is admitted to write the
+/// mutation's entity invokes the mutation hook. It is presented only on the
+/// entity and row checks of operations that hook makes through its
+/// [`MutationContext`](crate::graphql::orm::MutationContext), and it ends
+/// when the hook invocation ends, including on an error or a dropped future:
+/// every read checks that.
+///
+/// It is a typed copy of the request's identity, not the request: it holds no
+/// GraphQL `Context` and cannot be cloned or constructed by host code. It
+/// belongs to the transaction: no [`Database`](crate::db::Database) handle
+/// carries it, so it is never presented by a repository call, another
+/// transaction, a spawned task, a post-commit action or a later request.
+///
+/// It grants nothing by itself. A policy that does not read it decides as it
+/// did before, and a policy that honours it applies the same checks it
+/// applies to the request's own operations.
+///
+/// Revocation applies to this marker and its accessors: after the hook
+/// invocation ends they return nothing and `Debug` prints no identity. A
+/// policy callback that clones the [`AuthSubject`] or the accepted agql-auth
+/// identity into state of its own keeps identity data only. The ORM never
+/// reads authority from such a copy, so it cannot attach to a write, and a
+/// host must not treat it as live authority either: decide on what the
+/// accessors return at the time of each decision.
+pub struct HookRequestAuthority {
+    subject: Option<AuthSubject>,
+    #[cfg(feature = "auth-agql")]
+    agql_accepted: Option<crate::graphql::auth_agql::AgqlAcceptedRequest>,
+    live: std::sync::atomic::AtomicBool,
+}
+
+impl fmt::Debug for HookRequestAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The identity is printed only while the hook invocation is running.
+        let live = self.is_live();
+        let mut debug = f.debug_struct("HookRequestAuthority");
+        if live {
+            debug.field("subject", &self.subject);
+        } else {
+            debug.field("subject", &"[revoked]");
+        }
+        debug.field("live", &live).finish_non_exhaustive()
+    }
+}
+
+impl HookRequestAuthority {
+    /// Copy the identity a generated mutation's request presents.
+    pub(crate) fn capture(ctx: &async_graphql::Context<'_>) -> Self {
+        Self {
+            subject: ctx.auth_subject_opt(),
+            // A request whose accepted identity is absent or incoherent
+            // presents none, so the bridge refuses the nested write.
+            #[cfg(feature = "auth-agql")]
+            agql_accepted: crate::graphql::auth_agql::AgqlAcceptedRequest::from_context(ctx)
+                .ok()
+                .cloned(),
+            live: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// End the hook invocation this authority belongs to.
+    pub(crate) fn revoke(&self) {
+        self.live.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The originating request's subject. `None` for a request that
+    /// presented no [`AuthSubject`], and once the hook invocation has ended:
+    /// liveness is checked on every call, so a reference kept across an
+    /// `await` yields nothing after revocation.
+    pub fn subject(&self) -> Option<&AuthSubject> {
+        self.subject.as_ref().filter(|_| self.is_live())
+    }
+
+    /// The originating request's accepted agql-auth identity, when the
+    /// request carried one that passed
+    /// [`AgqlAcceptedRequest::from_context`](crate::graphql::auth_agql::AgqlAcceptedRequest::from_context).
+    /// It was accepted when the hook was invoked; current authority must
+    /// still be revalidated for every decision made on it. `None` once the
+    /// hook invocation has ended.
+    #[cfg(feature = "auth-agql")]
+    pub fn agql_accepted_request(&self) -> Option<&crate::graphql::auth_agql::AgqlAcceptedRequest> {
+        self.agql_accepted.as_ref().filter(|_| self.is_live())
+    }
+}
+
+/// The explicit authority a policy call is made under, besides the GraphQL
+/// request context the callback also receives.
+///
+/// Every entity, row and repository field policy callback the ORM makes goes
+/// through the `*_with_authority` trait method and passes this value. The
+/// default implementations ignore it and call the method without it, so an
+/// existing policy decides exactly as before.
+///
+/// [`Self::is_none`] with `ctx = None` is a call that presents no authority at
+/// all: a plain repository helper, transaction or unlabelled hook write. It is
+/// never system authority, and a policy can refuse it while admitting a named
+/// [`SystemAccess`] or a hook's [`HookRequestAuthority`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PolicyAuthority<'a> {
+    system: Option<&'a SystemAccess>,
+    hook_request: Option<&'a HookRequestAuthority>,
+}
+
+impl<'a> PolicyAuthority<'a> {
+    /// No explicit authority.
+    pub const fn none() -> Self {
+        Self {
+            system: None,
+            hook_request: None,
+        }
+    }
+
+    pub(crate) fn new(
+        system: Option<&'a SystemAccess>,
+        hook_request: Option<&'a HookRequestAuthority>,
+    ) -> Self {
+        Self {
+            system,
+            hook_request,
+        }
+    }
+
+    /// The named system access of the handle or scope the call runs on; the
+    /// same value as [`Database::system_access`](crate::db::Database::system_access)
+    /// on the handle the callback receives.
+    pub fn system(self) -> Option<&'a SystemAccess> {
+        self.system
+    }
+
+    /// The originating request of the mutation hook making this call, when
+    /// the host opted in to propagating it. Presented to entity and row
+    /// decisions only; always `None` for a repository field decision and
+    /// inside a
+    /// [`MutationContext::with_system_access`](crate::graphql::orm::MutationContext::with_system_access)
+    /// scope, whose named access replaces it.
+    ///
+    /// Liveness is checked on every call: once the hook invocation has ended
+    /// this returns `None`, also for a value obtained before it ended.
+    pub fn hook_request(self) -> Option<&'a HookRequestAuthority> {
+        self.hook_request.filter(|request| request.is_live())
+    }
+
+    /// Whether the call presents neither a named system access nor a live
+    /// hook's originating request.
+    pub fn is_none(self) -> bool {
+        self.system.is_none() && self.hook_request().is_none()
+    }
+}
+
 /// Authentication helpers for generated resolvers and policy hooks.
 pub trait AuthExt {
     /// Deprecated compatibility alias for [`AuthExt::auth_user_id`].
@@ -755,5 +914,95 @@ mod tests {
             render_scope_template("record.}.read", &[("id", "record-1")]),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod hook_request_authority_tests {
+    use super::*;
+
+    fn authority() -> HookRequestAuthority {
+        HookRequestAuthority {
+            subject: Some(AuthSubject::new("user-1")),
+            #[cfg(feature = "auth-agql")]
+            agql_accepted: None,
+            live: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// A value obtained before revocation yields nothing afterwards: every
+    /// read checks liveness, so a callback that suspends across the end of
+    /// the hook invocation cannot keep using the authority.
+    #[test]
+    fn revocation_is_checked_at_every_use() {
+        let request = authority();
+        let presented = PolicyAuthority::new(None, Some(&request));
+        let held = presented.hook_request().expect("live");
+        assert_eq!(
+            held.subject().map(|subject| subject.id.as_str()),
+            Some("user-1")
+        );
+        assert!(!presented.is_none());
+
+        request.revoke();
+        // The copy made before revocation, and the reference taken from it.
+        assert!(presented.hook_request().is_none());
+        assert!(presented.is_none());
+        assert!(held.subject().is_none());
+        // A system access is unaffected by a hook's revocation.
+        let system = SystemAccess::new("worker");
+        let both = PolicyAuthority::new(Some(&system), Some(&request));
+        assert!(both.hook_request().is_none());
+        assert_eq!(
+            both.system().map(|access| access.name.as_str()),
+            Some("worker")
+        );
+    }
+
+    /// `Debug` prints the subject only while the hook invocation is running.
+    #[test]
+    fn debug_prints_no_identity_after_revocation() {
+        let request = authority();
+        assert!(format!("{request:?}").contains("user-1"));
+        request.revoke();
+        let printed = format!("{request:?}");
+        assert!(!printed.contains("user-1"), "{printed}");
+        assert!(printed.contains("[revoked]"), "{printed}");
+    }
+
+    /// A previously live accepted agql-auth identity yields nothing through
+    /// the accessors once the hook invocation has ended.
+    #[cfg(feature = "auth-agql")]
+    #[test]
+    fn an_accepted_agql_identity_is_not_readable_after_revocation() {
+        use crate::graphql::auth_agql::AgqlAcceptedRequest;
+        let principal = agql_auth::AuthPrincipal::User(agql_auth::AuthUser {
+            user_id: "user-1".into(),
+            session_id: uuid::Uuid::from_u128(1),
+            roles: Vec::new(),
+            scopes: vec!["shop.write".into()],
+            session: Default::default(),
+            token_claims: Default::default(),
+        });
+        let accepted = AgqlAcceptedRequest::new(principal);
+        let request = HookRequestAuthority {
+            subject: Some(accepted.subject().clone()),
+            agql_accepted: Some(accepted.clone()),
+            live: std::sync::atomic::AtomicBool::new(true),
+        };
+        let presented = PolicyAuthority::new(None, Some(&request));
+        let held = presented.hook_request().expect("live");
+        assert_eq!(held.agql_accepted_request(), Some(&accepted));
+
+        request.revoke();
+        assert!(held.agql_accepted_request().is_none());
+        assert!(held.subject().is_none());
+        assert!(
+            presented
+                .hook_request()
+                .and_then(HookRequestAuthority::agql_accepted_request)
+                .is_none()
+        );
+        assert!(!format!("{request:?}").contains("user-1"));
     }
 }

@@ -1,0 +1,5 @@
+error: upsert_bound_key field `machine_key` maps a column that generated writes maintain themselves (created_at, updated_at or a version column): the implicit writer would overwrite the bound key
+  --> tests/ui/principal_upserts/bound_timestamp_alias.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

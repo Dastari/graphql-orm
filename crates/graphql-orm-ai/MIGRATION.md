@@ -186,7 +186,11 @@ hosts.
 4. **Opt in (optional).** Call
    `AiCapabilityBrokerSession::with_brokered_mutations` on the session of a
    classified native supervised turn. Its hierarchical rules decide which
-   mutations are reachable: a mutation's own capability fingerprint must
+   mutations are reachable. Build the broker's index in process from the
+   mutation catalogue compiled against the finished SDL. The compiler
+   refuses classified mutations that accept `@transientInput`, and a
+   deserialized index cannot provide that check for brokered mutations.
+   A mutation's own capability fingerprint must
    pass at its reviewed classification (one-shot supervised write for
    approval-required, approval-free autonomous write for automatic), so
    rules that list only the broker fingerprints admit none. The rules bind
@@ -323,6 +327,62 @@ before.
 Client-deferred discovery is unchanged: it keeps `version: 2`,
 `indexFingerprint` and `candidateFingerprint` under its version 2 contract.
 No GraphQL SDL, AI schema-module or data migration is needed.
+
+## 0.166.0 to 0.167.0 approved generated mutations
+
+**No action** for hosts using `OrmAiConsequentialToolCallService`. Existing
+pending and approved-but-unconsumed approvals already store the canonical
+plan hash and can proceed in place if they still pass the normal expiry,
+fencing, and authorization checks. No schema or data migration is needed.
+Runs already in `RecoveryRequired` remain closed for operator reconciliation.
+Their consumed approvals cannot be replayed.
+
+**Action needed** for hosts that construct their own `AiApprovalBinding` for
+`AiRuntime::execute_approved_prepared_mutation`. Set `argument_hash` to
+`prepared.argument_hash()`. A custom approval that used a digest of the
+compiled variables needs a fresh binding and approval before execution.
+
+The argument hash is the lowercase hex SHA-256 of the entire closed provider
+plan as compact `serde_json`, with object keys sorted recursively and array
+order preserved. Both approval and execution use that digest. Execution
+checks the protected plan digest before recompiling the GraphQL document and
+variables. The one-shot approval hashes the serialized `AiApprovalBinding`
+with resource preconditions sorted. That envelope includes this digest, the
+generated capability fingerprint, the exact compiled operation contract, the
+tool call, session, scope, principal reference fingerprint, delegated actor
+and grant reference, policy version, authorization state, and preview hash.
+The principal fingerprint is SHA-256 of the serialized `PrincipalReference`.
+
+## 0.165.0 to 0.166.0
+
+**No action** for the AI schema or stored data. The legacy approval-index
+upgrade still admits the original plain index and refuses a filtered index.
+If you prepared a migration plan against an existing SQLite or PostgreSQL
+database, follow the [ORM migration guidance](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
+and replan against the live database.
+
+## 0.164.0 to 0.165.0: authority-aware host field decisions
+
+**No action** unless the host `FieldPolicy` overrides
+`can_read_repository_field_with_authority` or
+`can_write_repository_field_with_authority` (new in ORM 0.224.0). Those
+overrides now also decide the host-owned fields this crate reads and writes
+through its internal handle: fields of host entities, and any field that
+declares a policy key. A policy that refuses calls without an authority there
+must admit the access this crate presents, or keep allowing those fields.
+The crate's own key-less fields are still answered by the crate.
+
+## 0.163.0 to 0.164.0
+
+The ORM now supplies the seek predicate for SQL Server run-state filters
+(#867). The SQL text changes for all opted-in exact comparisons. Review plan
+guides and Query Store forced plans for those queries. **Action needed** if a
+live column has drifted. Check the live column types, especially for
+`VARCHAR` columns declared as `NVARCHAR`, and review the affected read
+policies. See the [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks).
+This update requires no additional schema or data migration. Hosts still
+running a pre-0.158.0 schema should follow the upgrade below to install the
+run candidate indexes.
 
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 

@@ -1,0 +1,5 @@
+error: nested_create requires transactional mutation hooks and deferred actions instead of notify_with
+ --> tests/ui/nested_create_notify.rs:5:8
+  |
+5 | struct Line {
+  |        ^^^^

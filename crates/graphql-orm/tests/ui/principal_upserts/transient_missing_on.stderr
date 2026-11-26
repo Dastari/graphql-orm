@@ -1,0 +1,5 @@
+error: transient_input requires on = "upsert": name the generated mutation that carries it
+  --> tests/ui/principal_upserts/transient_missing_on.rs:25:5
+   |
+25 |     transient_input(type = "Proof"),
+   |     ^^^^^^^^^^^^^^^

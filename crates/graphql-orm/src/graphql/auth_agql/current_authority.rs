@@ -247,6 +247,27 @@ pub trait AgqlBindingAuthorizer: Send + Sync {
         kind: EntityAccessKind,
         surface: EntityAccessSurface,
     ) -> BoxFuture<'a, AuthResult<bool>>;
+
+    /// Authorizes the accepted principal for a nested operation that a
+    /// mutation hook makes on behalf of its originating request.
+    ///
+    /// Asked only when the host propagates request authority to hooks
+    /// ([`DatabaseBuilder::propagate_request_authority_to_hooks`](crate::db::DatabaseBuilder::propagate_request_authority_to_hooks)),
+    /// in place of [`Self::authorize`]: there is no GraphQL `Context` for the
+    /// nested operation, so evidence read from one is unavailable. The default
+    /// denies. Implement it only for operations the credential's bindings
+    /// allow a hook to perform for this principal; `surface` is the
+    /// repository surface and `entity_name` is the entity the hook touches.
+    fn authorize_hook_operation<'a>(
+        &'a self,
+        _principal: &'a AuthPrincipal,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _kind: EntityAccessKind,
+        _surface: EntityAccessSurface,
+    ) -> BoxFuture<'a, AuthResult<bool>> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// Mandatory online dependencies shared by sensitive policies and custom guards.
@@ -326,6 +347,36 @@ impl AgqlCurrentAuthorityEnforcement {
         Ok(deadline)
     }
 
+    /// The immediate checks for a mutation hook's nested operation, made on
+    /// the accepted identity of its originating request. Same order as
+    /// [`Self::check`]: status and authority, bindings, then status and
+    /// authority again.
+    async fn check_hook_operation(
+        &self,
+        accepted: &AgqlAcceptedRequest,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> async_graphql::Result<i128> {
+        if accepted.refused_purpose_bound() {
+            return Err(forbidden());
+        }
+        let deadline = self.revalidate(accepted).await?;
+        let authorized = self
+            .bindings
+            .authorize_hook_operation(&accepted.principal, entity_name, policy_key, kind, surface)
+            .await
+            .map_err(|error| error.extend())?;
+        self.check_deadline(deadline)?;
+        if !authorized {
+            return Err(forbidden());
+        }
+        let deadline = deadline.min(self.revalidate(accepted).await?);
+        self.check_deadline(deadline)?;
+        Ok(deadline)
+    }
+
     pub(super) async fn revalidate(
         &self,
         accepted: &AgqlAcceptedRequest,
@@ -388,7 +439,9 @@ impl CurrentPrincipalResolver for ExpiryObservingResolver<'_> {
 }
 
 /// Wraps every invocation of an inner business entity policy in immediate checks.
-/// ctx=None repository convenience calls deny. Custom/raw access remains a trusted
+/// ctx=None repository convenience calls deny, except a mutation hook's nested
+/// operation presenting its originating request when the host opted in; see
+/// [`EntityPolicy::can_access_entity_with_authority`]. Custom/raw access remains a trusted
 /// host boundary and must use the explicit guard/enforcement plus business policy.
 pub struct AgqlCurrentAuthorityPolicy<P> {
     enforcement: Arc<AgqlCurrentAuthorityEnforcement>,
@@ -428,6 +481,69 @@ impl<B: OrmBackend, P: EntityPolicy<B>> EntityPolicy<B> for AgqlCurrentAuthority
                 return Ok(false);
             }
             let accepted = AgqlAcceptedRequest::from_context(ctx)?;
+            let deadline = deadline.min(self.enforcement.revalidate(accepted).await?);
+            self.enforcement.check_deadline(deadline)?;
+            Ok(true)
+        })
+    }
+
+    /// A GraphQL request is checked as in [`Self::can_access_entity`], and
+    /// the business policy also receives `authority`. Without a request, the
+    /// only authority admitted is a mutation hook's originating request that
+    /// carried an accepted identity: it gets the same immediate checks, with
+    /// [`AgqlBindingAuthorizer::authorize_hook_operation`] deciding the
+    /// bindings. Every other `ctx = None` call is refused as before; a named
+    /// system access is not an accepted principal.
+    fn can_access_entity_with_authority<'a>(
+        &'a self,
+        authority: crate::graphql::auth::PolicyAuthority<'a>,
+        ctx: Option<&'a Context<'_>>,
+        db: &'a Database<B>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            let accepted = match ctx {
+                Some(ctx) => AgqlAcceptedRequest::from_context(ctx)?,
+                None => authority
+                    .hook_request()
+                    .and_then(|request| request.agql_accepted_request())
+                    .ok_or_else(|| OrmPublicError::unauthenticated().into_graphql_error())?,
+            };
+            let deadline = match ctx {
+                Some(ctx) => {
+                    self.enforcement
+                        .check(ctx, entity_name, policy_key, kind, surface)
+                        .await?
+                }
+                None => {
+                    self.enforcement
+                        .check_hook_operation(accepted, entity_name, policy_key, kind, surface)
+                        .await?
+                }
+            };
+            let allowed = self
+                .business
+                .can_access_entity_with_authority(
+                    authority,
+                    ctx,
+                    db,
+                    entity_name,
+                    policy_key,
+                    kind,
+                    surface,
+                )
+                .await?;
+            self.enforcement.check_deadline(deadline)?;
+            if !allowed {
+                return Ok(false);
+            }
+            let accepted = match ctx {
+                Some(ctx) => AgqlAcceptedRequest::from_context(ctx)?,
+                None => accepted,
+            };
             let deadline = deadline.min(self.enforcement.revalidate(accepted).await?);
             self.enforcement.check_deadline(deadline)?;
             Ok(true)

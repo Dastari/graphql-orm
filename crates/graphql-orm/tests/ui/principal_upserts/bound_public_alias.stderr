@@ -1,0 +1,5 @@
+error: upsert_bound_key field `machine_key` shares its column with field `machine_alias`: no second field may write a principal-bound column
+  --> tests/ui/principal_upserts/bound_public_alias.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: upsert_bound_key requires binding = "<path to a PrincipalKeyBinding type>"
+  --> tests/ui/principal_upserts/bound_missing_binding.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key"),
+   |     ^^^^^^^^^^^^^^^^

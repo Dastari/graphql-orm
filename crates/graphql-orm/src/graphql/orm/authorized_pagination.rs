@@ -4120,42 +4120,66 @@ where
         before: bool,
         inclusive: bool,
     ) -> async_graphql::Result<Self> {
-        let parameter_type = |column: &str| {
-            if B::DIALECT == DatabaseBackend::Mssql {
-                mssql_parameter_type::<T>(column)
-            } else {
-                None
-            }
-        };
-        let render = if before {
-            super::query::render_keyset_before_with_types
-        } else {
-            super::query::render_keyset_after_with_types
-        };
-        let (mut clause, mut binds) = render(
+        let invalid_cursor =
+            || OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error();
+        if order.len() != values.len() {
+            return Err(invalid_cursor());
+        }
+        let cursor = order
+            .iter()
+            .zip(values)
+            .map(|(column, value)| {
+                let dialect = B::DIALECT;
+                let decimal_column = T::columns().iter().find_map(|field| {
+                    let definition = field.decimal.filter(|def| !def.is_mssql_money())?;
+                    (dialect.quote_identifier_path(field.name)
+                        == dialect.quote_identifier_path(column.column))
+                    .then_some((definition, field.nullable))
+                });
+                if let Some((definition, nullable)) = decimal_column {
+                    // Decimal cursor values are canonical text. The column's
+                    // definition supplies the scale and selects the exact bind.
+                    return match value {
+                        KeysetValue::Null if nullable => Ok(None),
+                        KeysetValue::String(text) => parse_runtime_decimal(definition, text)
+                            .ok()
+                            .filter(|value| canonical_runtime_decimal(*value) == *text)
+                            .map(|value| Some(SqlValue::Decimal(value)))
+                            .ok_or_else(invalid_cursor),
+                        _ => Err(invalid_cursor()),
+                    };
+                }
+                if matches!(value, KeysetValue::Null) {
+                    return Ok(None);
+                }
+                let mut value = super::keyset_sql_value(value).ok_or_else(invalid_cursor)?;
+                if dialect == DatabaseBackend::Mssql {
+                    value = value
+                        .with_mssql_type(mssql_parameter_type::<T>(column.column).unwrap_or(""));
+                }
+                Ok(Some(value))
+            })
+            .collect::<async_graphql::Result<Vec<_>>>()?;
+        let (mut clause, mut binds) = super::query::render_keyset_bound(
             B::DIALECT,
             order,
-            values,
+            &cursor,
             self.values.len() + 1,
-            parameter_type,
+            before,
         )
         .map_err(|e| e.into_graphql_error())?;
         if inclusive {
             let mut equal = Vec::new();
-            for (column, value) in order.iter().zip(values) {
-                if matches!(value, KeysetValue::Null) {
-                    equal.push(format!("{} IS NULL", column.column));
-                } else {
+            for (column, value) in order.iter().zip(cursor) {
+                if let Some(value) = value {
                     equal.push(format!(
                         "{} = {}",
                         column.column,
                         B::DIALECT.placeholder(self.values.len() + binds.len() + 1)
                     ));
-                    binds.push(
-                        super::keyset_sql_value(value)
-                            .ok_or_else(input_error)?
-                            .with_mssql_type(parameter_type(column.column).unwrap_or("")),
-                    );
+                    binds.push(value);
+                } else {
+                    equal.push(format!("{} IS NULL", column.column));
                 }
             }
             clause = format!("({clause}) OR ({})", equal.join(" AND "));
@@ -4360,16 +4384,16 @@ where
                     .map_err(|e| e.into_graphql_error())
             })
             .transpose()?;
-        let total_count = if page.include_total_count {
-            Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
-        } else {
-            None
-        };
         let mut query = if let Some(values) = &after {
             base.clone()
                 .keyset_bound_with_order(order, values, backward, false)?
         } else {
             base.clone()
+        };
+        let total_count = if page.include_total_count {
+            Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
+        } else {
+            None
         };
         if backward {
             query.order_clauses = order.iter().map(|c| c.reversed().order_sql()).collect();
@@ -4656,7 +4680,7 @@ mod predicate_tests {
                     format!("{row}.[ordinal] = @P2"),
                 ],
                 vec![
-                    SqlValue::mssql_varchar_comparison("item-42".into(), "VARCHAR(32)"),
+                    SqlValue::String("item-42".into()),
                     SqlValue::Int(42).with_mssql_type("SMALLINT"),
                 ],
             )

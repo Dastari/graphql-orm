@@ -361,6 +361,9 @@ conditional-index suite and the SQL Server covering-index regression. The
 SQL Server test checks drift, destructive replacement, unmanaged-table
 preservation, and replanning after the host executes both index definitions.
 
+It also checks that opaque partial-index predicates remain distinct from
+plain indexes on SQLite, test-owned PostgreSQL, and test-owned SQL Server.
+
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order
 regressions (`query_loader_batch`, `order_aggregate_visibility`) on SQLite,

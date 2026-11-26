@@ -742,14 +742,17 @@ fn mixed_broker_delivery_with_mutations(
     fixture: &Fixture,
     definitions: Vec<ModelToolDefinition>,
 ) -> AiCapabilityDeliveryTurn {
-    let (semantics, mutation_catalog) = automatic_mutation_catalog();
+    let (semantics, mutation_catalog) = fixture
+        .mutation_catalog
+        .as_ref()
+        .expect("mutation catalogue");
     let index = Arc::new(
         AiCapabilityIndex::compile(
             GraphqlExecutionTargetId::parse("generated-application").unwrap(),
             mutation_catalog.finished_schema_fingerprint(),
-            &semantics,
+            semantics,
             None,
-            Some(&mutation_catalog),
+            Some(mutation_catalog),
             None,
             [],
             "target-policy-v1",
@@ -942,9 +945,6 @@ async fn assert_retry_does_not_complete(
 }
 
 async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
-    if scenario == CallbackScenario::BrokeredMutationCompleted {
-        BROKERED_GENERATED_MUTATION.with(|cell| cell.set(true));
-    }
     let provider = Arc::new(MixedRetainedProvider {
         scenario,
         ..Default::default()
@@ -954,7 +954,8 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             fixture_with_optional_provider_and_automatic_static_with_start(
                 MockProvider::new(Vec::new()),
                 Arc::new(AllowAccess),
-                true,
+                (scenario == CallbackScenario::BrokeredMutationCompleted)
+                    .then_some(AiMutationExecutionPolicy::Automatic),
                 Some(provider.clone()),
                 true,
                 false,

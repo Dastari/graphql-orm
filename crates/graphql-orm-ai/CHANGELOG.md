@@ -10,7 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - next breaking graphql-orm-ai release
+## Unreleased - 0.169.0 (breaking release)
+
+- The fixed broker admits generated mutations from indexes built in process
+  from a mutation catalogue checked against the finished SDL. A mutation
+  declaring `@transientInput` cannot be offered through the broker.
 
 - **Breaking.** Fixed-broker discover and describe results no longer carry
   the index-set or entry fingerprint, which covered operations host policy
@@ -127,6 +131,39 @@ supersedes: []
   triggers a forced tree kill, and attempted writes retire their request IDs.
   The protocol actor still allowlists lifecycle metadata in thread and turn
   snapshots and user-message echoes. No data migration is needed.
+
+## Unreleased - 0.167.0
+
+- **Fixed.** Approval-required generated mutations now execute after approval.
+  The runtime verifies the canonical provider plan hash already stored in the
+  approval. **No action** for hosts using the built-in approval service; **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`).
+  [Migration](MIGRATION.md#01660-to-01670-approved-generated-mutations)
+
+## Unreleased - 0.166.0
+
+- Updated the legacy approval-index upgrade tests for ORM 0.225.0. On SQLite
+  and PostgreSQL, a filter on that index changes the source schema hash and
+  prevents automatic admission of the replacement. [Migration](MIGRATION.md#01650-to-01660)
+
+## Unreleased - 0.165.0
+
+Requires ORM 0.224.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change. See the
+[migration guide](MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+
+- **Fixed (#291):** the crate's internal database handle forwards
+  repository field decisions for fields the host owns to the host policy's
+  `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority`. A host refusal written in
+  those methods is no longer skipped on that handle. Decisions for the
+  crate's own key-less fields are unchanged.
+
+## Unreleased - 0.164.0
+
+- SQL Server run candidate reads use the ORM's generated exact string filters
+  to seek on the run-state indexes (#867). SQL text changes for all opted-in
+  exact string comparisons. See the [migration guidance](MIGRATION.md#01630-to-01640)
+  for plan guides, Query Store forced plans, and live column drift.
 
 ## Unreleased - 0.163.0
 

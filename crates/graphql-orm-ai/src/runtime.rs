@@ -249,8 +249,6 @@ pub struct AiPreparedGraphqlMutation {
     execution_policy: AiMutationExecutionPolicy,
     capability_fingerprint: String,
     plan_fingerprint: String,
-    /// Canonical hash of the exact provider plan this mutation was prepared
-    /// from: the argument hash a one-shot approval binds.
     argument_hash: String,
     descriptor: AiToolDescriptor,
     disclosure_schema: crate::AiDisclosureSchema,
@@ -273,13 +271,13 @@ impl AiPreparedGraphqlMutation {
         &self.plan_fingerprint
     }
 
-    /// Returns the canonical hash of the exact provider plan this mutation
-    /// was prepared from.
+    /// Returns the canonical SHA-256 digest of the complete provider plan that
+    /// produced this mutation, as defined by [`crate::canonical_json_hash`].
     ///
-    /// A one-shot approval of a generated mutation binds this hash, the hash
-    /// of the plan the preview was built from. The compiled variables are
-    /// derived from that plan by the authoritative compiler again at
-    /// execution, so they are not bound separately.
+    /// Use this digest as [`AiApprovalBinding::argument_hash`]. The approval
+    /// also binds the exact compiled operation contract, capability and
+    /// principal. The runtime derives the variables from the plan during
+    /// preparation and exposes the compiled request through a shared reference.
     pub fn argument_hash(&self) -> &str {
         &self.argument_hash
     }
@@ -859,7 +857,7 @@ impl AiRuntime {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
         }
-        let argument_hash = crate::tools::canonical_json_digest(&plan);
+        let argument_hash = crate::canonical_json_hash(&plan);
         let compiled = self.tool_catalog.compile_mutation_capability(
             capability_id,
             capability_fingerprint,
@@ -1997,10 +1995,8 @@ fn approved_prepared_mutation_matches(
     approval: &ConsumedAiApproval,
     binding: &AiApprovalBinding,
 ) -> bool {
-    // The approval binds the hash of the provider plan, not of the compiled
-    // variables: the preview and the durable call row record that plan.
     approved_request_binding_matches(principal_reference, &prepared.request, binding)
-        && prepared.argument_hash == binding.argument_hash
+        && prepared.argument_hash() == binding.argument_hash
         && prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
         && approval.binding_hash() == binding.stable_hash()
         && !approval.approval_id().0.is_nil()
@@ -2028,7 +2024,6 @@ fn approved_static_request_matches(
         && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
 }
 
-/// The call, scope, delegation and principal an approval binds.
 fn approved_request_binding_matches(
     principal_reference: &PrincipalReference,
     request: &ToolGraphqlRequest,
@@ -2138,7 +2133,7 @@ mod mutation_binding_tests {
             capability_fingerprint: CAPABILITY_FINGERPRINT.to_owned(),
             plan_fingerprint: "3333333333333333333333333333333333333333333333333333333333333333"
                 .to_owned(),
-            argument_hash: crate::tools::canonical_json_digest(&json!({"plan": "test"})),
+            argument_hash: crate::canonical_json_hash(&json!({"plan": "test"})),
             descriptor,
             disclosure_schema: AiDisclosureSchema::new(
                 "test-v1",
@@ -2226,7 +2221,7 @@ mod mutation_binding_tests {
     }
 
     #[test]
-    fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
+    fn dynamic_approval_binds_exact_plan_capability_operation_and_principal() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
         let reference: PrincipalReference = serde_json::from_value(json!({
@@ -2235,7 +2230,7 @@ mod mutation_binding_tests {
         .unwrap();
         let mut binding = binding(compiled_operation);
         binding.tool_call_id = prepared.request.invocation.tool_call_id;
-        binding.argument_hash = prepared.argument_hash.clone();
+        binding.argument_hash = prepared.argument_hash().to_owned();
         binding.principal_reference_fingerprint =
             AiApprovalBinding::principal_fingerprint(&reference);
         let approval = consumed(&binding);
@@ -2249,8 +2244,7 @@ mod mutation_binding_tests {
             let mut principal = reference.clone();
             match change {
                 0 => {
-                    changed.argument_hash =
-                        crate::tools::canonical_json_digest(&json!({"impact": "different"}));
+                    changed.argument_hash = crate::canonical_json_hash(&json!({"plan": "changed"}))
                 }
                 1 => changed.request.invocation.tool_call_id = AiToolCallId::new(),
                 2 => changed.request.invocation.scope = AiScope::new("tenant", "other"),

@@ -1,0 +1,11 @@
+error: nested_create requires an unconditional collection relation
+  --> tests/ui/nested_create_conditional.rs:10:5
+   |
+10 | /     #[graphql_orm(read = false)]
+11 | |     #[relation(
+12 | |         target = "Line",
+13 | |         from = "id",
+...  |
+19 | |     )]
+20 | |     lines: Vec<Line>,
+   | |____________________^

@@ -29,6 +29,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) repository_mutations: bool,
     pub(crate) aggregate: bool,
     pub(crate) dependent_deletes: bool,
+    pub(crate) nested_create_keys: Option<(Vec<String>, proc_macro2::Span)>,
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
@@ -77,6 +78,7 @@ pub(crate) struct EntityMetadata {
     /// `changed_started = true`: the `Changed` root accepts `Started: true`
     /// and then sends one started frame before any event (#341).
     pub(crate) changed_started: bool,
+    pub(crate) changed_replay: Option<proc_macro2::Span>,
     /// `aggregate_source = true`: the aggregate root returns
     /// `<Entity>AggregateResultRow`, whose `SourceEntity` field's type names
     /// the entity (#372).
@@ -87,7 +89,49 @@ pub(crate) struct EntityMetadata {
     /// `update_assurance(select = "...", levels = "...")`: the generated
     /// update selects its assurance level per request (#851).
     pub(crate) update_assurance: Option<UpdateAssuranceMetadata>,
+    /// `upsert_bound_key(field = "...", binding = "...")`: conflict-key
+    /// columns the generated GraphQL upsert binds from the request principal
+    /// (#908).
+    pub(crate) upsert_bound_keys: Vec<UpsertBoundKeyMetadata>,
+    /// `transient_input(type = "...", on = "upsert")`: a typed, non-persisted
+    /// argument the mutation exposes to its transform and hooks (#908, #221).
+    pub(crate) transient_input: Option<TransientInputMetadata>,
+    /// `upsert_acknowledge = true`: the generated GraphQL upsert's `Before`
+    /// hook may acknowledge a request without writing (#908).
+    pub(crate) upsert_acknowledge: Option<proc_macro2::Span>,
 }
+
+/// A declared principal-bound upsert conflict key.
+#[derive(Clone)]
+pub(crate) struct UpsertBoundKeyMetadata {
+    /// Rust field name or column of the conflict-key member.
+    pub(crate) field: String,
+    /// Type implementing `PrincipalKeyBinding`.
+    pub(crate) binding: syn::Type,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// A declared typed transient mutation input.
+#[derive(Clone)]
+pub(crate) struct TransientInputMetadata {
+    /// The argument's `async_graphql::InputType`.
+    pub(crate) ty: syn::Type,
+    /// The argument name before the schema's argument case is applied.
+    pub(crate) name: String,
+    pub(crate) required: bool,
+    /// Largest accepted request value, in bytes.
+    pub(crate) max_bytes: usize,
+    /// Largest accepted request value, in values.
+    pub(crate) max_nodes: usize,
+    pub(crate) span: proc_macro2::Span,
+}
+
+/// Default and ceiling of a transient input's `max_bytes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_BYTES_CEILING: usize = 1024 * 1024;
+/// Default and ceiling of a transient input's `max_nodes`.
+pub(crate) const TRANSIENT_INPUT_DEFAULT_MAX_NODES: usize = 1024;
+pub(crate) const TRANSIENT_INPUT_MAX_NODES_CEILING: usize = 65_536;
 
 /// A declared conditional update-assurance selector.
 #[derive(Clone)]
@@ -295,6 +339,15 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("nested_create_keys") {
+                    if attribute_name != "graphql_entity" || metadata.nested_create_keys.is_some() {
+                        return Err(meta.error("nested_create_keys requires a single declaration on a GraphQL entity"));
+                    }
+                    let names = parse_relation_columns(meta.value()?)?;
+                    if names.is_empty() || names.iter().enumerate().any(|(index, name)| names[..index].contains(name)) {
+                        return Err(meta.error("nested_create_keys requires distinct field names"));
+                    }
+                    metadata.nested_create_keys = Some((names, meta.path.span()));
                 } else if meta.path.is_ident("dependent_deletes") {
                     metadata.dependent_deletes = true;
                 } else if meta.path.is_ident("mutation_error_codes") {
@@ -334,6 +387,11 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.changed_started = lit.value;
+                } else if meta.path.is_ident("changed_replay") {
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    if lit.value {
+                        metadata.changed_replay = Some(lit.span());
+                    }
                 } else if meta.path.is_ident("update_expected_version") {
                     if attribute_name == "repository_entity" {
                         return Err(meta.error("update_expected_version requires a GraphQL entity"));
@@ -397,6 +455,151 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         syn::Error::new(span, "update_assurance requires levels = \"<policy id>,<policy id>\"")
                     })?;
                     metadata.update_assurance = Some(UpdateAssuranceMetadata { select, levels, span });
+                } else if meta.path.is_ident("upsert_bound_key") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("upsert_bound_key requires a GraphQL entity; repository code supplies a private key in its create input"));
+                    }
+                    let span = meta.path.span();
+                    let mut field = None;
+                    let mut binding = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("field") {
+                            if field.is_some() {
+                                return Err(option.error("upsert_bound_key field may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            field = Some(lit.value());
+                        } else if option.path.is_ident("binding") {
+                            if binding.is_some() {
+                                return Err(option.error("upsert_bound_key binding may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            binding = Some(lit.parse::<syn::Type>()?);
+                        } else {
+                            return Err(option.error("unsupported upsert_bound_key option; expected field or binding"));
+                        }
+                        Ok(())
+                    })?;
+                    let field = field.ok_or_else(|| {
+                        syn::Error::new(span, "upsert_bound_key requires field = \"<conflict-key field>\"")
+                    })?;
+                    let binding = binding.ok_or_else(|| {
+                        syn::Error::new(span, "upsert_bound_key requires binding = \"<path to a PrincipalKeyBinding type>\"")
+                    })?;
+                    if metadata.upsert_bound_keys.iter().any(|key| key.field == field) {
+                        return Err(syn::Error::new(span, "upsert_bound_key may bind each conflict-key field only once"));
+                    }
+                    metadata.upsert_bound_keys.push(UpsertBoundKeyMetadata { field, binding, span });
+                } else if meta.path.is_ident("transient_input") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("transient_input requires a GraphQL entity; transaction code calls MutationContext::set_transient_input"));
+                    }
+                    if metadata.transient_input.is_some() {
+                        return Err(meta.error("transient_input may only be declared once per entity"));
+                    }
+                    let span = meta.path.span();
+                    let mut ty = None;
+                    let mut name = None;
+                    let mut on = None;
+                    let mut required = None;
+                    let mut max_bytes = None;
+                    let mut max_nodes = None;
+                    meta.parse_nested_meta(|option| {
+                        if option.path.is_ident("type") {
+                            if ty.is_some() {
+                                return Err(option.error("transient_input type may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            ty = Some(lit.parse::<syn::Type>()?);
+                        } else if option.path.is_ident("name") {
+                            if name.is_some() {
+                                return Err(option.error("transient_input name may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            let value = lit.value();
+                            let mut characters = value.chars();
+                            let valid = characters
+                                .next()
+                                .is_some_and(|first| first.is_ascii_alphabetic())
+                                && characters.all(|character| character.is_ascii_alphanumeric() || character == '_');
+                            if !valid || value.eq_ignore_ascii_case("input") {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "transient_input name must be an ASCII GraphQL argument name other than `input`",
+                                ));
+                            }
+                            name = Some(value);
+                        } else if option.path.is_ident("on") {
+                            if on.is_some() {
+                                return Err(option.error("transient_input on may only be declared once"));
+                            }
+                            let lit: syn::LitStr = option.value()?.parse()?;
+                            if lit.value() != "upsert" {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    "transient_input supports on = \"upsert\" only; other generated mutations do not carry a transient input yet",
+                                ));
+                            }
+                            on = Some(());
+                        } else if option.path.is_ident("required") {
+                            if required.is_some() {
+                                return Err(option.error("transient_input required may only be declared once"));
+                            }
+                            let lit: syn::LitBool = option.value()?.parse()?;
+                            required = Some(lit.value);
+                        } else if option.path.is_ident("max_bytes") || option.path.is_ident("max_nodes") {
+                            let bytes = option.path.is_ident("max_bytes");
+                            let (slot, ceiling) = if bytes {
+                                (&mut max_bytes, TRANSIENT_INPUT_MAX_BYTES_CEILING)
+                            } else {
+                                (&mut max_nodes, TRANSIENT_INPUT_MAX_NODES_CEILING)
+                            };
+                            if slot.is_some() {
+                                return Err(option.error("transient_input size limits may only be declared once each"));
+                            }
+                            let lit: syn::LitInt = option.value()?.parse()?;
+                            let value = lit.base10_parse::<usize>()?;
+                            if value == 0 || value > ceiling {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!(
+                                        "transient_input {} must be between 1 and {ceiling}",
+                                        if bytes { "max_bytes" } else { "max_nodes" }
+                                    ),
+                                ));
+                            }
+                            *slot = Some(value);
+                        } else {
+                            return Err(option.error("unsupported transient_input option; expected type, on, name, required, max_bytes or max_nodes"));
+                        }
+                        Ok(())
+                    })?;
+                    let ty = ty.ok_or_else(|| {
+                        syn::Error::new(span, "transient_input requires type = \"<path to an InputType>\"")
+                    })?;
+                    on.ok_or_else(|| {
+                        syn::Error::new(span, "transient_input requires on = \"upsert\": name the generated mutation that carries it")
+                    })?;
+                    metadata.transient_input = Some(TransientInputMetadata {
+                        ty,
+                        name: name.unwrap_or_else(|| "transient".to_owned()),
+                        required: required.unwrap_or(true),
+                        max_bytes: max_bytes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_BYTES),
+                        max_nodes: max_nodes.unwrap_or(TRANSIENT_INPUT_DEFAULT_MAX_NODES),
+                        span,
+                    });
+                } else if meta.path.is_ident("upsert_acknowledge") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("upsert_acknowledge requires a GraphQL entity"));
+                    }
+                    if metadata.upsert_acknowledge.is_some() {
+                        return Err(meta.error("upsert_acknowledge may only be declared once per entity"));
+                    }
+                    let lit: syn::LitBool = meta.value()?.parse()?;
+                    if !lit.value {
+                        return Err(syn::Error::new(lit.span(), "upsert_acknowledge accepts only true; omit it to keep every upsert a write"));
+                    }
+                    metadata.upsert_acknowledge = Some(meta.path.span());
                 } else if meta.path.is_ident("lifetime") {
                     if metadata.lifetime.is_some() {
                         return Err(meta.error("lifetime may only be declared once per entity"));
@@ -1689,7 +1892,11 @@ fn scalar_output_is_readable(
 
 // Resolve target references as generated SQL does. Metadata column names are
 // physical names; PostgreSQL folds only unquoted SQL references.
-fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
+pub(crate) fn relation_column_identity(
+    backend: BackendKind,
+    name: &str,
+    reference: bool,
+) -> String {
     let rendered = reference.then(|| backend_render_identifier_path(backend, name));
     let name = rendered.as_deref().map_or(name, |rendered| {
         crate::backend::identifier_path_parts(backend, rendered)
@@ -2213,6 +2420,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_from_fields: Option<Vec<String>>,
     pub(crate) relation_to_fields: Option<Vec<String>>,
     pub(crate) relation_multiple: bool,
+    pub(crate) relation_nested_create: bool,
     pub(crate) relation_emit_foreign_key: Option<bool>,
     pub(crate) relation_on_delete: Option<String>,
     pub(crate) relation_propagate_change: Option<String>,
@@ -2412,6 +2620,7 @@ impl Default for FieldMetadata {
             relation_from_fields: None,
             relation_to_fields: None,
             relation_multiple: false,
+            relation_nested_create: false,
             relation_emit_foreign_key: None,
             relation_on_delete: None,
             relation_propagate_change: None,
@@ -3433,6 +3642,11 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                     )
                                 })?,
                             });
+                        } else if nested.path.is_ident("nested_create") {
+                            if meta.relation_nested_create {
+                                return Err(nested.error("duplicate nested_create option"));
+                            }
+                            meta.relation_nested_create = true;
                         } else if nested.path.is_ident("server_only_key") {
                             let span = nested.path.span();
                             let mut from = None;
@@ -3753,7 +3967,7 @@ fn generated_hidden_input_members(
             && !meta.graphql_skip
             && meta.transform_read.is_none()
             && (is_key || (meta.sortable && meta.order))
-            && crate::operations::runtime_keyset_value(&field.ty).is_some()
+            && crate::operations::runtime_keyset_value(&field.ty, &meta).is_some()
         {
             append(
                 "KeysetOrderBy",
@@ -6146,6 +6360,7 @@ fn generate_entity_tokens(
             backup_policy_tokens(field_meta.backup_policy.as_deref(), field.span())?;
         let logical_type = backup_value_kind_tokens(field_type, &field_meta);
         let mut sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
+        let mut mssql_bin2_unicode = false;
         if backend == BackendKind::Mssql
             && field_meta.mssql_type.is_none()
             && sql_type == "NVARCHAR(MAX)"
@@ -6156,6 +6371,7 @@ fn generate_entity_tokens(
             sql_type = MSSQL_INDEXABLE_STRING.to_string();
             if entity_meta.exact_string_filters {
                 sql_type.push_str(" COLLATE Latin1_General_100_BIN2");
+                mssql_bin2_unicode = true;
             }
         }
         let decimal_tokens = field_meta
@@ -6443,6 +6659,7 @@ fn generate_entity_tokens(
                     filter_type,
                     &field_meta,
                     entity_meta.exact_string_filters,
+                    mssql_bin2_unicode,
                 )?;
                 where_input_fields.push(input_field);
                 // Unqualified, or `row.<column>` for the row `_gom_table`
@@ -8532,6 +8749,7 @@ fn generate_filter_field(
     filter_type: &str,
     field_meta: &FieldMetadata,
     exact_string_filters: bool,
+    mssql_bin2_unicode: bool,
 ) -> syn::Result<(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
@@ -8822,7 +9040,13 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::StringFilter>,
             };
-            let render_call = if backend == BackendKind::Mssql && exact_string_filters {
+            let render_call = if mssql_bin2_unicode {
+                quote! {
+                    ::graphql_orm::graphql::orm::__gom_render_bin2_mssql_string_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
+                }
+            } else if backend == BackendKind::Mssql && exact_string_filters {
                 quote! {
                     ::graphql_orm::graphql::orm::__gom_render_exact_mssql_string_filter(
                         f, #backend_expr, #db_col, &mut conditions, &mut values,

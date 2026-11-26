@@ -1,0 +1,5 @@
+error: transient_input max_bytes must be between 1 and 1048576
+  --> tests/ui/principal_upserts/transient_max_bytes_zero.rs:25:64
+   |
+25 |     transient_input(type = "Proof", on = "upsert", max_bytes = 0),
+   |                                                                ^
