@@ -35,15 +35,17 @@ struct SortRecord {
 
 #[test]
 fn runtime_default_order_resolves_qualified_and_delimited_columns() {
-    let schema = RuntimeSchema::from_static_entities(&[SortRecord::metadata()]).unwrap();
+    let entity = SortRecord::metadata();
+    let schema = RuntimeSchema::from_static_entities(&[entity]).unwrap();
+    let table = entity.table_name;
     let collection = &schema.collections[0];
     let expected = [
-        ("sort_records.id", RuntimeOrderDirection::Desc),
-        ("sort_records.line,no", RuntimeOrderDirection::Asc),
-        ("sort_records.order", RuntimeOrderDirection::Asc),
+        ("id", RuntimeOrderDirection::Desc),
+        ("line,no", RuntimeOrderDirection::Asc),
+        ("order", RuntimeOrderDirection::Asc),
     ]
-    .map(|(field, direction)| RuntimeOrderTerm {
-        field: FieldId::new(field).unwrap(),
+    .map(|(column, direction)| RuntimeOrderTerm {
+        field: FieldId::new(format!("{table}.{column}")).unwrap(),
         direction,
     });
     assert_eq!(collection.default_order, expected);
@@ -64,15 +66,15 @@ struct CompositeSortRecord {
 
 #[test]
 fn runtime_default_order_uses_declared_primary_key_names() {
-    let schema = RuntimeSchema::from_static_entities(&[CompositeSortRecord::metadata()]).unwrap();
+    let entity = CompositeSortRecord::metadata();
+    let schema = RuntimeSchema::from_static_entities(&[entity]).unwrap();
+    let table = entity.table_name;
     let terms = &schema.collections[0].default_order;
     assert_eq!(
         terms,
-        &["composite_sort_records.order", "composite_sort_records.id"].map(|field| {
-            RuntimeOrderTerm {
-                field: FieldId::new(field).unwrap(),
-                direction: RuntimeOrderDirection::Asc,
-            }
+        &["order", "id"].map(|column| RuntimeOrderTerm {
+            field: FieldId::new(format!("{table}.{column}")).unwrap(),
+            direction: RuntimeOrderDirection::Asc,
         })
     );
 }
