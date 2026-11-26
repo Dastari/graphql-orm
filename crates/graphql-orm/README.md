@@ -12,7 +12,14 @@ supersedes: []
 
 Version 0.228.0 moves the authorization sequence of generated GraphQL writes
 into shared runtime functions, with unchanged checks and order.
-[Migration](../../MIGRATION.md#02260-to-02280-generated-write-pipeline)
+[Migration](../../MIGRATION.md#02270-to-02280-generated-write-pipeline)
+
+Version 0.227.0 uses Unicode string binds for SQL Server filters, including
+VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
+under legacy `SQL_` collations. Windows-collation VARCHAR indexes can seek
+with Unicode binds. See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
+if you relied on the 0.215.0 seek. Opt-in integer widths and unsigned
+range validation remain.
 
 Version 0.225.0 preserves opaque partial-index predicates in SQLite and
 PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)

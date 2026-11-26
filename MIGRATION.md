@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.226.0 to 0.228.0: Generated write pipeline
+## 0.227.0 to 0.228.0: Generated write pipeline
 
 **No action.** Generated GraphQL writes call shared runtime functions for
 their authorization sequence instead of inlining it (#724). The checks, their
@@ -23,6 +23,29 @@ dispatches a hook itself uses `MutationContext::run_mutation_hook`, as before.
 Request authority for a hook is now issued only by the write pipeline's own
 admission. See
 [the generated write pipeline](docs/reference/graphql-orm/strict-authorization.md#the-generated-write-pipeline).
+
+## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
+
+**Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on
+columns using a legacy `SQL_` collation. Move the column to a Windows
+collation after reviewing its comparison rules, or add a persisted computed
+Unicode column and index it for the affected comparison.
+
+Upgrade ORM and macros together. The 0.215.0 ASCII VARCHAR conversion could
+match different rows under `SQL_` collations, including
+`SQL_Latin1_General_CP1_CI_AS`. String filters now bind as NVARCHAR with
+either pool setting. In the SQL Server fixture, a `SQL_` index scanned at
+31 logical reads with NVARCHAR, compared with a 2-read VARCHAR seek in
+0.215.0. The Windows CP1252 and UTF-8 VARCHAR indexes already sought with
+NVARCHAR at 2 reads each. A tested VARCHAR rewrite with per-statement
+collation and conversion checks used 10 reads on each Windows index.
+
+Opt-in integer narrowing to INT, SMALLINT and TINYINT still uses BIGINT when
+a signed comparison operand exceeds the declared width. Generated updates
+and upserts, including transactional writes, return `INVALID_INPUT` for
+out-of-range unsigned inputs before selecting targets. Updates validate the
+input even when no rows match.
+See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
 
 ## 0.225.0 to 0.226.0: Generated nested create
 
@@ -87,7 +110,7 @@ assurance or target admission. Host code that dispatches hooks itself uses
 `run_mutation_hook`, which attaches none.
 ORM/macros 0.228.0 remove that entry and issue the authority from the
 runtime's own admission: see
-[generated write pipeline](#02260-to-02280-generated-write-pipeline).
+[generated write pipeline](#02270-to-02280-generated-write-pipeline).
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 

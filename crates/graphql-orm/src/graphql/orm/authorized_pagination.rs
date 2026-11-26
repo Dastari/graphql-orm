@@ -4643,7 +4643,7 @@ mod predicate_tests {
                     format!("{row}.[ordinal] = @P2"),
                 ],
                 vec![
-                    SqlValue::mssql_varchar_comparison("item-42".into(), "VARCHAR(32)"),
+                    SqlValue::String("item-42".into()),
                     SqlValue::Int(42).with_mssql_type("SMALLINT"),
                 ],
             )
