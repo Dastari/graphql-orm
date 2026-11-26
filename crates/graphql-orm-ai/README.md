@@ -812,14 +812,16 @@ contracts, and security checks.
 - [Recovery and restore](docs/recovery-and-restore.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)
 
-### Discovery reuse across runs
+### Discovery cache
 
 A long-lived `AiCapabilityDiscoveryBroker` may enable `with_discovery_cache(ttl, maximum_searches)`
-to retain `dispatch_discover` results for the same principal and AI session across fixed-broker runs. This avoids
-repeating model-driven discovery when catalogue fingerprints are unchanged. Cached descriptions
-still rehydrate current principals and issue fresh run-bound execution handles. Permissions,
-loaded handles and application results are not cache entries. The cache is bounded, process-local,
-disabled by default, and expires entries after at most seven days; see [MIGRATION.md](MIGRATION.md).
+to retain `dispatch_discover` results beyond a run's own retained-search bound. Discover candidates
+are described by opaque `candidateReference` values bound to the principal, AI session, run, attempt
+and provider session that received them, so a cache entry answers only that run; a later run
+discovers again. Cached descriptions still rehydrate current principals and issue fresh run-bound
+execution handles. Permissions, loaded handles, browse results and application results are not
+cache entries. The cache is bounded, process-local, disabled by default, and expires entries after
+at most seven days; see [MIGRATION.md](MIGRATION.md#run-bound-discover-candidate-references).
 
 For concurrent chats with immutable provider/model/effort choices, use the
 [session execution selection contract](docs/session-execution-selection.md).

@@ -110,9 +110,11 @@ or data migration is needed.
    `capability-broker-discover/v3` and `capability-broker-describe/v3`;
    client-deferred discovery keeps `version: 2` and its version 2 contract.
    Browse candidates carry an opaque `candidateReference` instead of
-   `candidateFingerprint`, and browse results carry no index fingerprint;
-   describe takes either `candidateFingerprint` (from discover) or
-   `candidateReference` (from browse), exactly one. A broker execute result of a generated keyset
+   `candidateFingerprint`, and browse results carry no index fingerprint.
+   In this same release discover candidates do too, and describe takes
+   only `candidateReference`; see
+   [Run-bound discover candidate references](#run-bound-discover-candidate-references).
+   A broker execute result of a generated keyset
    root now carries `continuation` beside `data` and `errorCodes`: a
    `{"handle", "expiresInSeconds"}` object while more rows exist, else
    `null`. Its disclosure-schema fingerprint is derived from the query's own
@@ -231,6 +233,96 @@ hosts.
 
 No GraphQL SDL change. Subscriptions keep their wait contract and do not
 enter the broker in this release.
+
+### Run-bound discover candidate references
+
+**Action needed** for fixed-broker hosts, and for tests or model guidance that
+read fixed-broker discover or describe results.
+
+The fixed broker's discover results no longer carry `indexFingerprint` or a
+`candidateFingerprint`, and describe results no longer echo
+`candidateFingerprint`. Those fingerprints hash the whole index set or
+entity entry, including operations host policy hides from the principal, so
+a model, or anyone who can read the transcript, could tell that hidden
+operations exist and when they change. The canonical fingerprints stay
+server-side and still fence describe, `describe_type` and execute exactly as
+before.
+
+1. **Wire.** Every discover candidate carries an opaque `candidateReference`,
+   as browse candidates already did. Describe takes `capabilityId` and
+   `candidateReference`, both required; `candidateFingerprint` is gone from
+   its definition. A replayed describe call that still sends
+   `candidateFingerprint` is answered `selection_stale`, whatever its value
+   (`null` included) and whether or not it also sends `candidateReference`,
+   so the model discovers again. Discover results report disclosure
+   contract `capability-broker-discover/v4` and describe results
+   `capability-broker-describe/v4`; the `capability_stale` correction names
+   `candidateReference` and is `capability-stale-correction/v3`. Update tests
+   or parsers that read `indexFingerprint` or `candidateFingerprint` from
+   these results. No model-facing staleness signal replaces
+   `indexFingerprint`.
+2. **Run-bound references.** A reference resolves only for the principal
+   reference, AI session, run, attempt and provider session it was issued
+   to, and only against the exact search snapshot it was issued with. Every
+   discover issues fresh references. A reference lives as long as its issuing
+   search: once the session evicts that search
+   (`AiCapabilityDeliveryLimits::maximum_retained_searches`) and no
+   discovery cache holds it, the reference is `selection_stale`.
+3. **Discovery cache.** `with_discovery_cache` no longer lets a later run
+   describe a candidate an earlier run discovered: its entries answer only
+   the run whose references they hold (for example a fresh
+   `AiCapabilityBrokerSession` of the same run, or a search the session
+   itself has already evicted). A later run, or another attempt, discovers
+   again. Hosts that enabled the cache to save a discover call per run
+   should expect one discover call before the first describe of each run.
+4. **Rebind.** The describe definition changes, so its fingerprint changes
+   in this same release as broker version 3. `AI_CAPABILITY_BROKER_VERSION`
+   stays 3. Admit the current five broker fingerprints wherever you list
+   them by value.
+5. **Staleness follows what the principal is shown.** Every describe,
+   `describe_type`, execute and continued page loads the capability again
+   from the current index under current policy and compares what this
+   principal is shown with what it was shown: the capability's model-facing
+   metadata and contract fingerprint and, for an entity, every admitted root
+   and theirs (AI tool profiles 0.34.0 adds `contract_fingerprint`, which
+   leaves out catalogue-wide fingerprints and covers the resolved output
+   route, continuation and other compiled per-root inputs). A denied entry,
+   entity or chosen root is `authorization_denied`; any visible change,
+   including a sibling root newly denied or admitted after describe, is
+   `capability_stale`, whether or not hidden state also changed. Previously
+   a revoked sibling did not affect execute of another root. When only state
+   the principal cannot see changed (a root it is denied, another capability
+   or target, the target policy, or a host-policy fingerprint that admits the
+   same view), the call proceeds and `describe_type`, execute and continued
+   pages refresh the session's binding under the same `loadedReference` and
+   expiry. Execution always binds the exact current capability. Tests that
+   expected `capability_stale` after a policy-fingerprint-only or
+   target-policy-only change now see the call succeed. Continued pages
+   require the root's contract fingerprint, not its exact capability
+   fingerprint, to match the first page's. A change to operation assurance
+   alone does not invalidate handles: assurance is enforced at execution.
+6. **Discovery ceiling.** `with_maximum_discovery_authorizations` now
+   applies to the authorized view (admitted matches with their admitted
+   grouped roots) instead of every match, so a restricted principal is no
+   longer refused because of matches it may not see. The index limits
+   (`maximum_entries`) bound how many matches a query scans and sends to
+   policy; the configured ceiling bounds only the admitted view. Policy is
+   decided in rank order in calls of at most that bound (and at most
+   `AI_CAPABILITY_BROWSE_POLICY_BATCH`, 256); an entity with more grouped
+   roots is split across calls and admitted only once every part is
+   decided. A host that overrides `authorize_discovery` can therefore
+   receive several calls per discover or browse. The refusal and the
+   response depend only on what the principal may see; timing is not
+   constant.
+7. **Known limitation: brokered mutation admission.** Rules admit a brokered
+   mutation by its exact capability fingerprint, which covers the whole
+   catalogue's schema and semantic fingerprints. A catalogue edit, even an
+   unrelated or hidden one, changes it, so pinned rules stop admitting the
+   mutation until they are refreshed with the new fingerprint.
+
+Client-deferred discovery is unchanged: it keeps `version: 2`,
+`indexFingerprint` and `candidateFingerprint` under its version 2 contract.
+No GraphQL SDL, AI schema-module or data migration is needed.
 
 ## 0.162.0 to 0.163.0 skill schemas and provider endpoints
 

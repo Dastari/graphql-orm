@@ -10,6 +10,29 @@ supersedes: []
 
 # Migration Guide
 
+## 0.34.0 capability contract fingerprints
+
+**Action needed** if you construct `AiCapabilityIndexEntry` or
+`AiCapabilityOperationMember` with a struct literal: set the new
+`contract_fingerprint` field, from the capability's `contract_fingerprint()`
+or, for a reviewed static tool, its descriptor fingerprint. Serialized
+entries without the field no longer deserialize.
+
+Index, index-set and entry fingerprints change once, because an entry
+fingerprint covers every entry field. Delivery modes that bind the index set
+(eager, client-deferred and provider-deferred) rebind once; fixed-broker
+sessions do not. Capability, plan, catalogue and semantic fingerprints are
+unchanged.
+
+The contract fingerprint identifies what a model was shown of one root and
+what its plans compile to: identity, target, semantic operation, plan
+schemas, limits, and the resolved output route and projection, injected
+root bound, keyset page argument, continuation page-info fields and
+relationship-argument depth. Operation assurance is not part of it, because
+assurance is enforced at execution. It is not execution authority:
+execution still binds the exact capability fingerprint. No schema or data
+migration is needed.
+
 ## 0.33.0 mutation and subscription signatures
 
 **Action needed** only if you construct `AiCapabilitySearchCandidate` with a

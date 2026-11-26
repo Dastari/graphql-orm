@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **Action needed** — AI 0.168.0. Fixed-broker discover and describe drop `indexFingerprint` and `candidateFingerprint`; describe requires `capabilityId` and a run-bound `candidateReference`, the describe definition fingerprint changes, the discovery cache no longer spans runs, `capability_stale` follows only what the principal is shown, and the discovery ceiling counts only the admitted view. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references)
+- **Action needed** — AI tool profiles 0.34.0. Capabilities and index entries gain `contract_fingerprint`; index, index-set and entry fingerprints change once. [AI tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0340-capability-contract-fingerprints)
 - **Action needed** — AI 0.165.0 (#880). Review and explicitly authorize replacement of a customized SQL Server covering legacy approval index. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#sql-server-covering-approval-lookup-index)
 - **Action needed** — next breaking ORM/macros release (#905). Review statically unreadable fields used in generated relation search documents. [Migration](../../MIGRATION.md#5-review-private-fields-in-generated-search-documents-905)
 - **Action needed** — next breaking ORM release (#880). Use index constructors and review SQL Server covering index mismatches before applying migrations. [Migration](../../MIGRATION.md#6-review-sql-server-covering-indexes-in-schema-plans-880)

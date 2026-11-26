@@ -10,6 +10,24 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.34.0
+
+- **Action needed** if you construct `AiCapabilityIndexEntry` or
+  `AiCapabilityOperationMember` literally, or compare stored index, index-set
+  or entry fingerprints. Generated query, mutation and subscription
+  capabilities gain `contract_fingerprint()`: the fingerprint of the root's
+  model-facing contract (identity, target, semantic operation, plan schemas,
+  limits, and the resolved output route, root bound, keyset page argument,
+  continuation page-info fields and relationship-argument depth; a
+  mutation's also covers its execution classification). It
+  leaves out the finished-schema and semantic-catalogue fingerprints, so an
+  edit to another capability does not change it. Index entries and entity
+  members carry it as `contract_fingerprint`; a static entry uses its
+  descriptor fingerprint. Because entry fingerprints cover every entry field,
+  index, index-set and entry fingerprints change once. Capability, plan and
+  catalogue fingerprints are unchanged.
+  [Migration](MIGRATION.md#0340-capability-contract-fingerprints)
+
 ## Unreleased - 0.33.0
 
 - **No action (#551).** `AiGraphqlMutationCapability::capability_signature`

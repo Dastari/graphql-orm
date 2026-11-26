@@ -264,7 +264,7 @@ impl AiProvider for MixedRetainedProvider {
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                     let describe = tool(AI_CAPABILITY_DESCRIBE_TOOL_ID);
                     let call_id = "native-mutation-describe".to_owned();
-                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateFingerprint":candidate["candidateFingerprint"]});
+                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateReference":candidate["candidateReference"]});
                     yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:describe.tool_id.clone() };
                     let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, describe, arguments.clone())?).await?;
                     assert_eq!(reply.output()["effect"], "automatic", "{:?}", reply.output());
@@ -294,7 +294,7 @@ impl AiProvider for MixedRetainedProvider {
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                     let describe = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_DESCRIBE_TOOL_ID).unwrap();
                     let call_id = "native-broker-describe".to_owned();
-                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateFingerprint":candidate["candidateFingerprint"]});
+                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateReference":candidate["candidateReference"]});
                     yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:describe.tool_id.clone() };
                     let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, describe, arguments.clone())?).await?;
                     let loaded = reply.output()["loadedReference"].clone();

@@ -13998,7 +13998,7 @@ mod tests {
                 describe_definition,
                 json!({
                     "capabilityId": candidate["capabilityId"],
-                    "candidateFingerprint": candidate["candidateFingerprint"]
+                    "candidateReference": candidate["candidateReference"]
                 }),
             ),
         )
@@ -14337,7 +14337,7 @@ mod tests {
                 definition(AI_CAPABILITY_DESCRIBE_TOOL_ID),
                 json!({
                     "capabilityId": candidate["capabilityId"],
-                    "candidateFingerprint": candidate["candidateFingerprint"]
+                    "candidateReference": candidate["candidateReference"]
                 }),
             ),
         )

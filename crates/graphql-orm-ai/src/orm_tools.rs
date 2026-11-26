@@ -5254,8 +5254,8 @@ struct BrokerCorrection {
 const QUERY_PLAN_CORRECTION_CONTRACT: &[u8] = b"graphql-orm-ai/capability-query-plan-correction/v3";
 
 const CAPABILITY_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
-    text: "Nothing was executed. The published capability catalogue changed after this capability was discovered or described, so its candidateFingerprint, signatures, expanded types and loadedReference are no longer valid. Call discover again, describe the new candidate, then issue a new call using only the new signatures and loadedReference.",
-    disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v2",
+    text: "Nothing was executed. This capability changed after it was discovered or described, so its candidateReference, signatures, expanded types and loadedReference are no longer valid. Call discover again, describe the new candidate with its new candidateReference, then issue a new call using only the new signatures and loadedReference.",
+    disclosure_contract: b"graphql-orm-ai/capability-stale-correction/v3",
 };
 
 const OPERATION_INVALID_CORRECTION: BrokerCorrection = BrokerCorrection {
@@ -5410,13 +5410,13 @@ fn brokered_static_plan_schema(descriptor: &crate::AiToolDescriptor) -> serde_js
 fn broker_disclosure_fingerprint(operation: crate::AiCapabilityBrokerOperation) -> String {
     hex::encode(Sha256::digest(match operation {
         crate::AiCapabilityBrokerOperation::Discover => {
-            b"graphql-orm-ai/capability-broker-discover/v3".as_slice()
+            b"graphql-orm-ai/capability-broker-discover/v4".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Browse => {
             b"graphql-orm-ai/capability-broker-browse/v1".as_slice()
         }
         crate::AiCapabilityBrokerOperation::Describe => {
-            b"graphql-orm-ai/capability-broker-describe/v3".as_slice()
+            b"graphql-orm-ai/capability-broker-describe/v4".as_slice()
         }
         crate::AiCapabilityBrokerOperation::DescribeType => {
             b"graphql-orm-ai/capability-broker-describe-type/v1".as_slice()
@@ -5514,7 +5514,7 @@ mod broker_correction_tests {
             (
                 crate::AI_CAPABILITY_STALE,
                 Code::CapabilityStale,
-                "catalogue changed",
+                "capability changed",
             ),
             (
                 crate::AI_CAPABILITY_SELECTION_STALE,

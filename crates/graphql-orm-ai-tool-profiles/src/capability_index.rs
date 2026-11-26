@@ -262,6 +262,13 @@ pub struct AiCapabilityIndexEntry {
     pub approval: AiApprovalRule,
     /// Exact executable capability fingerprint.
     pub capability_fingerprint: String,
+    /// Fingerprint of the model-facing contract: a generated root's
+    /// [`crate::AiGraphqlQueryCapability::contract_fingerprint`], a grouped
+    /// entity's contracts of every root, or a reviewed static tool's
+    /// descriptor fingerprint. It leaves out catalogue-wide fingerprints, so
+    /// an edit to another capability does not change it. It identifies what
+    /// a model was shown and is never execution authority.
+    pub contract_fingerprint: String,
     /// Exact source catalogue fingerprint.
     pub catalogue_fingerprint: String,
     /// Exact finished-schema fingerprint.
@@ -304,6 +311,9 @@ pub struct AiCapabilityOperationMember {
     pub approval: AiApprovalRule,
     /// Exact executable capability fingerprint of the root.
     pub capability_fingerprint: String,
+    /// Model-facing contract fingerprint of the root
+    /// ([`AiCapabilityIndexEntry::contract_fingerprint`]).
+    pub contract_fingerprint: String,
     /// Exact source catalogue fingerprint of the root.
     pub catalogue_fingerprint: String,
 }
@@ -425,6 +435,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedQuery,
                     capability.fingerprint(),
+                    capability.contract_fingerprint(),
                     capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
@@ -458,6 +469,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedMutation,
                     capability.fingerprint(),
+                    &capability.contract_fingerprint(),
                     capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
@@ -480,6 +492,7 @@ impl AiCapabilityIndex {
                     capability.id().clone(),
                     AiCapabilityKind::GeneratedSubscription,
                     capability.fingerprint(),
+                    capability.contract_fingerprint(),
                     capability.result_record_cost_estimate(),
                     catalogue.fingerprint(),
                     operation,
@@ -1881,6 +1894,7 @@ fn generated_entry(
     id: AiToolId,
     kind: AiCapabilityKind,
     capability_fingerprint: &str,
+    contract_fingerprint: &str,
     result_record_cost: AiGraphqlResultRecordCostEstimate,
     catalogue_fingerprint: &str,
     operation: &GraphqlSemanticOperationDescriptor,
@@ -1940,6 +1954,7 @@ fn generated_entry(
         risk: generated_risk(kind, operation),
         approval: generated_approval(kind, operation),
         capability_fingerprint: capability_fingerprint.to_owned(),
+        contract_fingerprint: contract_fingerprint.to_owned(),
         catalogue_fingerprint: catalogue_fingerprint.to_owned(),
         schema_fingerprint: schema_fingerprint.to_owned(),
         target_policy_fingerprint: target_policy_fingerprint.to_owned(),
@@ -1997,6 +2012,7 @@ fn entity_entry(
             risk: root.risk,
             approval: root.approval,
             capability_fingerprint: root.capability_fingerprint.clone(),
+            contract_fingerprint: root.contract_fingerprint.clone(),
             catalogue_fingerprint: root.catalogue_fingerprint.clone(),
         })
         .collect::<Vec<_>>();
@@ -2022,6 +2038,20 @@ fn entity_entry(
                 "id": member.capability_id.as_str(),
                 "operation": member.operation_name,
                 "fingerprint": member.capability_fingerprint,
+            }))
+            .collect::<Vec<_>>(),
+    }));
+    let contract_fingerprint = sha256_json(&json!({
+        "version": AI_CAPABILITY_ENTITY_VERSION,
+        "kind": "generated_entity_contract",
+        "id": id.as_str(),
+        "entity": entity,
+        "operations": members
+            .iter()
+            .map(|member| json!({
+                "id": member.capability_id.as_str(),
+                "operation": member.operation_name,
+                "contract": member.contract_fingerprint,
             }))
             .collect::<Vec<_>>(),
     }));
@@ -2060,6 +2090,7 @@ fn entity_entry(
             ));
         },
         capability_fingerprint,
+        contract_fingerprint,
         catalogue_fingerprint: catalogue_fingerprint.to_owned(),
         schema_fingerprint: first.schema_fingerprint.clone(),
         target_policy_fingerprint: first.target_policy_fingerprint.clone(),
@@ -2185,6 +2216,7 @@ fn member_entry(
         risk: member.risk,
         approval: member.approval,
         capability_fingerprint: member.capability_fingerprint.clone(),
+        contract_fingerprint: member.contract_fingerprint.clone(),
         catalogue_fingerprint: member.catalogue_fingerprint.clone(),
         schema_fingerprint: entity.schema_fingerprint.clone(),
         target_policy_fingerprint: entity.target_policy_fingerprint.clone(),
@@ -2288,6 +2320,7 @@ fn static_entry(
         risk: descriptor.risk,
         approval: descriptor.approval,
         capability_fingerprint: descriptor.fingerprint.clone(),
+        contract_fingerprint: descriptor.fingerprint.clone(),
         catalogue_fingerprint: semantic_catalogue_fingerprint.to_owned(),
         schema_fingerprint: schema_fingerprint.to_owned(),
         target_policy_fingerprint: target_policy_fingerprint.to_owned(),
@@ -2545,6 +2578,10 @@ fn validate_entry_text(entry: &AiCapabilityIndexEntry) -> Result<(), AiError> {
         "capability result description",
     )?;
     validate_fingerprint(&entry.capability_fingerprint, "capability fingerprint")?;
+    validate_fingerprint(
+        &entry.contract_fingerprint,
+        "capability contract fingerprint",
+    )?;
     validate_fingerprint(&entry.catalogue_fingerprint, "catalogue fingerprint")?;
     Ok(())
 }

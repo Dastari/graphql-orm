@@ -122,6 +122,33 @@ discover, browse and execute broker fingerprints change in this same
 release. Approved generated mutations now execute instead of converging to
 `RecoveryRequired`. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-mutations-through-the-capability-broker-551).
 
+### 9. Describe fixed-broker candidates by reference (graphql-orm-ai)
+
+**Action needed** for fixed-broker hosts of graphql-orm-ai, and for tests or
+model guidance that read broker results. Fixed-broker discover results no
+longer carry `indexFingerprint` or `candidateFingerprint`, and describe
+results no longer echo `candidateFingerprint`: those fingerprints covered
+operations host policy hides from the principal. Every discover candidate
+now carries an opaque `candidateReference`, bound to the principal, AI
+session, run, attempt and provider session that received it and to the exact
+search snapshot it was issued with. Describe requires both `capabilityId` and
+`candidateReference`; a legacy `candidateFingerprint`, `null` included, is
+`selection_stale`. Discover and describe use disclosure
+contracts `capability-broker-discover/v4` and
+`capability-broker-describe/v4`. The describe definition fingerprint changes
+in this same release, so admit the current five broker fingerprints where you
+list them. The discovery cache no longer lets a later run describe an
+earlier run's candidate; each run discovers again. `capability_stale` now
+reports only a change to what the principal was shown; a change it cannot see
+refreshes the binding. `with_maximum_discovery_authorizations` counts only
+the admitted view. AI tool profiles 0.34.0 adds `contract_fingerprint` to
+capabilities and index entries, so index, index-set and entry fingerprints
+change once and eager, client-deferred and provider-deferred sessions rebind
+once. Pinned rules for brokered mutations stop admitting them after any
+catalogue edit until refreshed (known limitation). See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references).
+No data migration is needed.
+
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 
 **No action.** The default uses the legacy journal recorder and full backup

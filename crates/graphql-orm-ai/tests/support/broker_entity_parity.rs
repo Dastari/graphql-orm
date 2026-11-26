@@ -218,7 +218,7 @@ pub async fn entity_capability_round_trip(database: Database) {
             &session,
             &json!({
                 "capabilityId": candidate["capabilityId"],
-                "candidateFingerprint": candidate["candidateFingerprint"],
+                "candidateReference": candidate["candidateReference"],
             }),
         )
         .await
