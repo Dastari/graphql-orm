@@ -211,8 +211,9 @@ The reference is `subgraph_only` when the comparison would not be exact:
   key fields, not root arguments;
 - the mapped category is undeclared while another read category is declared.
   The traversal then requires every declared read category's scopes;
-- `query_shapes` does not expose the root; or
-- the relation's target is not in `entities:`.
+- `query_shapes` does not expose the root;
+- the relation's target is not in `entities:`; or
+- the relation declares a field policy on its owning type.
 
 The owning entity's auth mode, field policies, row policies and RLS apply to
 every traversal in addition. The catalogue is descriptive and is never read

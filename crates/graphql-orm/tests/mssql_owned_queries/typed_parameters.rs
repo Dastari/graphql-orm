@@ -1,6 +1,7 @@
 use super::owned_mssql::{OwnedSqlServer, execute_batch};
 use graphql_orm::db::mssql::{MssqlPool, MssqlPoolOptions};
-use graphql_orm::graphql::orm::{DatabaseFilter, SqlValue};
+use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+use graphql_orm::graphql::orm::{BoundedMutationOutcome, DatabaseFilter, MutationLimit, SqlValue};
 use graphql_orm::prelude::*;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use std::time::Duration;
 #[repository_entity(
     backend = "mssql",
     table = "dbo.ParameterItems",
+    upsert = "id",
     schema_policy = "external_writable"
 )]
 struct ParameterItem {
@@ -18,6 +20,12 @@ struct ParameterItem {
     #[graphql_orm(mssql_type = "VARCHAR(32)")]
     #[filterable(type = "string")]
     code: String,
+    #[graphql_orm(mssql_type = "VARCHAR(32)")]
+    #[filterable(type = "string")]
+    windows_code: Option<String>,
+    #[graphql_orm(mssql_type = "VARCHAR(32)")]
+    #[filterable(type = "string")]
+    greek_code: Option<String>,
     #[graphql_orm(mssql_type = "NVARCHAR(40)")]
     #[filterable(type = "string")]
     label: String,
@@ -29,7 +37,7 @@ struct ParameterItem {
 
 #[tokio::test]
 #[ignore = "owns a capped disposable SQL Server container"]
-async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek() {
+async fn declared_parameter_types_preserve_comparison_and_write_semantics() {
     let server = tokio::time::timeout(Duration::from_secs(120), OwnedSqlServer::start())
         .await
         .unwrap()
@@ -42,6 +50,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
             "CREATE TABLE dbo.ParameterItems (
                 id int NOT NULL PRIMARY KEY,
                 code varchar(32) COLLATE SQL_Latin1_General_CP1_CI_AS NOT NULL,
+                windows_code varchar(32) COLLATE Latin1_General_100_CI_AS_SC NULL,
+                greek_code varchar(32) COLLATE Greek_100_CI_AS NULL,
                 label nvarchar(40) NOT NULL,
                 score smallint NULL,
                 attempts smallint NULL
@@ -57,18 +67,18 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
              INSERT dbo.ParameterItems (id, code, label) VALUES (10001, REPLICATE('y', 32), N'東京 😀');
              INSERT dbo.ParameterItems (id, code, label) VALUES
                 (10003, '??', N'unrepresentable'), (10004, 'abc ', N'trailing blank'),
-                (10005, 'cafe', N'unaccented');
-             CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);",
+                (10005, 'cafe', N'unaccented'), (10007, 'missing', N'null code');
+             UPDATE dbo.ParameterItems SET windows_code = code;
+             UPDATE dbo.ParameterItems SET greek_code = N'καφές' WHERE id = 10000;
+             CREATE UNIQUE INDEX IX_ParameterItems_code ON dbo.ParameterItems(code);
+             CREATE INDEX IX_ParameterItems_windows_code ON dbo.ParameterItems(windows_code);",
         ),
     )
     .await
     .unwrap()
     .unwrap();
 
-    for (typed, access_path, identifier) in [
-        (false, "Index Scan", "legacy"),
-        (true, "Index Seek", "typed"),
-    ] {
+    for (typed, identifier) in [(false, "legacy"), (true, "typed")] {
         let options = MssqlPoolOptions::new()
             .max_connections(1)
             .query_timeout(Some(Duration::from_secs(10)))
@@ -78,26 +88,69 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
             .unwrap();
 
         let (conditions, binds) = code_filter("item-42").to_sql_conditions();
-        let marker = format!("/* {identifier}_parameter_plan */");
+        let marker = format!("{identifier}_parameter_plan");
         let sql = format!(
-            "SELECT id FROM dbo.ParameterItems WHERE {} {marker}",
+            "SELECT id, 1 AS [{marker}] FROM dbo.ParameterItems WHERE {}",
             conditions.join(" AND ")
         );
         let rows = pool.fetch_rows(&sql, &binds).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 42);
-        let plan = lookup_plan(&pool, &format!("%{marker}%")).await;
-        assert!(
-            plan.contains(&format!("PhysicalOp=\"{access_path}\"")),
-            "{plan}"
-        );
+        let (plan, logical_reads) = lookup_plan(&pool, &marker).await;
+        assert!(plan.contains("PhysicalOp=\"Index Scan\""), "{plan}");
+        eprintln!("{identifier} IX_ParameterItems_code scan, {logical_reads} logical reads");
         assert!(
             plan.contains("Index=\"[IX_ParameterItems_code]\""),
             "{plan}"
         );
-        eprintln!("{identifier}: {access_path} on IX_ParameterItems_code");
+        let (conditions, binds) = ParameterItemWhereInput {
+            windows_code: Some(StringFilter {
+                eq: Some("CAFÉ".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .to_sql_conditions();
+        let marker = format!("{identifier}_windows_parameter_plan");
+        let rows = pool
+            .fetch_rows(
+                &format!(
+                    "SELECT id, 1 AS [{marker}] FROM dbo.ParameterItems WHERE {}",
+                    conditions.join(" AND ")
+                ),
+                &binds,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<i32, _>("id").unwrap(), 10000);
+        let (plan, logical_reads) = lookup_plan(&pool, &marker).await;
+        assert_index_seek_with_unicode(&plan, "IX_ParameterItems_windows_code");
+        eprintln!(
+            "{identifier} IX_ParameterItems_windows_code seek, {logical_reads} logical reads"
+        );
+
+        assert_sql_collation_rows(&pool).await;
 
         let db = Database::<MssqlBackend>::new(pool);
+        let matches = ParameterItem::query(&db)
+            .filter(ParameterItemWhereInput {
+                greek_code: Some(StringFilter {
+                    eq: Some("ΚΑΦΈΣ".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(
+            matches.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [10000]
+        );
+        let (generated, _) = lookup_plan(db.pool(), "[greek_code] = @P1").await;
+        assert_unicode_plan(&generated);
+
         let matches = ParameterItem::query(&db)
             .filter(ParameterItemWhereInput {
                 id: Some(IntFilter {
@@ -182,6 +235,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         CreateParameterItemInput {
             id: 10002,
             code: "crème".into(),
+            windows_code: None,
+            greek_code: None,
             label: "雪 😀".into(),
             score: Some(-12),
             attempts: Some(3),
@@ -211,6 +266,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
         CreateParameterItemInput {
             id: 10006,
             code: "overflow".into(),
+            windows_code: None,
+            greek_code: None,
             label: "overflow".into(),
             score: None,
             attempts: Some(u64::MAX),
@@ -220,8 +277,8 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     .err()
     .expect("out-of-range insert");
     assert_eq!(
-        graphql_orm::graphql::errors::OrmPublicError::from(insert_error).code,
-        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+        OrmPublicError::from(insert_error).code,
+        OrmErrorCode::InvalidInput
     );
     let update_error = ParameterItem::update_by_id(
         &db,
@@ -235,9 +292,105 @@ async fn declared_parameter_types_preserve_values_and_allow_a_varchar_index_seek
     .err()
     .expect("out-of-range update");
     assert_eq!(
-        graphql_orm::graphql::errors::OrmPublicError::from(update_error).code,
-        graphql_orm::graphql::errors::OrmErrorCode::InvalidInput
+        OrmPublicError::from(update_error).code,
+        OrmErrorCode::InvalidInput
     );
+    let mut denied_db = Database::<MssqlBackend>::builder(db.pool().clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    denied_db.set_row_policy(CodePolicy("naïve"));
+    let upsert_error = ParameterItem::upsert(
+        &denied_db,
+        CreateParameterItemInput {
+            id: inserted.id,
+            code: updated.code.clone(),
+            windows_code: None,
+            greek_code: None,
+            label: updated.label.clone(),
+            score: None,
+            attempts: Some(32768),
+        },
+    )
+    .await
+    .err()
+    .expect("out-of-range upsert");
+    // If the existing row reaches the row policy, it refuses the write.
+    assert_eq!(
+        OrmPublicError::from(upsert_error).code,
+        OrmErrorCode::InvalidInput
+    );
+    let no_target = code_filter("does-not-exist");
+    for (attempts, should_error) in [(32767, false), (32768, true), (u64::MAX, true)] {
+        let input = UpdateParameterItemInput {
+            attempts: Some(Some(attempts)),
+            ..Default::default()
+        };
+        let by_id = ParameterItem::update_by_id(&db, &10006, input.clone())
+            .await
+            .map_err(OrmPublicError::from);
+        let transactional_by_id = db
+            .transaction(TransactionMode::StateMachine, |context| {
+                let input = input.clone();
+                Box::pin(async move {
+                    context
+                        .update_by_id::<ParameterItem>(&10006, input)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(|error| error.public_error().clone());
+        for result in [by_id, transactional_by_id] {
+            if should_error {
+                assert_eq!(result.err().unwrap().code, OrmErrorCode::InvalidInput);
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+        }
+        let standalone = ParameterItem::update_where(&db, no_target.clone(), input.clone())
+            .await
+            .map_err(OrmPublicError::from);
+        let in_transaction = db
+            .transaction(TransactionMode::StateMachine, |context| {
+                let where_input = no_target.clone();
+                Box::pin(async move {
+                    context
+                        .update_where::<ParameterItem>(where_input, input)
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(|error| error.public_error().clone());
+        let bounded = ParameterItem::update_where_bounded(
+            &db,
+            no_target.clone(),
+            UpdateParameterItemInput {
+                attempts: Some(Some(attempts)),
+                ..Default::default()
+            },
+            MutationLimit::new(1).unwrap(),
+        )
+        .await;
+        if should_error {
+            assert_eq!(
+                OrmPublicError::from(bounded.unwrap_err()).code,
+                OrmErrorCode::InvalidInput
+            );
+        } else {
+            assert!(matches!(
+                bounded.unwrap(),
+                BoundedMutationOutcome::Applied { affected: 0 }
+            ));
+        }
+        for result in [standalone, in_transaction] {
+            if should_error {
+                assert_eq!(result.unwrap_err().code, OrmErrorCode::InvalidInput);
+            } else {
+                assert_eq!(result.unwrap(), 0);
+            }
+        }
+    }
     let rows = db
         .pool()
         .fetch_rows(
@@ -336,18 +489,97 @@ fn code_filter(code: &str) -> ParameterItemWhereInput {
     }
 }
 
-async fn lookup_plan(pool: &MssqlPool, marker: &str) -> String {
+async fn lookup_plan(pool: &MssqlPool, marker: &str) -> (String, i64) {
     let rows = pool
         .fetch_rows(
-            "SELECT TOP (1) CONVERT(nvarchar(max), p.query_plan) AS plan_xml
+            "SELECT TOP (1) CONVERT(nvarchar(max), p.query_plan) AS plan_xml, s.last_logical_reads
          FROM sys.dm_exec_query_stats AS s
          CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) AS t
          CROSS APPLY sys.dm_exec_query_plan(s.plan_handle) AS p
-         WHERE t.text LIKE @P1
+         WHERE CHARINDEX(@P1, SUBSTRING(
+             t.text, (s.statement_start_offset / 2) + 1,
+             (CASE s.statement_end_offset WHEN -1 THEN DATALENGTH(t.text)
+                  ELSE s.statement_end_offset END - s.statement_start_offset) / 2 + 1
+         )) > 0
          ORDER BY s.last_execution_time DESC",
             &[SqlValue::String(marker.into())],
         )
         .await
         .unwrap();
-    rows[0].try_get("plan_xml").unwrap()
+    let row = rows
+        .first()
+        .unwrap_or_else(|| panic!("no cached plan containing {marker}"));
+    (
+        row.try_get("plan_xml").unwrap(),
+        row.try_get("last_logical_reads").unwrap(),
+    )
+}
+
+fn assert_unicode_plan(plan: &str) {
+    assert!(plan.contains("ParameterDataType=\"nvarchar("), "{plan}");
+    assert!(
+        !plan.to_ascii_lowercase().contains("convert(varchar("),
+        "{plan}"
+    );
+}
+
+fn assert_index_seek_with_unicode(plan: &str, index: &str) {
+    assert_unicode_plan(plan);
+    let index_name = format!("Index=\"[{index}]\"");
+    assert!(
+        plan.split("<RelOp ").any(|operator| {
+            operator.split_once('>').is_some_and(|(header, body)| {
+                header.contains("PhysicalOp=\"Index Seek\"") && body.contains(&index_name)
+            })
+        }),
+        "{plan}"
+    );
+}
+
+async fn assert_sql_collation_rows(pool: &MssqlPool) {
+    for (filter, expected) in [
+        (
+            StringFilter {
+                in_list: Some(vec!["café".into(), "東京".into(), "abc".into()]),
+                ..Default::default()
+            },
+            vec![10000, 10004],
+        ),
+        (
+            StringFilter {
+                not_in: Some(vec!["café".into(), "東京".into(), "abc".into()]),
+                ..Default::default()
+            },
+            vec![10001, 10003, 10005, 10007],
+        ),
+        (
+            StringFilter {
+                ne: Some("東京".into()),
+                ..Default::default()
+            },
+            vec![10000, 10001, 10003, 10004, 10005, 10007],
+        ),
+    ] {
+        let (conditions, values) = ParameterItemWhereInput {
+            code: Some(filter),
+            ..Default::default()
+        }
+        .to_sql_conditions();
+        let rows = pool
+            .fetch_rows(
+                &format!(
+                    "SELECT id FROM dbo.ParameterItems WHERE id >= 10000 AND {} ORDER BY id",
+                    conditions.join(" AND "),
+                ),
+                &values,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.try_get::<i32, _>("id").unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+        );
+    }
 }

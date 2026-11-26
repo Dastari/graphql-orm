@@ -1,3 +1,4 @@
+use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
 use crate::dependent_deletes::Boundary;
 use crate::entity::UpdateAssuranceMetadata;
 
@@ -24,7 +25,6 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) result_type: &'a syn::Ident,
     pub(in crate::operations) expected_version_binding: &'a TokenStream,
     pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) rls_request_guard: &'a TokenStream,
     pub(in crate::operations) update_scope_enforcement: &'a TokenStream,
     /// Declared conditional assurance selector (#851), if any.
     pub(in crate::operations) update_assurance: Option<&'a UpdateAssuranceMetadata>,
@@ -33,6 +33,7 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) update_client_supplied: &'a TokenStream,
+    pub(in crate::operations) unsigned_checks: &'a TokenStream,
     pub(in crate::operations) sql_dialect: &'a TokenStream,
     pub(in crate::operations) pk_bind_value: &'a TokenStream,
     pub(in crate::operations) update_policy_checks: &'a [TokenStream],
@@ -48,6 +49,8 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) mutation_output_release: &'a TokenStream,
     pub(in crate::operations) update_many_operation_description: &'a str,
     pub(in crate::operations) update_many_mutation_name: &'a str,
+    /// Clears principal-bound columns from the input after the transform.
+    pub(in crate::operations) principal_key_update_reset: &'a TokenStream,
     pub(in crate::operations) update_many_requires_scopes: &'a TokenStream,
     pub(in crate::operations) where_arg_name: &'a str,
     pub(in crate::operations) where_arg_description: &'a str,
@@ -81,7 +84,6 @@ pub(in crate::operations) fn update(
         result_type,
         expected_version_binding,
         resolver_auth_mode,
-        rls_request_guard,
         update_scope_enforcement,
         update_assurance,
         dependent_deletes,
@@ -89,6 +91,7 @@ pub(in crate::operations) fn update(
         entity_name_lit,
         struct_name,
         update_client_supplied,
+        unsigned_checks,
         sql_dialect,
         pk_bind_value,
         update_policy_checks,
@@ -104,6 +107,7 @@ pub(in crate::operations) fn update(
         mutation_output_release,
         update_many_operation_description,
         update_many_mutation_name,
+        principal_key_update_reset,
         update_many_requires_scopes,
         where_arg_name,
         where_arg_description,
@@ -113,6 +117,39 @@ pub(in crate::operations) fn update(
         notify_bulk_updated,
         generates_public_update,
     } = input;
+    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let request = admitted_request();
+    let admit = |scope_enforcement| {
+        admit_request(
+            struct_name,
+            backend_marker,
+            resolver_auth_mode,
+            scope_enforcement,
+            Assurance::Resolver,
+        )
+    };
+    let admit_update = admit(update_scope_enforcement);
+    let admit_update_many = admit(update_many_scope_enforcement);
+    let before_hook = Hook {
+        request: &request,
+        phase: "Before",
+        action: quote! { ::graphql_orm::graphql::orm::ChangeAction::Updated },
+        id: pk_id_for_id.clone(),
+        changes: quote! { mutation_changes.clone() },
+        before_state: quote! { ::std::option::Option::Some(before_state.clone()) },
+        after_state: quote! { ::std::option::Option::None },
+    }
+    .dispatch();
+    let after_hook = Hook {
+        request: &request,
+        phase: "After",
+        action: quote! { ::graphql_orm::graphql::orm::ChangeAction::Updated },
+        id: pk_id_for_entity.clone(),
+        changes: quote! { mutation_changes.clone() },
+        before_state: quote! { ::std::option::Option::Some(before_state) },
+        after_state: quote! { after_state },
+    }
+    .dispatch();
     let transaction_start = Boundary::TransactionStart.emit(dependent_deletes);
     let transaction_end = Boundary::TransactionEnd.emit(dependent_deletes);
     let authority_boundary = Boundary::Authority.emit(dependent_deletes);
@@ -190,64 +227,34 @@ pub(in crate::operations) fn update(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
                 let __gom_expected_version: ::std::option::Option<i64> = #expected_version_binding;
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
-                #update_scope_enforcement
-                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-                    ctx,
-                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
-                )?;
-                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
+                #entity
+                #admit_update
+                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx, __gom_entity).await?;
+                let __gom_authority = __gom_write.authority();
+                let db = __gom_write.db();
                 let pool = db.pool();
-                let auth_context = ctx
-                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                    .cloned();
-                db.ensure_entity_access(
-                    ::std::option::Option::Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #update_input = input.into();
+                #unsigned_checks
                 #update_client_supplied
                 #transaction_start
-                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
-                    db,
-                    ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
-                    auth_context.as_ref(),
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                let mut hook_ctx = __gom_write.begin(::graphql_orm::graphql::orm::TransactionMode::StateMachine).await?;
                 #transaction_end
-                let current_entity = ::std::boxed::Box::pin(::graphql_orm::graphql::orm::with_write_target_prefilter(
+                // Missing, filtered out, or neither readable nor writable:
+                // indistinguishable to the client.
+                let current_entity = ::graphql_orm::graphql::orm::__lock_generated_write_target(
+                    ctx,
                     db,
-                    ::std::option::Option::Some(ctx),
+                    &mut hook_ctx,
+                    __gom_entity,
                     EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_clause(
                             &::std::format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                             #pk_bind_value
                         ),
-                ))
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
-                    .fetch_one_for_write_in_transaction(&mut hook_ctx)
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                if current_entity.is_none() {
+                ).await?;
+                let ::std::option::Option::Some(current_entity) = current_entity else {
                     return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
-                }
-                let current_entity = current_entity.expect("checked above");
-                if !db.authorize_write_target(
-                    ::std::option::Option::Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                    &current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                    // Neither readable nor writable: indistinguishable from a missing row.
-                    return ::std::result::Result::Ok(#result_type::__gom_refusal(::graphql_orm::graphql::errors::OrmErrorCode::NotFound, "Entity not found"));
-                }
+                };
                 if __gom_expected_version.is_some()
                     && #struct_name::__gom_managed_version_of(&current_entity) != __gom_expected_version
                 {
@@ -268,6 +275,7 @@ pub(in crate::operations) fn update(
                         &mut input as &mut (dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 }
+                #principal_key_update_reset
 
                 #after_transform
 
@@ -296,20 +304,7 @@ pub(in crate::operations) fn update(
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
-                hook_ctx.run_mutation_hook(
-                    ::std::option::Option::Some(ctx),
-                    &::graphql_orm::graphql::orm::MutationEvent {
-                        phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
-                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                        entity_name: #entity_name_lit,
-                        table_name: #table_name,
-                        metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: #pk_id_for_id,
-                        changes: mutation_changes.clone(),
-                        before_state: ::std::option::Option::Some(before_state.clone()),
-                        after_state: ::std::option::Option::None,
-                    },
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                #before_hook.await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 #write_boundary
                 let sql = #struct_name::__gom_rebind_sql(&::std::format!(
@@ -344,20 +339,7 @@ pub(in crate::operations) fn update(
                                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                                 );
 
-                                hook_ctx.run_mutation_hook(
-                                    ::std::option::Option::Some(ctx),
-                                    &::graphql_orm::graphql::orm::MutationEvent {
-                                        phase: ::graphql_orm::graphql::orm::MutationPhase::After,
-                                        action: ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                                        entity_name: #entity_name_lit,
-                                        table_name: #table_name,
-                                        metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                                        id: #pk_id_for_entity,
-                                        changes: mutation_changes.clone(),
-                                        before_state: ::std::option::Option::Some(before_state),
-                                        after_state,
-                                    },
-                                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                                #after_hook.await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                                 #struct_name::__gom_queue_changed_event(
                                     &mut hook_ctx,
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
@@ -402,28 +384,16 @@ pub(in crate::operations) fn update(
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
-                #update_many_scope_enforcement
-                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-                    ctx,
-                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
-                )?;
-                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
-                let auth_context = ctx
-                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                    .cloned();
-                if let ::std::result::Result::Err(error) = db.ensure_entity_access(
-                    ::std::option::Option::Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                ).await {
-                    return ::std::result::Result::Ok(#update_many_result_type::from_graphql_error(::graphql_orm::graphql::errors::graphql_error_from_callback(error)));
-                }
-                if let ::std::result::Result::Err(error) = db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy) {
-                    return ::std::result::Result::Ok(#update_many_result_type::from_graphql_error(error));
-                }
+                #entity
+                #admit_update_many
+                let __gom_write = match __gom_request.__admit_entity_bulk::<#backend_marker>(ctx, __gom_entity).await? {
+                    ::std::result::Result::Ok(admission) => admission,
+                    ::std::result::Result::Err(error) => {
+                        return ::std::result::Result::Ok(#update_many_result_type::from_graphql_error(error));
+                    }
+                };
+                let __gom_authority = __gom_write.authority();
+                let db = __gom_write.db();
                 let input: #update_input = input.into();
 
                 let filter = match where_input {
@@ -442,7 +412,7 @@ pub(in crate::operations) fn update(
                     return ::std::result::Result::Ok(#update_many_result_type::from_graphql_error(error));
                 }
                 let mut notification_rows = ::std::vec::Vec::new();
-                match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), ::std::option::Option::Some(ctx), ::std::option::Option::Some(&mut notification_rows), ::std::option::Option::Some(&__gom_outcome)).await {
+                match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, __gom_write.auth_context(), #request, ::std::option::Option::Some(&mut notification_rows), ::std::option::Option::Some(&__gom_outcome)).await {
                     ::std::result::Result::Ok(affected_count) => {
                         #[allow(unused_mut)]
                         let mut result = #update_many_result_type::ok(affected_count);

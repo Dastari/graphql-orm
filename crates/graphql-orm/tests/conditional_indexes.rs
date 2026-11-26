@@ -401,3 +401,162 @@ async fn conditional_unique_preflight_respects_new_and_existing_predicate_column
     }
     Ok(())
 }
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn opaque_partial_index_differs_from_plain_index() -> graphql_orm::Result<()> {
+    use graphql_orm::graphql::orm::{
+        SchemaDiagnosticKind, render_migration_step, try_render_migration_step,
+    };
+
+    let database = database().await?;
+    graphql_orm::sqlx::query(
+        "CREATE TABLE conditional_index_records (id UUID PRIMARY KEY, digest BYTEA, status TEXT)",
+    )
+    .execute(database.pool())
+    .await?;
+    graphql_orm::sqlx::query(
+        "CREATE UNIQUE INDEX uidx_conditional_digest_active
+         ON conditional_index_records (digest) WHERE/* comment */lower(status) = 'pending'",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let live = introspect(&database).await?;
+    let live_index = &live.tables[0].indexes[0];
+    let index_name = live_index.name;
+    let mut target = live.clone();
+    target.tables[0].indexes[0].predicate = None;
+    let predicate = live_index.predicate.as_ref().expect("partial index filter");
+    assert!(predicate.column.is_empty());
+    assert!(predicate.values[0].contains("pending"));
+    assert_ne!(live_index, &target.tables[0].indexes[0]);
+    assert_ne!(live.stable_hash(), target.stable_hash());
+
+    let manager = database.schema();
+    assert!(
+        manager
+            .validate(&live, &target)?
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == SchemaDiagnosticKind::IndexMismatch)
+    );
+    let plan = manager.plan_migration("plain-index", "plain index", &live, &target)?;
+    assert!(plan.steps.iter().any(|step| matches!(
+        &step.step,
+        MigrationStep::DropIndex { index_name: name, .. } if name == index_name
+    )));
+    assert!(plan.steps.iter().any(|step| matches!(
+        &step.step,
+        MigrationStep::CreateIndex { index, .. }
+            if index.name == index_name && index.predicate.is_none()
+    )));
+    let error = manager
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect_err("the replacement must pass the existing destructive gate");
+    assert!(error.to_string().contains("allow_destructive"));
+
+    let recreate_opaque = MigrationStep::CreateIndex {
+        table_name: live.tables[0].table_name.clone(),
+        index: live_index.clone(),
+    };
+    #[cfg(feature = "sqlite")]
+    let backend = DatabaseBackend::Sqlite;
+    #[cfg(feature = "postgres")]
+    let backend = DatabaseBackend::Postgres;
+    assert!(try_render_migration_step(backend, &recreate_opaque).is_err());
+
+    let recreate_plan = build_migration_plan(backend, &target, &live);
+    assert_eq!(recreate_plan.steps.len(), 2);
+    let refusal = render_migration_step(backend, &recreate_opaque);
+    assert_eq!(refusal.len(), 1);
+    assert_eq!(recreate_plan.statements, refusal);
+    for statement in [&refusal[0], &recreate_plan.statements[0]] {
+        let error = graphql_orm::sqlx::query(statement)
+            .execute(database.pool())
+            .await
+            .expect_err("recreating an opaque predicate must fail at execution");
+        #[cfg(feature = "postgres")]
+        assert_eq!(
+            error.as_database_error().unwrap().message(),
+            "opaque index predicate cannot be recreated"
+        );
+        #[cfg(feature = "sqlite")]
+        assert!(error.as_database_error().is_some(), "{error}");
+    }
+
+    manager
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await?;
+    let repaired = introspect(&database).await?;
+    let second = manager.plan_migration("plain-index-v2", "replan", &repaired, &target)?;
+    assert!(second.steps.is_empty(), "{:?}", second.steps);
+
+    #[cfg(feature = "postgres")]
+    {
+        // The predicate has the usual closed-set spelling, but only indexes
+        // using the default catalog operator class can decode it as such.
+        graphql_orm::sqlx::query(
+            "CREATE INDEX idx_nondefault_operator_class
+             ON conditional_index_records (status text_pattern_ops) WHERE status IN ('A', 'B')",
+        )
+        .execute(database.pool())
+        .await?;
+        let live = introspect(&database).await?;
+        let predicate = live.tables[0]
+            .indexes
+            .iter()
+            .find(|index| index.name == "idx_nondefault_operator_class")
+            .and_then(|index| index.predicate.as_ref())
+            .expect("filtered index with nondefault operator class");
+        assert!(predicate.column.is_empty());
+        assert!(predicate.values[0].contains("ANY"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn postgres_closed_set_predicates_round_trip() -> graphql_orm::Result<()> {
+    let database = database().await?;
+    let manager = database.schema();
+    let mut target = SchemaModel::from_entities(&[ConditionalIndexRecord::metadata()]);
+    let single = SchemaModel::from_entities(&[ConditionalPreflightRecord::metadata()]);
+    target.tables[0]
+        .indexes
+        .push(single.tables[0].indexes[0].clone());
+
+    let before = introspect(&database).await?;
+    let plan = manager.plan_migration(
+        "closed-sets",
+        "create conditional indexes",
+        &before,
+        &target,
+    )?;
+    manager
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+    let live = introspect(&database).await?;
+    for declared in &target.tables[0].indexes {
+        let actual = live.tables[0]
+            .indexes
+            .iter()
+            .find(|index| index.name == declared.name)
+            .expect("created index");
+        assert_eq!(actual.predicate, declared.predicate, "{}", declared.name);
+    }
+    let second = manager.plan_migration("closed-sets-v2", "replan", &live, &target)?;
+    assert!(second.steps.is_empty(), "{:?}", second.steps);
+    Ok(())
+}

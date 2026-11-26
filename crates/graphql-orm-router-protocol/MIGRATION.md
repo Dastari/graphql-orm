@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router-protocol migration guide
 
+## 0.3.1 to 0.4.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
 ## 0.3.0 to 0.3.1: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

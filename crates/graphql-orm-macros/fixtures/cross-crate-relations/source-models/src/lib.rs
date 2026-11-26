@@ -1,6 +1,7 @@
 use async_graphql::SimpleObject;
 use cross_crate_target_models::{
     Endpoint, EndpointConnection, EndpointEdge, EndpointOrderByInput, EndpointWhereInput,
+    PartitionedEndpoint,
 };
 use graphql_orm::prelude::*;
 
@@ -54,6 +55,51 @@ pub struct Session {
     #[graphql(skip)]
     #[relation(target = "Endpoint", from = ["endpoint_id", "tenant_id"], to = ["id", "tenant_id"], emit_fk = false)]
     pub endpoint: Option<Endpoint>,
+}
+
+/// Joins its target on `(endpoint_id, partition_id)`; the partition pair is a
+/// server-only key, proven by the target crate's generated metadata.
+#[derive(GraphQLEntity, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "cross_partitioned_links",
+        plural = "PartitionedLinks"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "cross_partitioned_links",
+        plural = "PartitionedLinks"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "cross_partitioned_links",
+        plural = "PartitionedLinks"
+    )
+)]
+pub struct PartitionedLink {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    pub id: String,
+    pub endpoint_id: String,
+    #[graphql_orm(private)]
+    pub partition_id: String,
+    #[relation(
+        target = "PartitionedEndpoint",
+        from = ["endpoint_id", "partition_id"],
+        to = ["id", "partition_id"],
+        server_only_key(from = "partition_id", to = "partition_id"),
+        emit_fk = false
+    )]
+    pub endpoint: Option<PartitionedEndpoint>,
 }
 
 #[derive(

@@ -73,6 +73,7 @@ const REFUSAL_OUTCOME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REFUSAL_OUTCOME";
 const AUTHORITY_CONTROL_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_AUTHORITY_CONTROL";
 /// Each fresh `role-events` expansion stays valid this long.
 const ROLE_AUTHORITY_LIFETIME: Duration = Duration::from_millis(300);
+const SUBGRAPH_ERROR_SETTINGS_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_SUBGRAPH_ERROR_SETTINGS";
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -315,6 +316,25 @@ fn router_child_entrypoint() {
                         .with_refusal_outcome(true)
                         .with_request_limits(RequestLimits::new().with_max_fields(6));
                 }
+                if let Ok(settings) = env::var(SUBGRAPH_ERROR_SETTINGS_ENV) {
+                    // Only import the error settings. The fixture owns its listener,
+                    // authentication, and subgraph endpoints.
+                    let mut settings: Value = serde_json::from_str(&settings).unwrap();
+                    settings["listener"] = json!("127.0.0.1:0");
+                    settings["anonymousDevelopment"] = json!(true);
+                    settings["subgraphs"] = json!([{
+                        "name": "products",
+                        "graphqlUrl": env::var(PRODUCTS_ENDPOINT_ENV).unwrap(),
+                        "sdlUrl": env::var(PRODUCTS_SDL_ENDPOINT_ENV).unwrap()
+                    }]);
+                    let parsed = crate::RouterFileConfig::from_json(&settings.to_string())
+                        .unwrap()
+                        .into_router_config()
+                        .unwrap();
+                    config = config
+                        .with_subgraph_error_masking(parsed.subgraph_error_masking)
+                        .with_subgraph_error_logging(parsed.subgraph_error_logging);
+                }
                 if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
                     config = config.with_telemetry(
                         crate::RouterTelemetryConfig::new()
@@ -351,6 +371,8 @@ fn router_child_entrypoint() {
                                 fs::write(&staged, result).unwrap();
                                 fs::rename(&staged, format!("{control}.result")).unwrap();
                             }
+                            // Kept: the parent signals through a file, which has no
+                            // cross-process notification, so the child polls for it.
                             hive_router::tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }).await.unwrap();
@@ -358,9 +380,17 @@ fn router_child_entrypoint() {
                 }
 
                 if mode == "graceful" {
+                    // Shut down once the parent closes stdin, after its request.
+                    let (closed, stdin_closed) = futures::channel::oneshot::channel::<()>();
+                    std::thread::spawn(move || {
+                        // EOF or a read error both mean the parent let go of stdin.
+                        let _ = io::copy(&mut io::stdin(), &mut io::sink());
+                        let _ = closed.send(());
+                    });
                     prepared
-                        .run_until_shutdown(async {
-                            hive_router::tokio::time::sleep(Duration::from_secs(1)).await;
+                        .run_until_shutdown(async move {
+                            // A dropped sender also means stdin is gone.
+                            let _ = stdin_closed.await;
                         })
                         .await
                         .expect("static public router should shut down gracefully");
@@ -1667,6 +1697,193 @@ fn hive_http_app_preserves_federation_and_replacement_invariants() {
     router.stop();
 }
 
+fn with_subgraph_error_router(
+    settings: Option<&str>,
+    test: impl FnOnce(&TestRouter, &std::sync::mpsc::Receiver<Value>),
+) {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(
+        r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Query { items(filter: String): ItemConnection!, product(id: ID!): Product }
+        type ItemConnection { total: Int! }
+        type Product @key(fields: "id") { id: ID! }
+    "#,
+    );
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let env: Vec<_> = settings
+        .map(|settings| (SUBGRAPH_ERROR_SETTINGS_ENV, settings))
+        .into_iter()
+        .collect();
+    let (mut router, logs) = TestRouter::spawn_static_with_logs(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        &env,
+    );
+    router.wait_until_ready();
+    test(&router, &logs);
+    router.stop();
+}
+
+fn two_alias_response(router: &TestRouter, operation_name: &str, bad_filter: &str) -> HttpResponse {
+    let body = serde_json::to_vec(&json!({
+        "query": format!(
+            r#"query {operation_name}($filter: String) {{ a: items(filter: $filter) {{ total }} b: items(filter: "{bad_filter}") {{ total }} }}"#,
+        ),
+        "operationName": operation_name,
+        "variables": {"filter": "private-variable"}
+    }))
+    .unwrap();
+    let response = raw_http(
+        router.address,
+        "POST",
+        "/api/graphql",
+        &[
+            ("x-request-id", "test-request-id"),
+            ("x-approved", "private-header"),
+            ("x-debug-unmask", "true"),
+        ],
+        Some(&body),
+    )
+    .unwrap();
+    assert_eq!(response.status, 200);
+    response
+}
+
+fn original_items_error() -> String {
+    format!("Invalid item filter {}", "é".repeat(300))
+}
+
+fn assert_subgraph_error_log(
+    event: &Value,
+    operation_name: &str,
+    code: Option<&str>,
+    message: &str,
+) {
+    assert_eq!(event["message"], "downstream GraphQL error");
+    assert_eq!(event["graphql_request_id"], "test-request-id");
+    assert_eq!(event["operation_name"], operation_name);
+    assert_eq!(event["subgraph"], "products");
+    assert_eq!(event["response_path"], r#"["b"]"#);
+    assert_eq!(event["extensions.code"].as_str(), code);
+    assert_eq!(event["subgraph_error_message"], message);
+    let serialized = event.to_string();
+    for private in [
+        "private-variable",
+        "private-header",
+        "123456789",
+        "private-extension",
+    ] {
+        assert!(!serialized.contains(private), "{event}");
+    }
+}
+
+#[test]
+fn subgraph_errors_two_alias_default() {
+    with_subgraph_error_router(None, |router, logs| {
+        let response = two_alias_response(router, "ListItems", "bad");
+        assert_eq!(
+            std::str::from_utf8(&response.body).unwrap(),
+            r#"{"data":null,"errors":[{"message":"Unexpected error","path":["b"],"extensions":{"code":"INVALID_INPUT","service":"products"}}]}"#,
+        );
+        let event = logs
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("downstream error event");
+        let truncated: String = original_items_error().chars().take(256).collect();
+        assert_subgraph_error_log(&event, "ListItems", Some("INVALID_INPUT"), &truncated);
+        assert!(logs.try_recv().is_err());
+    });
+}
+
+#[test]
+fn subgraph_errors_unmask_messages_and_log_full_text() {
+    with_subgraph_error_router(
+        Some(r#"{"maskSubgraphErrors":"none","subgraphErrorLogging":{"message":"full"}}"#),
+        |router, logs| {
+            let name = "ListItems".repeat(20);
+            let response = two_alias_response(router, &name, "internal");
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            let message = original_items_error();
+            assert_eq!(
+                response,
+                json!({
+                    "data": null,
+                    "errors": [{
+                        "message": message,
+                        "path": ["b"],
+                        "extensions": {"code": "INTERNAL_ERROR"}
+                    }]
+                })
+            );
+            let event = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_subgraph_error_log(&event, &name[..128], Some("INTERNAL_ERROR"), &message);
+        },
+    );
+}
+
+#[test]
+fn subgraph_errors_allowlist_matches_only_original_codes_and_redacts_logs() {
+    with_subgraph_error_router(
+        Some(
+            r#"{
+            "maskSubgraphErrors":"allowlist-by-code",
+            "subgraphErrorCodeAllowlist":["INVALID_INPUT","FORBIDDEN","DOWNSTREAM_SERVICE_ERROR"],
+            "subgraphErrorLogging":{"message":"redacted"}
+        }"#,
+        ),
+        |router, logs| {
+            let original = original_items_error();
+            for (filter, code, shown) in [
+                ("bad", Some("INVALID_INPUT"), original.as_str()),
+                ("forbidden", Some("FORBIDDEN"), original.as_str()),
+                ("internal", Some("INTERNAL_ERROR"), "Unexpected error"),
+                ("lowercase", Some("invalid_input"), "Unexpected error"),
+                ("no-code", None, "Unexpected error"),
+            ] {
+                let response = two_alias_response(router, "ListItems", filter);
+                let response: Value = serde_json::from_slice(&response.body).unwrap();
+                assert_eq!(
+                    response,
+                    json!({
+                        "data": null,
+                        "errors": [{
+                            "message": shown,
+                            "path": ["b"],
+                            "extensions": {"code": code.unwrap_or("DOWNSTREAM_SERVICE_ERROR")}
+                        }]
+                    })
+                );
+                let event = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+                assert_subgraph_error_log(&event, "ListItems", code, "[redacted]");
+            }
+        },
+    );
+}
+
+#[test]
+fn subgraph_errors_report_drops_without_a_follow_up_request() {
+    with_subgraph_error_router(
+        Some(r#"{"subgraphErrorLogging":{"maxEventsPerSecond":1}}"#),
+        |router, logs| {
+            let response = two_alias_response(router, "ListItems", "burst");
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(response["errors"].as_array().unwrap().len(), 3);
+            let first = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_eq!(first["message"], "downstream GraphQL error");
+            let summary = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_eq!(
+                summary["message"],
+                "downstream GraphQL error logs rate limited"
+            );
+            assert_eq!(summary["dropped"], 2);
+            assert!(logs.try_recv().is_err());
+        },
+    );
+}
+
 #[test]
 fn public_static_router_serves_only_after_complete_preparation() {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
@@ -1927,21 +2144,22 @@ fn prometheus_exporter_case(bind: &str, omit_operation_name: bool) {
     // been able to bind at all.
     let public_ip_metrics = std::net::SocketAddr::new(router.address.ip(), metrics.port());
     assert_eq!(public_guard.local_addr().unwrap(), public_ip_metrics);
-    public_guard.set_nonblocking(true).unwrap();
     let stop_guard = Arc::new(AtomicBool::new(false));
     let guard_thread = {
         let stop_guard = Arc::clone(&stop_guard);
         thread::spawn(move || {
-            while !stop_guard.load(Ordering::SeqCst) {
-                match public_guard.accept() {
-                    Ok((connection, _)) => drop(connection),
-                    Err(_) => thread::sleep(Duration::from_millis(5)),
+            // Blocking accept; the connection below wakes it once `stop_guard` is set.
+            while let Ok((connection, _)) = public_guard.accept() {
+                drop(connection);
+                if stop_guard.load(Ordering::SeqCst) {
+                    return;
                 }
             }
         })
     };
     let public_ip_scrape = raw_http(public_ip_metrics, "GET", "/internal/metrics", &[], None);
     stop_guard.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(public_ip_metrics);
     guard_thread.join().unwrap();
     assert!(
         public_ip_scrape.is_err(),
@@ -1971,11 +2189,13 @@ fn prepared_router_gracefully_drains_and_releases_its_listener() {
         &[],
     );
     assert_eq!(response["data"]["product"]["name"], "desk");
-    let status = lock_child(&router.child)
-        .as_mut()
-        .unwrap()
-        .wait()
-        .expect("graceful child should exit");
+    let status = {
+        let mut child = lock_child(&router.child);
+        let child = child.as_mut().unwrap();
+        // Closing stdin is the child's shutdown signal.
+        drop(child.stdin.take());
+        child.wait().expect("graceful child should exit")
+    };
     assert!(status.success());
     lock_child(&router.child).take();
     assert!(TcpStream::connect_timeout(&router.address, Duration::from_millis(100)).is_err());
@@ -2021,12 +2241,14 @@ fn public_polling_router_atomically_reloads_and_preserves_executable_lkg() {
         .expect("slow request thread should not panic");
     assert_eq!(slow_result["data"]["product"]["id"], "slow");
 
-    let before_rejection = products_sdl.fetches();
     products_sdl.set(CONFLICTING_REVIEWS, "products-invalid", 200);
-    wait_until("incompatible schema poll", || {
-        products_sdl.fetches() > before_rejection
+    // Every fetch counted after this read serves the incompatible SDL. The
+    // poller is serial, so the second such fetch starts only after the round
+    // that fetched the first has finished composing it.
+    let before_rejection = products_sdl.fetches();
+    wait_until("incompatible schema poll round", || {
+        products_sdl.fetches() > before_rejection + 1
     });
-    thread::sleep(Duration::from_millis(50));
     let retained_after_rejection =
         router.graphql_at("/api/graphql", json!({"query": "query { version }"}), &[]);
     assert_eq!(retained_after_rejection["data"]["version"], "v2");
@@ -3547,13 +3769,18 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let mut router = TestRouter::spawn_authenticated_subscriptions(
+    let mut router = TestRouter::spawn_authenticated_mode_with_env(
+        "auth-subscriptions",
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
         reviews_sdl.endpoint(),
         products_protocol.endpoint(),
         reviews_protocol.endpoint(),
+        &[(
+            SUBGRAPH_ERROR_SETTINGS_ENV,
+            r#"{"maskSubgraphErrors":"none"}"#,
+        )],
     );
     router.wait_until_ready();
 
@@ -3680,7 +3907,8 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
     oversized.connection_init_bearer("product-events");
     oversized.send_oversized_text_frame();
     oversized.wait_for_disconnect_without_close_code(1011);
-    thread::sleep(Duration::from_millis(50));
+    // No wait for its permit: even if the dropped socket still holds one,
+    // `failing` and later `expiring` fit within the two-connection budget.
 
     let mut failing = TestWebSocket::connect_at(router.address, "/api/graphql");
     failing.connection_init_bearer("product-events");
@@ -3706,6 +3934,20 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "a one-shot mutation must complete without closing or retiring its sibling subscription"
     );
     failing.subscribe(
+        "downstream-graphql-error",
+        r#"query ErrorExample { product(id: "failure") { id } }"#,
+    );
+    let error = failing.wait_for_operation_message("downstream-graphql-error", "next");
+    assert_eq!(
+        error["payload"]["errors"][0],
+        json!({
+            "message": "test-owned downstream failure",
+            "path": ["product"],
+            "extensions": {"code": "SUBGRAPH_FAILURE"}
+        })
+    );
+    failing.wait_for_operation_message("downstream-graphql-error", "complete");
+    failing.subscribe(
         "failing-events",
         "subscription { productChanged(id: \"failure\") { id } }",
     );
@@ -3725,8 +3967,8 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "rename-after-failure"
     );
     failing.complete("live-events");
+    // `close` waits for the router's reply, sent after it frees the permit.
     failing.close();
-    thread::sleep(Duration::from_millis(50));
 
     let healthy_after_failure = router.graphql_at(
         "/api/graphql",
@@ -4273,8 +4515,13 @@ fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot()
 
     products_sdl.set(PRODUCTS_V2, "products-sdl-v2", 200);
     // Publish the matching policy descriptor separately. A poll that observes
-    // only one side is an incomplete candidate and must retain v1.
-    thread::sleep(Duration::from_millis(120));
+    // only one side is an incomplete candidate and must retain v1. The poller
+    // is serial, so a second SDL fetch after this read means one complete
+    // round saw the new SDL with the old descriptor.
+    let before_partial = products_sdl.fetches();
+    wait_until("a poll round that sees only the new SDL", || {
+        products_sdl.fetches() > before_partial + 1
+    });
     products_protocol.set(
         protocol_descriptor(
             "products",
@@ -5017,6 +5264,7 @@ fn websocket_frame_read_retains_partial_bytes_across_poll_timeouts() {
         // Timeouts in either the header or payload must preserve bytes already read.
         for part in [&[0x81][..], &[2][..], b"o", b"k"] {
             server.write_all(part).unwrap();
+            // Kept: the gap must outlast the reader's 20 ms poll timeout.
             thread::sleep(Duration::from_millis(100));
         }
     });
@@ -5103,7 +5351,15 @@ struct TestRouter {
 }
 
 impl TestRouter {
-    fn from_child(mut child: Child, has_admin: bool) -> (Self, Option<SocketAddr>) {
+    fn from_child(child: Child, has_admin: bool) -> (Self, Option<SocketAddr>) {
+        Self::from_child_with_logs(child, has_admin, None)
+    }
+
+    fn from_child_with_logs(
+        mut child: Child,
+        has_admin: bool,
+        logs: Option<std::sync::mpsc::Sender<Value>>,
+    ) -> (Self, Option<SocketAddr>) {
         let stdout = child.stdout.take().expect("piped child stdout");
         let (sender, receiver) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -5112,6 +5368,11 @@ impl TestRouter {
                 if let Some(bound) = line.strip_prefix("WIRE_BOUND ") {
                     // Once startup returns there is no readiness receiver.
                     let _ = sender.send(bound.to_owned());
+                } else if let Some(logs) = &logs
+                    && let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && value["target"] == "graphql_orm_router::subgraph_errors"
+                {
+                    let _ = logs.send(value);
                 }
             }
         });
@@ -5196,10 +5457,30 @@ impl TestRouter {
         products_sdl_endpoint: String,
         reviews_sdl_endpoint: String,
     ) -> Self {
-        let child = Command::new(env::current_exe().expect("test executable path"))
+        let child = Self::spawn_static_child(
+            mode,
+            products_endpoint,
+            reviews_endpoint,
+            products_sdl_endpoint,
+            reviews_sdl_endpoint,
+            &[],
+        );
+        Self::from_child(child, false).0
+    }
+
+    fn spawn_static_child(
+        mode: &str,
+        products_endpoint: String,
+        reviews_endpoint: String,
+        products_sdl_endpoint: String,
+        reviews_sdl_endpoint: String,
+        extra_env: &[(&str, &str)],
+    ) -> Child {
+        Command::new(env::current_exe().expect("test executable path"))
             .arg("--exact")
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
+            .envs(extra_env.iter().copied())
             .env(CHILD_ENV, mode)
             .env(PRODUCTS_ENDPOINT_ENV, products_endpoint)
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
@@ -5207,11 +5488,38 @@ impl TestRouter {
             .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
+            // The graceful child shuts down when the parent closes this pipe.
+            .stdin(if mode == "graceful" {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("static router child should start");
-        Self::from_child(child, false).0
+            .expect("static router child should start")
+    }
+
+    fn spawn_static_with_logs(
+        products_endpoint: String,
+        reviews_endpoint: String,
+        products_sdl_endpoint: String,
+        reviews_sdl_endpoint: String,
+        extra_env: &[(&str, &str)],
+    ) -> (Self, std::sync::mpsc::Receiver<Value>) {
+        let (logs, receiver) = std::sync::mpsc::channel();
+        let router = Self::spawn_static_child(
+            "static",
+            products_endpoint,
+            reviews_endpoint,
+            products_sdl_endpoint,
+            reviews_sdl_endpoint,
+            extra_env,
+        );
+        (
+            Self::from_child_with_logs(router, false, Some(logs)).0,
+            receiver,
+        )
     }
 
     fn spawn_authenticated(
@@ -5374,6 +5682,7 @@ impl TestRouter {
                 Instant::now() < deadline,
                 "router did not become ready within {TEST_TIMEOUT:?}"
             );
+            // Kept: readiness is only observable through the health probe.
             thread::sleep(Duration::from_millis(25));
         }
     }
@@ -5586,9 +5895,6 @@ struct SubgraphHandlerState {
 impl LoopbackSubgraph {
     fn start(kind: SubgraphKind) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback subgraph bind");
-        listener
-            .set_nonblocking(true)
-            .expect("subgraph listener nonblocking");
         let address = listener.local_addr().expect("subgraph address");
         let opens = Arc::new(AtomicUsize::new(0));
         let saw_approved_header = Arc::new(AtomicBool::new(false));
@@ -5607,17 +5913,13 @@ impl LoopbackSubgraph {
             stopping: stopping.clone(),
         };
         let thread = thread::spawn(move || {
-            while !thread_state.stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let state = thread_state.clone();
-                        thread::spawn(move || handle_subgraph(stream, kind, state));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((stream, _)) = listener.accept() {
+                if thread_state.stopping.load(Ordering::Acquire) {
+                    return;
                 }
+                let state = thread_state.clone();
+                thread::spawn(move || handle_subgraph(stream, kind, state));
             }
         });
         Self {
@@ -5666,6 +5968,8 @@ impl Drop for LoopbackSubgraph {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         self.slow_gate.release();
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -5693,9 +5997,6 @@ struct LoopbackEndpointState {
 impl LoopbackSdl {
     fn start(sdl: &str) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback SDL bind");
-        listener
-            .set_nonblocking(true)
-            .expect("SDL listener nonblocking");
         let address = listener.local_addr().expect("SDL listener address");
         let state = Arc::new(Mutex::new(LoopbackEndpointState {
             body: sdl.to_owned(),
@@ -5711,61 +6012,52 @@ impl LoopbackSdl {
         let thread_conditional_fetches = conditional_fetches.clone();
         let thread_stopping = stopping.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let Ok((head, _)) = read_head_and_body(&mut stream) else {
-                            continue;
-                        };
-                        if !has_header(&head, "authorization", "Bearer schema-secret") {
-                            // The client may close this fixture connection early.
-                            let _ = write_http_response(stream, 401, b"{}");
-                            continue;
-                        }
-                        thread_fetches.fetch_add(1, Ordering::AcqRel);
-                        let snapshot = thread_state
-                            .lock()
-                            .expect("loopback SDL endpoint state")
-                            .clone();
-                        if let Some(location) = &snapshot.redirect {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status, location
-                            );
-                        } else if snapshot.status != 200 {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status
-                            );
-                        } else if has_header(
-                            &head,
-                            "if-none-match",
-                            &format!("\"{}\"", snapshot.etag),
-                        ) {
-                            thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
-                            // The client may close this fixture connection early.
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
-                            );
-                        } else {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                snapshot.etag,
-                                snapshot.body.len(),
-                                snapshot.body
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok((head, _)) = read_head_and_body(&mut stream) else {
+                    continue;
+                };
+                if !has_header(&head, "authorization", "Bearer schema-secret") {
+                    // The client may close this fixture connection early.
+                    let _ = write_http_response(stream, 401, b"{}");
+                    continue;
+                }
+                thread_fetches.fetch_add(1, Ordering::AcqRel);
+                let snapshot = thread_state
+                    .lock()
+                    .expect("loopback SDL endpoint state")
+                    .clone();
+                if let Some(location) = &snapshot.redirect {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status, location
+                    );
+                } else if snapshot.status != 200 {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status
+                    );
+                } else if has_header(&head, "if-none-match", &format!("\"{}\"", snapshot.etag)) {
+                    thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                    // The client may close this fixture connection early.
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n");
+                } else {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/graphql\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        snapshot.etag,
+                        snapshot.body.len(),
+                        snapshot.body
+                    );
                 }
             }
         });
@@ -5803,6 +6095,8 @@ impl LoopbackSdl {
 impl Drop for LoopbackSdl {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -5823,9 +6117,6 @@ impl LoopbackProtocol {
     fn start(descriptor: SubgraphDescriptor) -> Self {
         let body = serde_json::to_string(&descriptor).expect("protocol descriptor JSON");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback protocol bind");
-        listener
-            .set_nonblocking(true)
-            .expect("protocol listener nonblocking");
         let address = listener.local_addr().expect("protocol listener address");
         let state = Arc::new(Mutex::new(LoopbackEndpointState {
             body,
@@ -5841,61 +6132,52 @@ impl LoopbackProtocol {
         let thread_conditional_fetches = conditional_fetches.clone();
         let thread_stopping = stopping.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let Ok((head, _)) = read_head_and_body(&mut stream) else {
-                            continue;
-                        };
-                        if !has_header(&head, "authorization", "Bearer schema-secret") {
-                            // The client may close this fixture connection early.
-                            let _ = write_http_response(stream, 401, b"{}");
-                            continue;
-                        }
-                        thread_fetches.fetch_add(1, Ordering::AcqRel);
-                        let snapshot = thread_state
-                            .lock()
-                            .expect("loopback protocol endpoint state")
-                            .clone();
-                        if let Some(location) = &snapshot.redirect {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status, location
-                            );
-                        } else if snapshot.status != 200 {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                                snapshot.status
-                            );
-                        } else if has_header(
-                            &head,
-                            "if-none-match",
-                            &format!("\"{}\"", snapshot.etag),
-                        ) {
-                            thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
-                            // The client may close this fixture connection early.
-                            let _ = stream.write_all(
-                                b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
-                            );
-                        } else {
-                            // The client may close this fixture connection early.
-                            let _ = write!(
-                                stream,
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                snapshot.etag,
-                                snapshot.body.len(),
-                                snapshot.body
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok((head, _)) = read_head_and_body(&mut stream) else {
+                    continue;
+                };
+                if !has_header(&head, "authorization", "Bearer schema-secret") {
+                    // The client may close this fixture connection early.
+                    let _ = write_http_response(stream, 401, b"{}");
+                    continue;
+                }
+                thread_fetches.fetch_add(1, Ordering::AcqRel);
+                let snapshot = thread_state
+                    .lock()
+                    .expect("loopback protocol endpoint state")
+                    .clone();
+                if let Some(location) = &snapshot.redirect {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Redirect\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status, location
+                    );
+                } else if snapshot.status != 200 {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {} Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        snapshot.status
+                    );
+                } else if has_header(&head, "if-none-match", &format!("\"{}\"", snapshot.etag)) {
+                    thread_conditional_fetches.fetch_add(1, Ordering::AcqRel);
+                    // The client may close this fixture connection early.
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n");
+                } else {
+                    // The client may close this fixture connection early.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"{}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        snapshot.etag,
+                        snapshot.body.len(),
+                        snapshot.body
+                    );
                 }
             }
         });
@@ -5949,6 +6231,8 @@ impl LoopbackProtocol {
 impl Drop for LoopbackProtocol {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             // Join the fixture worker during best-effort teardown.
             let _ = thread.join();
@@ -6171,6 +6455,7 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
                 // The client may close this fixture connection early.
                 let _ = stream.flush();
                 while !state.stopping.load(Ordering::Acquire) {
+                    // Kept: heartbeat interval; a failed write ends the stream.
                     thread::sleep(Duration::from_millis(25));
                     if stream
                         .write_all(b": heartbeat\n\n")
@@ -6195,6 +6480,28 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
     }
 
     let response = match kind {
+        SubgraphKind::Products if query.contains("items") => {
+            let extensions = if query.contains("internal") {
+                json!({"code": "INTERNAL_ERROR", "private": "private-extension"})
+            } else if query.contains("forbidden") {
+                json!({"code": "FORBIDDEN", "private": "private-extension"})
+            } else if query.contains("lowercase") {
+                json!({"code": "invalid_input"})
+            } else if query.contains("no-code") {
+                json!({})
+            } else {
+                json!({"code": "INVALID_INPUT"})
+            };
+            let error = json!({
+                "message": original_items_error(),
+                "path": ["b"],
+                "extensions": extensions
+            });
+            json!({
+                "data": {"a": {"total": 123456789}, "b": null},
+                "errors": vec![error; if query.contains("burst") { 3 } else { 1 }]
+            })
+        }
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
         }
@@ -6513,6 +6820,7 @@ fn write_sse_subscription(
     // retired, or until fixture shutdown. Heartbeats make that cancellation
     // observable without relying on an unbounded parked worker thread.
     while !stopping.load(Ordering::Acquire) {
+        // Kept: heartbeat interval; a failed write ends the stream.
         thread::sleep(Duration::from_millis(25));
         if stream.write_all(b": heartbeat\n\n").is_err() {
             break;
@@ -6775,6 +7083,7 @@ fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) {
             Instant::now() < deadline,
             "timed out waiting for {description}"
         );
+        // Kept: polling interval for a bounded wait on an observable condition.
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -6794,6 +7103,7 @@ fn wait_for_graphql(mut request: impl FnMut() -> Value) -> Value {
             Instant::now() < deadline,
             "timed out waiting for the replacement GraphQL schema: {response}"
         );
+        // Kept: polling interval; the schema swap is only visible to requests.
         thread::sleep(Duration::from_millis(20));
     }
 }

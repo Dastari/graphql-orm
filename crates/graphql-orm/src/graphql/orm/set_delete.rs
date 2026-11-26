@@ -135,7 +135,7 @@ impl<B: WriteBackend> MutationContext<'_, B> {
                 "composite repository mutations require an explicit entity policy provider",
             ));
         }
-        super::core::ensure_transaction_entity_write_access::<T, B>(self.database()).await?;
+        super::core::ensure_transaction_entity_write_access::<T, B>(self.__policy().view()).await?;
         self.database()
             .ensure_row_write_provider(metadata.entity_name, metadata.write_policy)
             .map_err(sqlx_error_from_graphql)?;
@@ -208,7 +208,7 @@ impl<B: WriteBackend> MutationContext<'_, B> {
             },
         );
 
-        Self::authorize_set_delete_rows(self.database(), &rows).await?;
+        Self::authorize_set_delete_rows(&self.__policy(), &rows).await?;
         let mut events = Vec::with_capacity(rows.len());
         for row in &rows {
             events.push(MutationEvent {
@@ -250,7 +250,7 @@ impl<B: WriteBackend> MutationContext<'_, B> {
                 }
                 event.before_state = Some(state);
             }
-            Self::authorize_set_delete_rows(self.database(), &current).await?;
+            Self::authorize_set_delete_rows(&self.__policy(), &current).await?;
             rows = current;
         }
 
@@ -272,8 +272,10 @@ impl<B: WriteBackend> MutationContext<'_, B> {
         Ok(BoundedMutationOutcome::Applied { affected: selected })
     }
 
+    /// Row decisions run under the transaction's authority, like its entity
+    /// decision.
     async fn authorize_set_delete_rows<T: SetDeleteEntity<B>>(
-        db: &crate::db::Database<B>,
+        db: &super::core::TransactionPolicyHandle<'_, B>,
         rows: &[T],
     ) -> crate::Result<()> {
         let metadata = T::metadata();

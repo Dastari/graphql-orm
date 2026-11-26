@@ -1019,6 +1019,7 @@ mod sys {
         std::fs::rename(dir.path.join(from), dir.path.join(to))
     }
 
+    #[expect(unsafe_code, reason = "Win32 provides the atomic no-replace rename")]
     pub(super) fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;

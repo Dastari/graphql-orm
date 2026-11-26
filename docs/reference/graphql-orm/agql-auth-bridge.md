@@ -3,7 +3,7 @@ title: "agql-auth Bridge Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-28
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -101,7 +101,17 @@ Subscriptions repeat this entity policy for each event using the original accept
 request. Deleted snapshots additionally require an explicit host
 `RowPolicy::can_read_deleted_preimage` grant; wrapping an entity policy does not
 install or replace that row policy. Repository
-convenience calls with `ctx=None` deny under this wrapper. Custom resolvers can use
+convenience calls with `ctx=None` deny under this wrapper. The one exception is
+opt-in: with `DatabaseBuilder::propagate_request_authority_to_hooks(true)`, a
+mutation hook's nested operation presents the originating request's accepted
+identity on its entity decisions. The wrapper then revalidates status and
+current authority on that identity around the binding check and the business
+entity policy, as for a request, and asks
+`AgqlBindingAuthorizer::authorize_hook_operation` instead of `authorize`, because
+no GraphQL `Context` exists for the nested operation. Its default denies, so a
+host that wants hook writes admitted implements it; see
+[hook writes on the originating request's authority](strict-authorization.md#hook-writes-on-the-originating-requests-authority).
+A named system access is not an accepted principal and stays refused. Custom resolvers can use
 `AgqlCurrentAuthorityGuard::new(entity, policy_key, kind, surface)` with the shared
 enforcement installed as trusted schema configuration, or call `enforce` directly.
 These checks do not replace business, row or field authorization. Custom SQL,

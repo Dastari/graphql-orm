@@ -12,28 +12,27 @@ result_dir=$(mktemp -d)
 trap 'rm -rf -- "$result_dir"' EXIT
 
 run_owned_test() {
-  local target=$1
-  local test_name=$2
-  shift 2
-  local result_log="$result_dir/$target.log"
+  local test_name=$1
+  shift
+  local result_log="$result_dir/$test_name.log"
   cargo test -p graphql-orm-storage --locked --color never --no-default-features \
-    --features s3 --test "$target" "$test_name" -- --exact "$@" \
+    --features s3 --test storage_s3 "$test_name" -- --exact "$@" \
     --color never --test-threads=1 2>&1 | tee "$result_log"
   # HTTPS emits child summaries too. Require the final parent summary, not an
   # earlier child pass, so an empty or incorrectly filtered target fails closed.
   if ! awk '/^test result:/ { final_result = $0 } END { exit !(final_result ~ /^test result: ok\. [1-9][0-9]* passed;/) }' "$result_log"; then
-    echo "S3 security gate: $target::$test_name did not execute passing parent tests" >&2
+    echo "S3 security gate: storage_s3::$test_name did not execute passing parent tests" >&2
     exit 1
   fi
 }
 
-run_owned_test s3_integration single_attempt_delete_does_not_replay_after_lost_response_and_replacement
-run_owned_test s3_integration s3_errors_are_classified_from_structured_metadata
-run_owned_test s3_integration conditional_put_is_one_attempt_after_a_lost_response
-run_owned_test s3_integration conditional_multipart_completion_is_one_attempt_after_a_lost_response
-run_owned_test s3_integration answered_conditional_put_failures_keep_their_classification
-run_owned_test s3_integration conditional_create_probe_refuses_a_provider_that_ignores_if_none_match
-run_owned_test s3_integration conditional_creates_require_a_verified_provider
-run_owned_test s3_https_transport owned_https_transport_fixture --ignored
+run_owned_test s3_integration::single_attempt_delete_does_not_replay_after_lost_response_and_replacement
+run_owned_test s3_integration::s3_errors_are_classified_from_structured_metadata
+run_owned_test s3_integration::conditional_put_is_one_attempt_after_a_lost_response
+run_owned_test s3_integration::conditional_multipart_completion_is_one_attempt_after_a_lost_response
+run_owned_test s3_integration::answered_conditional_put_failures_keep_their_classification
+run_owned_test s3_integration::conditional_create_probe_refuses_a_provider_that_ignores_if_none_match
+run_owned_test s3_integration::conditional_creates_require_a_verified_provider
+run_owned_test s3_https_transport::owned_https_transport_fixture --ignored
 # Resumable multipart conformance on a test-owned, digest-pinned S3 server.
-run_owned_test s3_multipart owned_s3_passes_the_multipart_conformance_suite --ignored
+run_owned_test s3_multipart::owned_s3_passes_the_multipart_conformance_suite --ignored

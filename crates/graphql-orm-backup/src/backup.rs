@@ -21,6 +21,7 @@ use crate::{
     plan_full_backup,
 };
 
+/// Manifest format identifier for newline-delimited JSON database exports.
 pub const DATABASE_EXPORT_FORMAT: &str = "jsonl";
 /// Default number of concurrent object/payload operations.
 pub const DEFAULT_OBJECT_CONCURRENCY: usize = 8;
@@ -176,19 +177,19 @@ pub fn snapshot_manifest_key(snapshot_id: Uuid) -> String {
     format!("snapshots/{snapshot_id}/manifest.json")
 }
 
-/// Returns the reserved table export key.
-///
 /// Returns the zstd-compressed table export key used by the snapshot format.
 #[must_use]
 pub fn database_table_key(snapshot_id: Uuid, table_name: &str) -> String {
     format!("snapshots/{snapshot_id}/database/tables/{table_name}.jsonl.zst")
 }
 
+/// Returns the repository key for a table's zstd-compressed change journal.
 #[must_use]
 pub fn database_changes_key(snapshot_id: Uuid, table_name: &str) -> String {
     format!("snapshots/{snapshot_id}/database/changes/{table_name}.jsonl.zst")
 }
 
+/// Returns the content-addressed repository key for a lowercase SHA-256 digest.
 #[must_use]
 pub fn object_content_key(sha256_hex: &str) -> String {
     let shard_a = sha256_hex.get(0..2).unwrap_or("00");
@@ -440,6 +441,7 @@ async fn create_incremental_backup_inner(
     let changes = database
         .export_incremental(request.parent_snapshot_id)
         .await?;
+    schema.ensure_canonical_identity_unchanged(database).await?;
     let object_refs = objects
         .objects_from_incremental_export(request.parent_snapshot_id, &changes)
         .await?;
@@ -576,6 +578,17 @@ async fn compact_chain_inner(
     options.cancellation.check()?;
     let limits = repository.capacity_limits();
     let chain = load_manifest_chain(repository, request.source_snapshot_id).await?;
+    if !cfg!(feature = "canonical-journal-keys")
+        && chain.iter().any(|manifest| {
+            manifest
+                .graphql_orm_schema_hash
+                .starts_with(crate::database::CANONICAL_KEY_SCHEMA_PREFIX)
+        })
+    {
+        return Err(BackupError::UnsupportedOperation {
+            operation: "compacting a canonical PostgreSQL chain requires the canonical-journal-keys feature for exact float decoding".into(),
+        });
+    }
     let legacy_pins = match required_authenticator(repository)?.legacy_manifest_policy() {
         crate::LegacyManifestPolicy::TrustPinned(pins) => Some(pins),
         _ => None,
@@ -876,7 +889,17 @@ fn ensure_extends_parent(
     } else if parent.database_backend != schema.backend {
         Some("database backend")
     } else if parent.graphql_orm_schema_hash != schema.schema_hash {
-        Some("schema hash")
+        let detail = crate::database::canonical_key_storage_mismatch(
+            &parent.graphql_orm_schema_hash,
+            &schema.schema_hash,
+        )
+        .map_or_else(String::new, |error| format!("{error}; "));
+        return Err(BackupError::InvalidManifestChain {
+            reason: format!(
+                "{detail}incremental snapshot {} schema hash does not match parent {}; start a new full backup after a schema or change journal key encoding change",
+                request.snapshot_id, parent.snapshot_id
+            ),
+        });
     } else {
         None
     };
@@ -977,6 +1000,7 @@ fn check_declared_object_sizes(
     Ok(())
 }
 
+/// Computes the lowercase hexadecimal SHA-256 digest of the supplied bytes.
 #[must_use]
 pub fn bytes_sha256_hex(bytes: &[u8]) -> String {
     sha256_hex(bytes)

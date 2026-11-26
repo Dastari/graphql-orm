@@ -7,8 +7,9 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -35,7 +36,8 @@ const SDL: &str = r#"
     input SlotKeyInput { site: String! name: String! }
     enum SlotOrder { SITE NAME }
     interface SlotIdentity { site: String! name: String! }
-    type Subscription { tick: String! ended: String! }
+    type SlotChange { cursor: String started: Boolean! }
+    type Subscription { tick: String! ended: String! slotChanged(after: String): SlotChange! }
 "#;
 const RSA_PRIVATE_KEY: &str = include_str!("fixtures/test-rsa-private.pem");
 const TOKEN_ISSUER: &str = "https://binary-smoke.test";
@@ -249,6 +251,42 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let completed = websocket.next_json();
     assert_eq!(completed["id"], "revoked");
     assert_eq!(completed["type"], "complete");
+    for (cursor, id) in [("event-cursor", "resume"), ("stale-cursor", "reset")] {
+        websocket.send_json(&json!({
+            "id": id, "type": "subscribe",
+            "payload": {
+                "query": "subscription($after: String) { slotChanged(after: $after) { cursor started } }",
+                "variables": {"after": cursor}
+            }
+        }));
+        let frame = websocket.next_json();
+        assert_eq!(frame["id"], id, "{frame}");
+        assert_eq!(frame["type"], "next", "{frame}");
+        if id == "resume" {
+            assert_eq!(
+                frame["payload"]["data"]["slotChanged"],
+                json!({
+                    "cursor": "next-cursor", "started": false
+                })
+            );
+            let started = websocket.next_json();
+            assert_eq!(started["id"], id, "{started}");
+            assert_eq!(started["type"], "next", "{started}");
+            assert_eq!(
+                started["payload"]["data"]["slotChanged"],
+                json!({
+                    "cursor": null, "started": true
+                })
+            );
+        } else {
+            assert_eq!(frame["payload"]["data"], Value::Null);
+            assert_eq!(
+                frame["payload"]["errors"][0]["extensions"]["code"],
+                "SUBSCRIPTION_REPLAY_RESET"
+            );
+        }
+        assert_eq!(websocket.next_json(), json!({"id": id, "type": "complete"}));
+    }
     websocket.close();
 
     let signal = Command::new("kill")
@@ -311,6 +349,8 @@ fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
                 "router did not exit within {TIMEOUT:?} after SIGTERM\nstdout: {stdout}\nstderr: {stderr}"
             );
         }
+        // Kept: a child process offers no exit notification short of a
+        // blocking wait, so this polls it against the deadline above.
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -325,6 +365,8 @@ fn wait_until_ready(address: SocketAddr, child: &mut Child) {
             panic!("router exited before readiness with {status}");
         }
         assert!(Instant::now() < deadline, "router readiness timed out");
+        // Kept: readiness is only observable through the probe, polled
+        // against the deadline above.
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -476,6 +518,16 @@ fn descriptor_document(address: SocketAddr) -> Vec<u8> {
                 arguments: Vec::<ArgumentDescriptor>::new(),
                 authorization: AuthorizationRequirement::Authenticated,
             },
+            OperationDescriptor {
+                root_type: RootOperationType::Subscription,
+                field_name: "slotChanged".to_owned(),
+                arguments: vec![ArgumentDescriptor {
+                    name: "after".to_owned(),
+                    graphql_type: "String".to_owned(),
+                    required: false,
+                }],
+                authorization: AuthorizationRequirement::Authenticated,
+            },
         ],
         extensions: Vec::new(),
         fingerprints: DescriptorFingerprints {
@@ -515,37 +567,38 @@ fn decode_chunked(mut input: &[u8]) -> std::io::Result<Vec<u8>> {
 struct FixtureSubgraph {
     address: SocketAddr,
     stopping: Arc<AtomicBool>,
+    /// Dropping it answers the held first GraphQL request.
+    release_held: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl FixtureSubgraph {
     fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stopping = Arc::new(AtomicBool::new(false));
         let graphql_requests = Arc::new(AtomicUsize::new(0));
+        let (release_held, held) = mpsc::channel::<()>();
+        let held = Arc::new(Mutex::new(Some(held)));
         let thread_stopping = stopping.clone();
         let thread_graphql_requests = graphql_requests.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let requests = thread_graphql_requests.clone();
-                        // A deliberately timed-out request must not serialize the
-                        // following independent request behind the fixture listener.
-                        thread::spawn(move || handle_fixture_request(stream, address, requests));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    break;
                 }
+                let requests = thread_graphql_requests.clone();
+                let held = held.clone();
+                // A deliberately timed-out request must not serialize the
+                // following independent request behind the fixture listener.
+                thread::spawn(move || handle_fixture_request(stream, address, requests, held));
             }
         });
         Self {
             address,
             stopping,
+            release_held: Some(release_held),
             thread: Some(thread),
         }
     }
@@ -558,6 +611,9 @@ impl FixtureSubgraph {
 impl Drop for FixtureSubgraph {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        drop(self.release_held.take());
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -568,6 +624,7 @@ fn handle_fixture_request(
     mut stream: TcpStream,
     address: SocketAddr,
     graphql_requests: Arc<AtomicUsize>,
+    held: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let Ok(request) = read_http_head(&mut stream) else {
@@ -588,7 +645,12 @@ fn handle_fixture_request(
         ("application/json", descriptor_document(address))
     } else if request.starts_with("POST /graphql ") {
         if graphql_requests.fetch_add(1, Ordering::AcqRel) == 0 {
-            thread::sleep(Duration::from_millis(250));
+            // The first answer is held until the fixture drops, so the
+            // router's subgraph timeout fires whatever the machine load.
+            let held = held.lock().unwrap().take();
+            if let Some(held) = held {
+                let _ = held.recv();
+            }
         }
         (
             "application/json",
@@ -708,6 +770,47 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                                 false,
                             )?;
                         }
+                    }
+                    Some("subscribe")
+                        if message["payload"]["query"]
+                            .as_str()
+                            .is_some_and(|query| query.contains("slotChanged")) =>
+                    {
+                        let id = message["id"].clone();
+                        let payloads = match message["payload"]["variables"]["after"].as_str() {
+                            Some("event-cursor") => vec![
+                                json!({"data": {"slotChanged": {"cursor": "next-cursor", "started": false}}}),
+                                json!({"data": {"slotChanged": {"cursor": null, "started": true}}}),
+                            ],
+                            Some("stale-cursor") => vec![json!({
+                                "data": null,
+                                "errors": [{
+                                    "message": "subscription replay is unavailable",
+                                    "extensions": {"code": "SUBSCRIPTION_REPLAY_RESET"}
+                                }]
+                            })],
+                            other => {
+                                return Err(std::io::Error::other(format!(
+                                    "unexpected After: {other:?}"
+                                )));
+                            }
+                        };
+                        for payload in payloads {
+                            let next = json!({"id": id, "type": "next", "payload": payload});
+                            write_websocket_frame(
+                                &mut stream,
+                                0x1,
+                                &serde_json::to_vec(&next)?,
+                                false,
+                            )?;
+                        }
+                        let complete = json!({"id": id, "type": "complete"});
+                        write_websocket_frame(
+                            &mut stream,
+                            0x1,
+                            &serde_json::to_vec(&complete)?,
+                            false,
+                        )?;
                     }
                     Some("subscribe") => {
                         let id = message["id"].as_str().unwrap_or("smoke");

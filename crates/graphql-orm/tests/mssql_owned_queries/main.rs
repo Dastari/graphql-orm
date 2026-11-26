@@ -4,6 +4,7 @@
 #[path = "../support/owned_mssql.rs"]
 mod owned_mssql;
 
+mod exact_string_filters;
 mod mssql_correctness;
 mod mssql_integration;
 mod typed_parameters;

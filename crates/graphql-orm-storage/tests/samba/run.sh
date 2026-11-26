@@ -128,7 +128,7 @@ PYREADY
 run_test() {
   local expected=$1 output status
   shift
-  if output=$("$@" 2>&1); then status=0; else status=$?; fi
+  if output=$("$@" "$expected" -- --ignored --exact --nocapture 2>&1); then status=0; else status=$?; fi
   printf '%s\n' "$output"
   if (( status != 0 )); then return "$status"; fi
   printf '%s\n' "$output" | python3 -c '
@@ -143,18 +143,15 @@ if summaries != [("1", "0", "0")] or not re.search(r"^test " + re.escape(sys.arg
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_rejects_invalid_password "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_rejects_invalid_password -- --ignored --exact --nocapture
+  run_test smb_integration::samba_rejects_invalid_password "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_round_trip_streaming_listing_and_atomic_create "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --exact --nocapture
+  run_test smb_integration::samba_round_trip_streaming_listing_and_atomic_create "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_oversized_chunk_cancellation_and_concurrency_matrix "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_oversized_chunk_cancellation_and_concurrency_matrix -- --ignored --exact --nocapture
+  run_test smb_integration::samba_oversized_chunk_cancellation_and_concurrency_matrix "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # Empty output from a successful find is clean; Docker/find failures are not.
 if uploading=$(docker exec "$NORMAL_ID" find /share -path /share/.deleted -prune -o -type f -name '*.uploading' -print -quit); then
@@ -170,74 +167,64 @@ fi
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$ENCRYPTED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_REQUIRE_ENCRYPTION=1 \
-  run_test samba_round_trip_streaming_listing_and_atomic_create "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --exact --nocapture
+  run_test smb_integration::samba_round_trip_streaming_listing_and_atomic_create "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_EXPECT_MAX_WRITE=65536 \
-  run_test samba_constrained_max_write_handles_oversized_input_chunk "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --exact --nocapture
+  run_test smb_integration::samba_constrained_max_write_handles_oversized_input_chunk "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 cd "$WORKSPACE_ROOT/crates/graphql-orm-backup"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test full_smb_snapshot_lifecycle_and_locking "$SMB_TEST_CARGO" test --locked --no-default-features --features smb --test smb_repository full_smb_snapshot_lifecycle_and_locking -- --ignored --exact --nocapture
+  run_test smb_repository::full_smb_snapshot_lifecycle_and_locking "$SMB_TEST_CARGO" test --locked --no-default-features --features smb --test backup_smb
 
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test samba_reconnects_after_server_restart "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_reconnects_after_server_restart -- --ignored --exact --nocapture
+  run_test smb_integration::samba_reconnects_after_server_restart "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 
 # Actual SDK directory-stream regressions; the original seven cases above stay intact.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test sdk_directory_multibatch_eof_exact_names "$SMB_TEST_CARGO" test --locked --features smb --test smb_directory_stream \
-  sdk_directory_multibatch_eof_exact_names -- --ignored --exact --nocapture
+  run_test smb_directory_stream::sdk_directory_multibatch_eof_exact_names "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test sdk_directory_drop_releases_directory_arc "$SMB_TEST_CARGO" test --locked --features smb --test smb_directory_stream \
-  sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture
+  run_test smb_directory_stream::sdk_directory_drop_releases_directory_arc "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # Resource-bound and server-identity regressions.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test samba_self_nesting_listing_terminates "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_self_nesting_listing_terminates -- --ignored --exact --nocapture
+  run_test smb_integration::samba_self_nesting_listing_terminates "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # The constrained server accepts the same credentials but has another server
 # GUID, so it stands in for a different server answering for the same name.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_ALTERNATE_PORT="$CONSTRAINED_PORT" \
-  run_test samba_reconnect_refuses_a_server_with_another_identity "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_reconnect_refuses_a_server_with_another_identity -- --ignored --exact --nocapture
+  run_test smb_integration::samba_reconnect_refuses_a_server_with_another_identity "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # Listing prefix contract on the default (SMB 3.1.1) dialect.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_listing_follows_the_provider_prefix_contract "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_listing_follows_the_provider_prefix_contract -- --ignored --exact --nocapture
+  run_test smb_integration::samba_listing_follows_the_provider_prefix_contract "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # Portable key mode refuses names a Windows target cannot store as written.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_portable_keys_refuse_windows_unsafe_names "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_portable_keys_refuse_windows_unsafe_names -- --ignored --exact --nocapture
+  run_test smb_integration::samba_portable_keys_refuse_windows_unsafe_names "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # The temporary-file sweep removes only stale backend temporary names.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  run_test samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
-  samba_sweep_removes_only_stale_temporary_files -- --ignored --exact --nocapture
+  run_test smb_integration::samba_sweep_removes_only_stale_temporary_files "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test storage_smb
 
 # A dropped sweep releases its handles without its caller's runtime, and a
 # sweep that loses its session, has a close cancelled by its deadline, or has
@@ -246,29 +233,25 @@ for case in samba_sweep_releases_its_handles_without_the_callers_runtime samba_s
   SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
   SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-    run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test smb_integration \
-    "$case" -- --ignored --exact --nocapture
+    run_test "smb_integration::$case" "$SMB_TEST_CARGO" test --locked --features smb,smb-sweep-test-hooks --test storage_smb
 done
 
 # Range reads start at their offset and report the server's write time.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_range_reads_start_at_the_offset_and_report_metadata "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_range_reads_start_at_the_offset_and_report_metadata -- --ignored --exact --nocapture
+  run_test smb_integration::samba_range_reads_start_at_the_offset_and_report_metadata "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # The constrained server offers at most SMB 3.0, below the default minimum.
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  run_test samba_refuses_a_dialect_below_the_minimum "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-  samba_refuses_a_dialect_below_the_minimum -- --ignored --exact --nocapture
+  run_test smb_integration::samba_refuses_a_dialect_below_the_minimum "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 
 # Conditional creates publish whole objects with exactly one winner, and a
 # stalled transfer holds no transfer permit.
 for case in samba_conditional_create_is_invisible_until_published samba_stalled_transfers_release_their_permits samba_racing_conditional_creates_have_exactly_one_winner; do
   SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
   SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-    run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
-    "$case" -- --ignored --exact --nocapture
+    run_test "smb_integration::$case" "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 done
 
 # The losing conditional writer and the resumed writes leave no temporary file.
@@ -291,6 +274,5 @@ for case in samba_a_close_cancelled_while_waiting_for_a_credit_releases_the_hand
   SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
   SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
   SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-    run_test "$case" "$SMB_TEST_CARGO" test --locked --features smb --test smb_handle_close \
-    "$case" -- --ignored --exact --nocapture
+    run_test "smb_handle_close::$case" "$SMB_TEST_CARGO" test --locked --features smb --test storage_smb
 done

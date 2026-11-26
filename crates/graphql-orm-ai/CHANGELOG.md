@@ -10,6 +10,54 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.167.0
+
+- **Fixed.** Approval-required generated mutations now execute after approval.
+  The runtime verifies the canonical provider plan hash already stored in the
+  approval. **No action** for hosts using the built-in approval service; **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`).
+  [Migration](MIGRATION.md#01660-to-01670-approved-generated-mutations)
+
+## Unreleased - 0.166.0
+
+- Updated the legacy approval-index upgrade tests for ORM 0.225.0. On SQLite
+  and PostgreSQL, a filter on that index changes the source schema hash and
+  prevents automatic admission of the replacement. [Migration](MIGRATION.md#01650-to-01660)
+
+## Unreleased - 0.165.0
+
+Requires ORM 0.224.0. No public API, GraphQL SDL, persistent schema, broker
+definition or fingerprint change. See the
+[migration guide](MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions).
+
+- **Fixed (#291):** the crate's internal database handle forwards
+  repository field decisions for fields the host owns to the host policy's
+  `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority`. A host refusal written in
+  those methods is no longer skipped on that handle. Decisions for the
+  crate's own key-less fields are unchanged.
+
+## Unreleased - 0.164.0
+
+- SQL Server run candidate reads use the ORM's generated exact string filters
+  to seek on the run-state indexes (#867). SQL text changes for all opted-in
+  exact string comparisons. See the [migration guidance](MIGRATION.md#01630-to-01640)
+  for plan guides, Query Store forced plans, and live column drift.
+
+## Unreleased - 0.163.0
+
+- **No action (#816).** Existing skill versions that exceed the schema depth
+  or regex length bounds remain usable. The resolved skill and a scoped
+  operator report identify them as legacy. New publications and republications
+  must satisfy the bounds.
+- **Action needed** when host code matches `ProviderError::InvalidConfiguration`
+  from adapter construction, or when `provider_profile_endpoint_issues` lists
+  profiles. No schema or data migration. Listed profiles already failed adapter
+  initialization before this release. Adapter path failures now return
+  `ProviderError::InvalidEndpointPath` instead of `InvalidConfiguration`. Any
+  edit to a grandfathered profile, including a display-name-only edit, fails
+  until its URL is corrected.
+  [Migration for #817](MIGRATION.md#01620-to-01630-skill-schemas-and-provider-endpoints)
+
 ## Unreleased - 0.162.0
 
 - Use tool profiles 0.30.0 for faster capability catalogue compilation (#865).

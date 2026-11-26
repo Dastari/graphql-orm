@@ -79,6 +79,8 @@ jobs:
         run: python3 scripts/check-documentation.py --base "${BASE_SHA}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
+      - name: Check dependency stacks
+        run: python3 scripts/check-dependency-stacks.py
       - name: Check Git-only release metadata
         run: |
           python3 scripts/check-release-state.py
@@ -264,6 +266,10 @@ jobs:
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
           done
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --test zero_public_write_inputs_backends
+      - name: Verify nested create on owned PostgreSQL
+        run: |
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test nested_create -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test compile_ui nested_create_ui::
       - name: Check composite subscription scope declarations on native backends
         run: |
           for backend in postgres mssql; do
@@ -273,7 +279,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "1"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test computed_field_invalidation --test postgres_rls --test postgres_rls_drift --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test full_text_search --test search_helper_conflicts --test like_escape_matrix --test loader_chunks_postgres --test query_loader_batch --test order_aggregate_visibility --test owned_postgres_lifecycle --test computed_field_invalidation --test postgres_rls --test postgres_rls_drift --test managed_version --test update_assurance --test update_assurance_registry --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test point_read_visibility_backends --test server_only_relation_keys --test principal_bound_upserts --test postgres_table_case --test migration_safety --test migration_composite_uniques --test postgres_qualified_tables --test retention_purge_postgres --test temporal_bind_compatibility --test mutation_hook_public_errors --test visible_row_pages --test bulk_write_targets --test transaction_scope_backends --test ordered_sort --test keyset_decimals --test page_limit_contract --test client_error_contract --test client_facing_metadata -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --test postgres_rls_coverage --test postgres_change_journal_paths --test postgres_change_journal_truncate --test dependent_delete_repro --test backup_roundtrip -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal --lib catalog_read_cancellation -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,change-journal --test dependent_delete_repro --test backup_roundtrip --test generated_error_sanitization
@@ -304,7 +310,7 @@ jobs:
         run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - name: Execute MSSQL schema and query regressions without a database
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_owned_connections --test mssql_restore_marker
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --test composite_primary_keys --test zero_public_write_inputs_backends --test mssql_owned_connections --test mssql_owned_queries --test mssql_restore_marker
 
   orm-security-sqlite:
     name: Current authority and subscription privacy (SQLite)
@@ -321,7 +327,7 @@ jobs:
       - name: Require current authority, strict policies, pagination, and private event delivery
         run: |
           bash scripts/run-security-test-targets.sh sqlite,auth-agql \
-            current_authority authorization_mode authorized_pagination \
+            current_authority hook_request_authority_agql authorization_mode authorized_pagination \
             subscription_release_authorization subscription_provenance_authorization \
             subscription_repository_provenance
       - name: Require exact receiver-purpose admission

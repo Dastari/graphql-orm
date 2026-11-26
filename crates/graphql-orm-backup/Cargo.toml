@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-backup"
-version = "0.30.0"
+version = "0.33.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -10,6 +10,9 @@ publish = false
 
 [package.metadata.distribution]
 method = "git-full-revision"
+
+[lints]
+workspace = true
 
 [features]
 default = ["local"]
@@ -21,6 +24,8 @@ smb = ["dep:secrecy", "graphql-orm-storage/smb"]
 orm = ["dep:graphql-orm"]
 orm-sqlite = ["orm", "graphql-orm/sqlite"]
 orm-postgres = ["orm", "graphql-orm/postgres"]
+# Exact JSON float decoding preserves the binary identity across restore.
+canonical-journal-keys = ["serde_json/float_roundtrip"]
 
 [dependencies]
 async-trait = "0.1"
@@ -46,51 +51,21 @@ tempfile = "3"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 
 [[test]]
-name = "local_repository_round_trip"
-path = "tests/local_repository_round_trip.rs"
+name = "backup_local"
+path = "tests/backup_local/main.rs"
 required-features = ["local"]
 
 [[test]]
-name = "incremental_backup"
-path = "tests/incremental_backup.rs"
-required-features = ["local"]
-
-[[test]]
-name = "operational_safety"
-path = "tests/operational_safety.rs"
-required-features = ["local"]
-
-[[test]]
-name = "restore_snapshot"
-path = "tests/restore_snapshot.rs"
-required-features = ["local"]
-
-[[test]]
-name = "smb_repository"
-path = "tests/smb_repository.rs"
-required-features = ["smb"]
-
-[[test]]
-name = "orm_016_sqlite_conformance"
-path = "tests/orm_016_sqlite_conformance.rs"
+name = "backup_sqlite"
+path = "tests/backup_sqlite/main.rs"
 required-features = ["local", "orm-sqlite"]
 
 [[test]]
-name = "orm_016_postgres_conformance"
-path = "tests/orm_016_postgres_conformance.rs"
+name = "backup_postgres"
+path = "tests/backup_postgres/main.rs"
 required-features = ["local", "orm-postgres"]
 
 [[test]]
-name = "lifecycle_safety"
-path = "tests/lifecycle_safety.rs"
-required-features = ["local"]
-
-[[test]]
-name = "manifest_authentication"
-path = "tests/manifest_authentication.rs"
-required-features = ["local"]
-
-[[test]]
-name = "snapshot_object_index"
-path = "tests/snapshot_object_index.rs"
-required-features = ["local", "orm-sqlite"]
+name = "backup_smb"
+path = "tests/backup_smb/main.rs"
+required-features = ["smb"]

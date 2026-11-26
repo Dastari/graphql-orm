@@ -310,11 +310,10 @@ runner:
 bash scripts/run-owned-s3-security-tests.sh
 ```
 
-The script uses the S3 feature without provider defaults and selects the exact
-`single_attempt_delete_does_not_replay_after_lost_response_and_replacement`
-test in `s3_integration`, then the ignored `owned_https_transport_fixture`
-parent in `s3_https_transport`. It never runs the environment-configured
-real-service round trip or invokes the HTTPS child entry point on its own.
+The script uses the S3 feature without provider defaults and selects each test
+by its exact module-qualified name in the `storage_s3` binary. It runs the
+loopback HTTP regressions, the ignored HTTPS parent, and the ignored multipart
+conformance test. Run the environment-configured S3 round trip separately.
 Proxy and real-service test environment settings are cleared within the script.
 Each Cargo process must succeed and its final parent summary must report a
 nonzero passing-test count; nested HTTPS child summaries cannot satisfy an
@@ -356,6 +355,8 @@ PostgreSQL and SQL Server. The `postgres` lane includes the same test binary.
 `scripts/run-owned-database-lanes.sh unique-index-preflight` runs the conditional
 unique-index regressions on SQLite and test-owned PostgreSQL: a newly added
 predicate column, duplicate keys inside the filter, and duplicates outside it.
+It also checks that opaque partial-index predicates remain distinct from
+plain indexes on SQLite, test-owned PostgreSQL, and test-owned SQL Server.
 
 `scripts/run-owned-database-lanes.sh query-loader-batch` runs the relation
 default-order, batch-isolation, filter-limit and relation-count-order

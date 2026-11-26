@@ -1,0 +1,5 @@
+error: upsert_bound_key requires graphql_entity upsert = "..." naming the bound field
+  --> tests/ui/principal_upserts/bound_without_upsert.rs:23:5
+   |
+23 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

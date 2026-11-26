@@ -10,6 +10,28 @@ supersedes: []
 
 # Migration Guide
 
+## 0.32.0 to 0.33.0
+
+**No action.** Build-time lints and API documentation require no host changes.
+
+## 0.31.0 to 0.32.0: integration test binaries
+
+**No action.** The integration test binaries are grouped by lane.
+
+## 0.30.0 to 0.31.0: Canonical PostgreSQL journal keys
+
+**No action.** Upgrade ORM and backup together when enabling
+the optional PostgreSQL encoding. Follow the
+[database cutover procedure](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys),
+then enable the `canonical-journal-keys` feature, configure
+`OrmBackupAdapter::with_canonical_change_journal_keys`, and take a fresh full
+backup. The feature enables exact JSON float decoding for restore and
+compaction. A build without it refuses to compact a canonical chain.
+Changing a live primary-key storage type or modifier requires a new full
+backup and checkpoint. A canonical adapter refuses a legacy parent or a
+database in the other mode. Incremental hosts continue to supply their own
+change export and checkpoint handling.
+
 ## 0.29.0 to 0.30.0: adapter backend selection
 
 **No action.** No snapshot format or data migration is needed. Use backup

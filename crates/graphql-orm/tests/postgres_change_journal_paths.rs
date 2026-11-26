@@ -381,6 +381,24 @@ async fn quoted_and_dotted_table_names_journal() -> Result<(), Box<dyn std::erro
         matches!(&split, Err(error) if error.to_string().contains("does not match the table")),
         "{split:?}"
     );
+    let start = database.enable_canonical_change_journal_keys().await?;
+    JournalQuoted::update_by_id(
+        &database,
+        &"quoted-1".to_string(),
+        UpdateJournalQuotedInput {
+            label: Some("canonical".to_string()),
+        },
+    )
+    .await?;
+    let changes = database
+        .export_changes(ChangeWindow {
+            after_sequence: Some(start),
+            until: i64::MAX,
+        })
+        .await?;
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].primary_key, concat!("pg1:", "71756f7465642d31"));
+    assert_eq!(changes[0].action, BackupChangeAction::Update);
     Ok(())
 }
 
@@ -703,5 +721,133 @@ async fn legacy_timestamp_and_float_journal_keys_follow_session_settings()
     assert_ne!(changes[1].primary_key, changes[3].primary_key);
     assert_eq!(changes[2].action, BackupChangeAction::Update);
     assert_eq!(changes[3].action, BackupChangeAction::Update);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn canonical_timestamp_and_float_journal_keys_ignore_session_settings()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::Entity;
+
+    let owner = owned_postgres::OwnedPostgres::pool("postgres-canonical-key-format", 2).await?;
+    // Register the same physical key names on existing native-typed tables.
+    // The recorder derives key text from the live PostgreSQL column type.
+    sqlx::raw_sql(
+        "CREATE TABLE journalmixed (id timestamptz PRIMARY KEY, label text NOT NULL);
+         CREATE TABLE \"JournalUsers\" (id double precision PRIMARY KEY, label text NOT NULL);",
+    )
+    .execute(&owner)
+    .await?;
+    let database = graphql_orm::db::Database::new(owner.clone());
+    database
+        .ensure_change_journal_recorder(&[
+            <JournalMixed as Entity>::metadata(),
+            <JournalQuoted as Entity>::metadata(),
+        ])
+        .await?;
+
+    let start = database.enable_canonical_change_journal_keys().await?;
+    // Reinstalling the definitions must preserve the canonical encoding.
+    database
+        .ensure_change_journal_recorder(&[
+            <JournalMixed as Entity>::metadata(),
+            <JournalQuoted as Entity>::metadata(),
+        ])
+        .await?;
+    assert_eq!(
+        database.enable_canonical_change_journal_keys().await?,
+        start
+    );
+    let mut tx = owner.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL graphql_orm.change_journal = 'on';
+         SET LOCAL DateStyle = 'ISO, MDY';
+         SET LOCAL TimeZone = 'UTC';
+         SET LOCAL extra_float_digits = 1;
+         INSERT INTO journalmixed VALUES (TIMESTAMPTZ '2026-11-09 12:34:56+00', 'first');
+         INSERT INTO \"JournalUsers\" VALUES (1.2345678901234567, 'first');
+         SET LOCAL DateStyle = 'SQL, DMY';
+         SET LOCAL TimeZone = 'Asia/Tokyo';
+         SET LOCAL extra_float_digits = -2;
+         UPDATE journalmixed SET label = 'second';
+         UPDATE \"JournalUsers\" SET label = 'second';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let changes = database
+        .export_changes(ChangeWindow {
+            after_sequence: Some(start),
+            until: i64::MAX,
+        })
+        .await?;
+    assert_eq!(changes.len(), 4);
+    assert_eq!(changes[0].primary_key, changes[2].primary_key);
+    assert_eq!(changes[1].primary_key, changes[3].primary_key);
+    assert_eq!(changes[2].action, BackupChangeAction::Update);
+    assert_eq!(changes[3].action, BackupChangeAction::Update);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn canonical_keys_refuse_unsupported_types_during_setup()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::Entity;
+
+    let pool = owned_postgres::OwnedPostgres::pool("postgres-canonical-unsupported-key", 1).await?;
+    sqlx::raw_sql(
+        "CREATE TABLE journalmixed (id text PRIMARY KEY, label text NOT NULL);
+         CREATE TABLE \"JournalUsers\" (id char(4) PRIMARY KEY, label text NOT NULL);",
+    )
+    .execute(&pool)
+    .await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let metadata = [
+        <JournalMixed as Entity>::metadata(),
+        <JournalQuoted as Entity>::metadata(),
+    ];
+    database.ensure_change_journal_recorder(&metadata).await?;
+    let cutover = database
+        .enable_canonical_change_journal_keys()
+        .await
+        .unwrap_err();
+    assert!(
+        cutover
+            .to_string()
+            .contains("supported PostgreSQL scalar primary-key type"),
+        "{cutover}"
+    );
+    assert_eq!(
+        database.canonical_change_journal_start_sequence().await?,
+        None
+    );
+
+    sqlx::query("DROP TABLE \"JournalUsers\"")
+        .execute(&pool)
+        .await?;
+    database.enable_canonical_change_journal_keys().await?;
+    sqlx::query("CREATE TABLE \"JournalUsers\" (id char(4) PRIMARY KEY, label text NOT NULL)")
+        .execute(&pool)
+        .await?;
+    let install = database
+        .ensure_change_journal_recorder(&metadata)
+        .await
+        .unwrap_err();
+    assert!(
+        install
+            .to_string()
+            .contains("supported PostgreSQL scalar primary-key type"),
+        "{install}"
+    );
+    let trigger_installed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+         WHERE tgrelid = '\"JournalUsers\"'::regclass AND tgname = 'graphql_orm_change_journal')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!trigger_installed);
     Ok(())
 }

@@ -546,6 +546,60 @@ mod portable {
     }
 
     #[test]
+    fn nested_closure_sql_grows_linearly() {
+        let opening = |level| {
+            if B::DIALECT == DatabaseBackend::Mssql {
+                format!(" AS __gom_closure_{level}_g")
+            } else {
+                format!("WITH RECURSIVE __gom_closure_{level} (")
+            }
+        };
+        let wrap = |target| {
+            ReadPredicate::related_closure_within::<B, ClosureNode>(
+                ReadPredicateQuantifier::Any,
+                PARENT,
+                target,
+                2,
+            )
+            .unwrap()
+        };
+        for negate in [false, true] {
+            let base = passes();
+            let mut sizes = vec![rendered(&base).len()];
+            let mut predicate = base;
+            for level in 1..=2 {
+                predicate = wrap(predicate);
+                let visible = if negate {
+                    predicate.clone().not().unwrap()
+                } else {
+                    predicate.clone()
+                };
+                let sql = rendered(&visible);
+                sizes.push(sql.len());
+                for inner in 1..=level {
+                    let name = opening(inner);
+                    assert_eq!(sql.matches(&name).count(), 1, "level {level}, {name}");
+                }
+            }
+            eprintln!("{:?}, negated={negate}: {sizes:?}", B::DIALECT);
+            // The shared recursive step adds a seed and a row projection.
+            // Allow that fixed overhead in addition to one closure's SQL.
+            assert!(
+                sizes[2] - sizes[1] <= sizes[1] - sizes[0] + 800,
+                "{sizes:?}"
+            );
+        }
+        let inner = wrap(passes());
+        for target in [
+            inner.clone().not().unwrap(),
+            inner.clone().and(passes()).unwrap(),
+            inner.or(passes()).unwrap(),
+        ] {
+            assert_eq!(rendered(&wrap(target)).matches(&opening(1)).count(), 1);
+        }
+    }
+
+    #[test]
     fn closures_nest_at_most_two_levels_on_every_backend() {
         assert_eq!(READ_PREDICATE_CLOSURE_MAX_NESTING, 2);
         // Two levels build, directly or through relations, negations and or.
@@ -1395,11 +1449,11 @@ mod portable {
             )))
             .unwrap()
             .build_delete_sql();
-        // SQLite keeps the original nested rendering, with every copy of
-        // the TRUE and FALSE tests.
+        // The outer closure uses the inner walk once. SQL Server can
+        // additionally share the inner walk's own target between rows.
         let copies = match B::DIALECT {
-            DatabaseBackend::Sqlite => 16,
-            DatabaseBackend::Postgres => 4,
+            DatabaseBackend::Sqlite => 4,
+            DatabaseBackend::Postgres => 2,
             DatabaseBackend::Mssql => 2,
             other => panic!("unsupported test backend: {other:?}"),
         };

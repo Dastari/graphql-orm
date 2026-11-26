@@ -13,6 +13,7 @@
 //! `try_join_all`, so any error aborts the entire fetch.
 
 use graphql_orm::prelude::*;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::{Arc, Mutex};
 
 mod zones {
@@ -196,7 +197,11 @@ impl graphql_orm::graphql::orm::FieldPolicy for DenyNoteField {
 }
 
 async fn zone_pool() -> sqlx::SqlitePool {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+    zone_pool_with_options(SqlitePoolOptions::new()).await
+}
+
+async fn zone_pool_with_options(options: SqlitePoolOptions) -> sqlx::SqlitePool {
+    let pool = options
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
@@ -374,21 +379,28 @@ async fn unauthenticated_callers_cannot_resolve_an_auth_required_entity() {
     );
 }
 
-/// Denies every assurance requirement, recording the policy it was asked for.
+/// Records each policy and requires the test's step-up marker.
 #[derive(Debug, Default)]
 struct StepUpRequired(Mutex<Vec<String>>);
+
+struct SteppedUp;
 
 impl AssuranceRequirementEvaluator for StepUpRequired {
     fn enforce(
         &self,
-        _check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
+        check: &graphql_orm::graphql::assurance::AssuranceCheck<'_>,
         _actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> async_graphql::Result<()> {
         self.0.lock().unwrap().push(policy_id.to_owned());
-        Err(async_graphql::Error::new(
-            "additional authentication is required",
-        ))
+        if check.data_opt::<SteppedUp>().is_some() {
+            return Ok(());
+        }
+        use async_graphql::ErrorExtensions;
+        Err(
+            async_graphql::Error::new("additional authentication is required")
+                .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")),
+        )
     }
 }
 
@@ -433,6 +445,75 @@ async fn entity_resolvers_enforce_the_single_read_assurance_coordinate() {
         .await;
     assert_eq!(direct.errors.len(), 1, "{:?}", direct.data);
     assert_eq!(evaluator.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn entity_resolvers_enforce_list_query_assurance_before_reading() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let acquisitions = Arc::new(AtomicUsize::new(0));
+    let (opened, reused) = (acquisitions.clone(), acquisitions.clone());
+    let pool = zone_pool_with_options(
+        SqlitePoolOptions::new()
+            .after_connect(move |_, _| {
+                opened.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })
+            .before_acquire(move |_, _| {
+                reused.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            }),
+    )
+    .await;
+    let mut database = graphql_orm::db::Database::with_entity_policy(pool, allowing_policy());
+    database.set_row_policy(HideNamedZone);
+    let mut builder = OperationAssuranceRegistry::builder(
+        zones::graphql_orm_operation_catalog(),
+        AssuranceSchemaConfig::legacy(),
+    );
+    builder
+        .require(
+            graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            "zones",
+            "read.recent-auth",
+        )
+        .unwrap();
+    let unclassified = zones::schema_builder(database.clone())
+        .data(AuthSubject::new("user-1"))
+        .finish();
+    let schema = zones::schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(StepUpRequired::default()),
+        ))
+        .finish();
+    let query = entities_query(&["zone-1"], "id");
+    let before = acquisitions.load(Ordering::SeqCst);
+    let response = schema.execute(&query).await;
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    assert_eq!(
+        response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code")),
+        Some(&async_graphql::Value::from("STEP_UP_REQUIRED")),
+    );
+    assert_eq!(acquisitions.load(Ordering::SeqCst), before);
+
+    for response in [
+        schema
+            .execute(async_graphql::Request::new(&query).data(SteppedUp))
+            .await,
+        unclassified.execute(&query).await,
+    ] {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert_eq!(
+            response.data.into_json().unwrap()["_entities"][0]["id"],
+            "zone-1"
+        );
+    }
+    assert!(acquisitions.load(Ordering::SeqCst) > before);
 }
 
 /// A classification registered for `Query._entities` itself is enforced too.

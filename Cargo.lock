@@ -97,7 +97,7 @@ dependencies = [
  "data-encoding",
  "futures-channel",
  "hmac 0.12.1",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "percent-encoding",
  "rand 0.8.6",
  "serde",
@@ -494,13 +494,13 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -3117,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.229.0"
+version = "0.234.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3137,7 +3137,7 @@ dependencies = [
  "graphql-orm-macros",
  "graphql-orm-operation-catalog",
  "graphql-orm-router-protocol",
- "jsonwebtoken 10.4.0",
+ "jsonwebtoken",
  "proptest",
  "quick-xml 0.41.0",
  "rust_decimal",
@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.162.0"
+version = "0.167.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.30.0"
+version = "0.32.0"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-backup"
-version = "0.30.0"
+version = "0.33.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.229.0"
+version = "0.234.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.14.0"
+version = "0.16.0"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",
@@ -3258,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.18.0"
+version = "0.22.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -3270,7 +3270,7 @@ dependencies = [
  "graphql-composition",
  "graphql-orm-router-protocol",
  "hive-router",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "ntex",
  "opentelemetry",
  "proptest",
@@ -3290,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router-protocol"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3299,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-storage"
-version = "0.18.3"
+version = "0.20.0"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -3680,7 +3680,7 @@ dependencies = [
  "insta",
  "ipnet",
  "itoa",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "lasso2",
  "lazy-init",
  "lazy_static",
@@ -4541,30 +4541,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee0b351864e7ffbc5db9273daf7fa1b4d5177b0946713d667ca571b83c0b4045"
 dependencies = [
  "regex-syntax",
-]
-
-[[package]]
-name = "jsonwebtoken"
-version = "10.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
-dependencies = [
- "base64",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hmac 0.12.1",
- "js-sys",
- "p256 0.13.2",
- "p384",
- "pem",
- "rand 0.8.6",
- "rsa",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "signature 2.2.0",
- "simple_asn1",
- "zeroize",
 ]
 
 [[package]]

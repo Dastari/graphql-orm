@@ -44,10 +44,9 @@ const MAX_DURABLE_DIRS: usize = 4_096;
 /// symbolic links below the root and reads of files with multiple hard links.
 /// The configured root itself may be a link.
 ///
-/// On Windows, [`Self::new`] does not exist: construction is a compile-time
-/// choice. Hosts must explicitly use [`Self::new_trusted_windows_root`] and
-/// protect the complete root tree from concurrent mutation; links are not
-/// enforced as a security boundary there.
+/// On Windows, hosts must explicitly use [`Self::new_trusted_windows_root`].
+/// Its path-based access relies on the host to prevent concurrent changes
+/// to the root, its ancestors, and its descendants.
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,

@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use graphql_orm::db::Database;
 use graphql_orm::futures::future::BoxFuture;
-use graphql_orm::graphql::auth::AccessContext;
+use graphql_orm::graphql::auth::{AccessContext, PolicyAuthority};
 use graphql_orm::graphql::orm::{FieldPolicy, OrmSchemaModule};
 
 use crate::persistence::AiSchemaModule;
@@ -130,6 +130,59 @@ impl FieldPolicy<AiOrmBackend> for CustodyFieldPolicy {
             value,
         )
     }
+
+    // The ORM calls the authority-aware methods. The custody answer is the
+    // same; every other decision goes to the host's authority-aware method,
+    // so a host refusal written there is not bypassed.
+    fn can_read_repository_field_with_authority<'a>(
+        &'a self,
+        authority: PolicyAuthority<'a>,
+        access: Option<AccessContext<'a>>,
+        db: &'a Database<AiOrmBackend>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        if policy_key.is_none() && is_custody_entity(entity_name) {
+            return Box::pin(async { Ok(true) });
+        }
+        self.host.can_read_repository_field_with_authority(
+            authority,
+            access,
+            db,
+            entity_name,
+            field_name,
+            policy_key,
+            record,
+        )
+    }
+
+    fn can_write_repository_field_with_authority<'a>(
+        &'a self,
+        authority: PolicyAuthority<'a>,
+        access: Option<AccessContext<'a>>,
+        db: &'a Database<AiOrmBackend>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&'a (dyn Any + Send + Sync)>,
+        value: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        if policy_key.is_none() && is_custody_entity(entity_name) {
+            return Box::pin(async { Ok(true) });
+        }
+        self.host.can_write_repository_field_with_authority(
+            authority,
+            access,
+            db,
+            entity_name,
+            field_name,
+            policy_key,
+            record,
+            value,
+        )
+    }
 }
 
 /// Returns the crate's internal handle for a host database.
@@ -200,6 +253,135 @@ pub(crate) mod tests {
         ) -> BoxFuture<'a, async_graphql::Result<bool>> {
             Box::pin(async { Ok(false) })
         }
+    }
+
+    /// A host policy whose repository refusals are written only in the
+    /// authority-aware methods; the legacy methods would allow.
+    struct RefusesInAuthorityAwareMethods;
+    impl FieldPolicy<AiOrmBackend> for RefusesInAuthorityAwareMethods {
+        fn can_read_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn can_write_field<'a>(
+            &'a self,
+            _: &'a async_graphql::Context<'_>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn can_read_repository_field<'a>(
+            &'a self,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn can_write_repository_field<'a>(
+            &'a self,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn can_read_repository_field_with_authority<'a>(
+            &'a self,
+            authority: PolicyAuthority<'a>,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            // Admits the named worker only; a call with no authority is refused.
+            Box::pin(async move { Ok(authority.system().is_some_and(|a| a.name == "worker")) })
+        }
+        fn can_write_repository_field_with_authority<'a>(
+            &'a self,
+            authority: PolicyAuthority<'a>,
+            _: Option<AccessContext<'a>>,
+            _: &'a Database<AiOrmBackend>,
+            _: &'static str,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+            _: Option<&'a (dyn Any + Send + Sync)>,
+        ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(async move { Ok(authority.system().is_some_and(|a| a.name == "worker")) })
+        }
+    }
+
+    /// A host refusal written in the authority-aware methods still decides
+    /// every host-owned field behind the custody policy, and the custody
+    /// answer for the crate's own entities is unchanged.
+    #[tokio::test]
+    async fn custody_forwards_host_owned_decisions_to_the_authority_aware_methods() {
+        let mut host = Database::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        host.set_field_policy(RefusesInAuthorityAwareMethods);
+        let custody = custody_database(host);
+        let worker = custody
+            .clone()
+            .with_system_access(graphql_orm::graphql::auth::SystemAccess::new("worker"));
+        for (entity, key) in [
+            ("HostEntity", None),
+            (AiRunRecord::entity_name(), Some("host.declared.key")),
+        ] {
+            let refused = custody
+                .ensure_repository_writable_field(None, entity, "field", key, None, None)
+                .await
+                .expect_err("the host's authority-aware refusal applies");
+            assert_eq!(refused.code, OrmErrorCode::Forbidden);
+            let refused = custody
+                .ensure_repository_readable_field(None, entity, "field", key, None)
+                .await
+                .expect_err("the host's authority-aware refusal applies");
+            assert_eq!(refused.code, OrmErrorCode::Forbidden);
+            // The authority reaches the host: its named worker is admitted.
+            worker
+                .ensure_repository_writable_field(None, entity, "field", key, None, None)
+                .await
+                .expect("the host admits its worker");
+            worker
+                .ensure_repository_readable_field(None, entity, "field", key, None)
+                .await
+                .expect("the host admits its worker");
+        }
+        // The crate's own key-less fields stay granted.
+        custody
+            .ensure_repository_writable_field(
+                None,
+                AiRunRecord::entity_name(),
+                "recoveryExaminedAt",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("custody writes its own field");
     }
 
     async fn host() -> Database<AiOrmBackend> {

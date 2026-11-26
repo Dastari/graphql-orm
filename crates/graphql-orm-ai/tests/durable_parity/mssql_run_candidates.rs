@@ -32,17 +32,18 @@ async fn run_candidate_plans(database: &Database<AiOrmBackend>) -> Vec<(String, 
     database
         .pool()
         .fetch_rows(
-            "SELECT DISTINCT SUBSTRING(s.text, q.statement_start_offset / 2 + 1,
-                (CASE q.statement_end_offset WHEN -1 THEN DATALENGTH(s.text)
-                 ELSE q.statement_end_offset END - q.statement_start_offset) / 2 + 1),
-                 p.query_plan
+            "SELECT DISTINCT st.statement_text, p.query_plan
              FROM sys.dm_exec_query_stats AS q
              CROSS APPLY sys.dm_exec_sql_text(q.sql_handle) AS s
+             CROSS APPLY (VALUES (SUBSTRING(s.text, q.statement_start_offset / 2 + 1,
+                (CASE q.statement_end_offset WHEN -1 THEN DATALENGTH(s.text)
+                 ELSE q.statement_end_offset END - q.statement_start_offset) / 2 + 1)
+             )) AS st(statement_text)
              CROSS APPLY sys.dm_exec_text_query_plan(q.plan_handle,
                 q.statement_start_offset, q.statement_end_offset) AS p
-             WHERE s.text LIKE N'%graphql_orm_ai_runs%'
-                AND s.text LIKE N'%ORDER BY%recovery_examined_at%'
-                AND s.text NOT LIKE N'%dm_exec_query_stats%'
+             WHERE st.statement_text LIKE N'%graphql_orm_ai_runs%'
+                AND st.statement_text LIKE N'%ORDER BY%recovery_examined_at%'
+                AND st.statement_text NOT LIKE N'%dm_exec_query_stats%'
                 AND p.query_plan IS NOT NULL",
             &[],
         )
@@ -244,7 +245,6 @@ async fn measure(layout: &str) {
     assert!(claim.successes > 0);
     assert!(heartbeat.successes > 0);
     assert!(recovery.recovered > 0);
-
     let plans = run_candidate_plans(&database).await;
     assert!(!plans.is_empty(), "no candidate plans captured");
     let shapes = [
@@ -270,7 +270,7 @@ async fn measure(layout: &str) {
         let (eligibility, expected_index) = shapes
             .into_iter()
             .find(|(condition, _)| sql.contains(condition))
-            .expect("candidate eligibility condition");
+            .unwrap_or_else(|| panic!("no candidate eligibility condition in {sql}"));
         let indexes = plan
             .split("Index=\"")
             .skip(1)
@@ -283,7 +283,7 @@ async fn measure(layout: &str) {
         if layout == "indexed" {
             assert!(
                 state_seek && indexes.contains(expected_index),
-                "{eligibility} should seek on state via {expected_index}: {indexes:?}",
+                "{eligibility} should seek on state via {expected_index}: {indexes:?}; state seek={state_seek}; {sql}",
             );
         }
         observed.insert(eligibility);
@@ -294,6 +294,44 @@ async fn measure(layout: &str) {
         );
     }
     assert_eq!(observed.len(), shapes.len(), "missing candidate shapes");
+
+    // Keep the original load fixture's distribution for the plan assertion.
+    // Once those plans are captured, put near-miss states at the front of
+    // each bounded window to check both schema layouts.
+    durable_database::execute_sql_server_batch(
+        &server,
+        &format!(
+            "INSERT dbo.graphql_orm_ai_runs (id, session_id, input_message_id, principal_reference,
+                 state, lease_generation, retry_count, created_at, recovery_examined_at,
+                 next_attempt_at, lease_expires_at)
+             SELECT NEWID(), NEWID(), NEWID(), N'{{}}', state, 0, 0, -1, -1,
+                 CASE WHEN due = 1 THEN {cutoff} END,
+                 CASE WHEN due = 1 THEN {cutoff} END
+             FROM (VALUES (N'QUEUED'), (N'queued '), (N'LEASED'), (N'leased ')) AS states(state)
+             CROSS JOIN (VALUES (0),(1)) AS eligibility(due)
+             CROSS JOIN (VALUES (0),(1),(2),(3)) AS a(n)
+             CROSS JOIN (VALUES (0),(1),(2),(3)) AS b(n);"
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(runs.claim_next("near-miss-check").await.unwrap().is_some());
+    runs.recover_expired_leases().await.unwrap();
+    let untouched: i32 = database
+        .pool()
+        .fetch_rows(
+            "SELECT COUNT(*) FROM dbo.graphql_orm_ai_runs
+             WHERE created_at < 0 AND recovery_examined_at = -1 AND lease_generation = 0",
+            &[],
+        )
+        .await
+        .unwrap()[0]
+        .try_get(0)
+        .unwrap();
+    assert_eq!(
+        untouched, 128,
+        "{layout}: near-miss states became candidates"
+    );
 }
 
 #[tokio::test]

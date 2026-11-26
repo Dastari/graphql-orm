@@ -3,10 +3,14 @@ use crate::{
     GraphqlOrmBackupSchema,
 };
 
+/// Database rows, schema, and referenced objects collected for a full snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FullBackupPlan {
+    /// Source schema and compatibility identity for the snapshot manifest.
     pub schema: GraphqlOrmBackupSchema,
+    /// Exported rows grouped by table.
     pub tables: Vec<BackupTableExport>,
+    /// Live object references derived from the exported rows.
     pub objects: Vec<BackupObjectRef>,
 }
 
@@ -24,6 +28,7 @@ pub async fn plan_full_backup(
     objects.ensure_backup_allowed()?;
     let schema = database.schema_snapshot().await?;
     let tables = database.export_full().await?;
+    schema.ensure_canonical_identity_unchanged(database).await?;
     let objects = objects.objects_from_full_export(&tables).await?;
 
     Ok(FullBackupPlan {

@@ -10,6 +10,26 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.33.0
+
+- Inherit the workspace lint baseline, forbid unsafe Rust in crate targets,
+  and document the remaining public backup API.
+
+## Unreleased - 0.32.0
+
+- Run the backup integration tests from the core, local, SQLite,
+  PostgreSQL and SMB test binaries. ([#771](https://github.com/Dastari/graphql-orm/issues/771))
+
+## Unreleased - 0.31.0
+
+- The optional PostgreSQL ORM adapter can use canonical change-journal keys
+  (#592). Canonical snapshots have a distinct sealed schema identity, so
+  incrementals cannot extend a legacy chain or one with different live key
+  storage types. The identity covers only the adapter's backup entities, and
+  key storage mismatches name the table and column. Compaction requires the
+  canonical feature for exact float decoding. Existing hosts keep legacy keys
+  and hashes by default. [Migration](MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys)
+
 ## Unreleased - 0.30.0
 
 - `orm-sqlite` and `orm-postgres` select the database handle type used by the

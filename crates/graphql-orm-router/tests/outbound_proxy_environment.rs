@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read, Write},
-    net::{SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -44,38 +44,32 @@ struct Fixture {
 impl Fixture {
     fn start(content_type: &'static str, body: String) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_connections = connections.clone();
         let thread_stopping = stopping.clone();
         let thread = thread::spawn(move || {
-            while !thread_stopping.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        thread_connections.fetch_add(1, Ordering::AcqRel);
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let mut request = Vec::new();
-                        let mut buffer = [0_u8; 1024];
-                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                            match stream.read(&mut buffer) {
-                                Ok(0) | Err(_) => break,
-                                Ok(count) => request.extend_from_slice(&buffer[..count]),
-                            }
-                        }
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => return,
+            // Blocking accept; `Drop` sets `stopping` and connects to wake it.
+            while let Ok((mut stream, _)) = listener.accept() {
+                if thread_stopping.load(Ordering::Acquire) {
+                    return;
                 }
+                thread_connections.fetch_add(1, Ordering::AcqRel);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => request.extend_from_slice(&buffer[..count]),
+                    }
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
             }
         });
         Self {
@@ -98,6 +92,8 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        // Wake the blocking listener so it observes `stopping`.
+        let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

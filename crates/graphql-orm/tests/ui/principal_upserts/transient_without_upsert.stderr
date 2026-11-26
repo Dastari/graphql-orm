@@ -1,0 +1,5 @@
+error: transient_input requires the generated GraphQL upsert mutation: declare upsert = "..." over public or bound key fields, keep mutations enabled and select upsert in mutation_shapes
+  --> tests/ui/principal_upserts/transient_without_upsert.rs:23:5
+   |
+23 |     transient_input(type = "Proof", on = "upsert"),
+   |     ^^^^^^^^^^^^^^^

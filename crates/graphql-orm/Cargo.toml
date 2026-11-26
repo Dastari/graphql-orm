@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm"
-version = "0.229.0"
+version = "0.234.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -66,7 +66,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.229.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.234.0", default-features = false }
 graphql-orm-operation-catalog = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }
@@ -85,7 +85,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 sqlx = { workspace = true, features = ["chrono"] }
 async-graphql = { workspace = true, features = ["chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+jsonwebtoken = { workspace = true }
 graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }

@@ -141,6 +141,60 @@ fn tokens(sql: &str) -> Result<Vec<Token>, sqlx::Error> {
 fn punctuation(sql: &str, t: &Token, value: &str) -> bool {
     t.ident.is_none() && &sql[t.span.clone()] == value
 }
+
+#[cfg(feature = "sqlite")]
+pub(in crate::graphql::orm) fn index_filter(sql: &str) -> Option<&str> {
+    let ts = tokens(sql).ok()?;
+    let mut depth = 0usize;
+    for (offset, token) in ts.iter().enumerate() {
+        if punctuation(sql, token, "(") {
+            depth += 1;
+        } else if punctuation(sql, token, ")") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                let suffix = ts.get(offset + 1..)?;
+                return match suffix {
+                    [keyword, _, ..] if keyword.keyword("where") => {
+                        Some(sql[keyword.span.end..].trim())
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+#[test]
+fn index_filter_finds_top_level_where() {
+    for (sql, expected) in [
+        (
+            "CREATE INDEX idx ON items (key /* ) WHERE fake */) -- WHERE fake\nWHERE key > 0",
+            Some("key > 0"),
+        ),
+        (
+            "CREATE INDEX idx ON items ((lower(key)))\nwhere ((key IS NOT NULL))  ",
+            Some("((key IS NOT NULL))"),
+        ),
+        (
+            r#"CREATE INDEX "WHERE)" ON items (coalesce("key)", 'WHERE (''x'))
+               WHERE "key)" IN ('WHERE (', ')')"#,
+            Some(r#""key)" IN ('WHERE (', ')')"#),
+        ),
+        (
+            "CREATE INDEX idx ON items (key) WHERE/* leading */ key IN ('x') -- trailing",
+            Some("/* leading */ key IN ('x') -- trailing"),
+        ),
+        (
+            r#"CREATE INDEX "WHERE" ON items (coalesce([WHERE(], 'WHERE )')) -- WHERE fake"#,
+            None,
+        ),
+    ] {
+        assert_eq!(index_filter(sql), expected, "{sql}");
+    }
+}
+
 fn key(sql: &str, ts: &[Token]) -> Result<Option<Vec<String>>, sqlx::Error> {
     let start = if ts.first().is_some_and(|t| t.keyword("constraint")) {
         2

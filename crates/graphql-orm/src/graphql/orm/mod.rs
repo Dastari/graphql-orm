@@ -1,9 +1,12 @@
 mod delete_effect_guard;
 pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
+mod generated_read;
 mod guarded_updates;
 #[doc(hidden)]
 pub use generated_filter::*;
+#[doc(hidden)]
+pub use generated_read::*;
 #[doc(hidden)]
 pub use guarded_updates::__register_guarded_update_table;
 pub(crate) use guarded_updates::is_guarded_update_table;
@@ -41,6 +44,7 @@ pub(crate) use read_snapshot::{SNAPSHOT_WRITE_REFUSED, ensure_write_allowed};
 mod read_authorization;
 mod resolver_catalog;
 pub use resolver_catalog::*;
+mod journal_key;
 mod restore_marker;
 mod rls;
 mod root_fields;
@@ -79,6 +83,8 @@ mod set_delete;
 pub use set_delete::{SetDeleteEntity, SetDeleteModel};
 #[cfg(feature = "sqlite")]
 pub mod spatial;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod write_pipeline;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod write_targets;
 
@@ -143,6 +149,9 @@ pub use scalar_policy::*;
 pub use schema_manager::*;
 pub use schema_module::*;
 pub use search::*;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub use write_pipeline::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 #[doc(hidden)]
 pub use write_targets::*;

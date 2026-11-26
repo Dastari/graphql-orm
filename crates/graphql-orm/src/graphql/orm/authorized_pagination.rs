@@ -336,10 +336,9 @@ enum Policy {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
     },
-    /// Keep the original rendering and binds for composition and budgets.
-    /// The compact scalar is NULL, 0 or 1. It can be used at the root, or
-    /// as a directly nested closure target built from column tests. SQLite
-    /// closures never take this form.
+    /// The scalar verdict is NULL, 0 or 1. It can be compared to 1 at
+    /// the root or used directly as a nested target. If the composition
+    /// SQL differs, it keeps the original evaluation sites.
     Closure {
         sql: RowBoundSql,
         values: Vec<SqlValue>,
@@ -347,6 +346,7 @@ enum Policy {
     },
     And(Vec<Policy>),
     Or(Vec<Policy>),
+    Not(Box<Policy>),
 }
 
 impl Policy {
@@ -362,6 +362,7 @@ impl Policy {
         match self {
             Self::Sql { sql, .. } | Self::Closure { sql, .. } => sql.holds_row(),
             Self::And(children) | Self::Or(children) => children.iter().any(Self::holds_row),
+            Self::Not(child) => child.holds_row(),
         }
     }
 
@@ -370,6 +371,10 @@ impl Policy {
         match self {
             Self::Sql { sql, values } | Self::Closure { sql, values, .. } => {
                 FilterExpression::trusted_fragment(sql.bind(row), values.clone())
+            }
+            Self::Not(_) => {
+                let (sql, values) = self.flatten();
+                FilterExpression::trusted_fragment(sql.bind(row), values)
             }
             Self::And(children) => {
                 FilterExpression::And(children.iter().map(|child| child.expression(row)).collect())
@@ -426,6 +431,7 @@ impl Policy {
                 values.extend(own.iter().cloned());
                 sql.clone()
             }
+            Self::Not(child) => child.flatten_into(values).wrapped("NOT (", ")"),
             Self::And(children) => {
                 let parts = children
                     .iter()
@@ -466,6 +472,7 @@ impl Policy {
         match self {
             Self::Sql { sql, .. } => sql.holds_row() || !sql.bind("").trim().is_empty(),
             Self::Closure { .. } => true,
+            Self::Not(child) => child.negatable(),
             Self::And(children) => !children.is_empty() && children.iter().all(Self::negatable),
             Self::Or(children) => children.iter().all(Self::negatable),
         }
@@ -1320,13 +1327,17 @@ fn negated(
             }
             .check(backend)
             .ok()?;
-            Some((
+            let policy = if backend == DatabaseBackend::Mssql && cost.closures != 0 {
+                // Keep the logical operand so a nested closure can reuse
+                // its numeric verdict through negation.
+                Policy::Not(Box::new(policy.clone()))
+            } else {
                 Policy::Sql {
                     sql: clause,
                     values,
-                },
-                negated,
-            ))
+                }
+            };
+            Some((policy, negated))
         }
         Negation::Explicit(policy, cost) => Some((policy, cost)),
         Negation::Unsupported => None,
@@ -1543,8 +1554,8 @@ const MSSQL_MAX_RELATIONS: u32 = 9;
 /// SQLite and PostgreSQL ([`READ_PREDICATE_MAX_RELATIONS`] and
 /// [`READ_PREDICATE_MAX_STATEMENT_RELATIONS`]). A closure walks and
 /// evaluates its target for every row it reaches, so it costs far more than
-/// one relation. Budgeting retains the original closure rendering, which
-/// counts each copy of the target and its FALSE test at both evaluation sites.
+/// one relation. The count includes each rendered closure and correlated
+/// subquery, including the separate target tests in the original rendering.
 pub const READ_PREDICATE_CLOSURE_RELATION_WEIGHT: u32 = CLOSURE_RELATION_WEIGHT;
 const CLOSURE_RELATION_WEIGHT: u32 = 16;
 
@@ -1817,10 +1828,14 @@ fn closure_columns(dialect: DatabaseBackend, truth: &RowBoundSql) -> Option<Vec<
         }
         let name = text(column);
         let column = dialect.delimited_column_identifier(name);
-        if !column.is_ascii() {
+        if dialect == DatabaseBackend::Mssql && !column.is_ascii() {
             return None;
         }
-        let key = delimited_name(&column);
+        let key = if dialect == DatabaseBackend::Postgres {
+            column.clone()
+        } else {
+            delimited_name(&column)
+        };
         if let Some(previous) = columns.insert(key, column.clone()) {
             if previous != column && dialect == DatabaseBackend::Mssql {
                 // SQL Server may use a case-sensitive column collation.
@@ -1838,10 +1853,15 @@ fn closure_column_projection(columns: &[String], row: &str) -> String {
         .collect()
 }
 
-fn closure_anchor_projection(columns: &[String], origin: &str) -> RowBoundSql {
-    let mut sql = RowBoundSql::sql(format!("SELECT 1 AS {origin}"));
-    for column in columns {
-        sql.push_str(", ");
+fn closure_anchor_projection(columns: &[String], origin: Option<&str>) -> RowBoundSql {
+    let mut sql = RowBoundSql::sql("SELECT ");
+    if let Some(origin) = origin {
+        sql.push_str(&format!("1 AS {origin}"));
+    }
+    for (index, column) in columns.iter().enumerate() {
+        if origin.is_some() || index != 0 {
+            sql.push_str(", ");
+        }
         sql.push_row();
         sql.push_str(&format!(".{column} AS {column}"));
     }
@@ -2033,7 +2053,7 @@ fn render_mssql_closure(
              FROM (SELECT {target_truth} AS __gom_truth, {input}.{origin} FROM (",
             target_truth = truth.bind(&input),
         ));
-        clause.push(&closure_anchor_projection(columns, &origin));
+        clause.push(&closure_anchor_projection(columns, Some(&origin)));
         clause.push_str(&format!(
             " WHERE {group}.__gom_depth = 0 UNION ALL SELECT 0{reached_columns} \
              FROM {table} AS {target} WHERE {step} AND {group}.__gom_depth < {max_depth}\
@@ -2078,6 +2098,7 @@ fn render_recursive_closure(
     keys: &[(&str, &str)],
     quantifier: ReadPredicateQuantifier,
     truth: &RowBoundSql,
+    columns_for_truth: Option<&[String]>,
     max_depth: u32,
 ) -> RowBoundSql {
     let join = |items: Vec<String>, separator: &str| items.join(separator);
@@ -2133,12 +2154,19 @@ fn render_recursive_closure(
         indexed(&|index, _, _| format!("{seen_row}.__gom_p{index} = {node}.__gom_p{index}")),
         " AND ",
     );
-    let incomplete = format!(
-        "EXISTS (SELECT 1 FROM {cte} AS {node} WHERE {ambiguous}({followed} AND (\
+    let incomplete_row = format!(
+        "{ambiguous}({followed} AND (\
          NOT EXISTS (SELECT 1 FROM {table} AS {named} WHERE {resolves}) \
          OR ({node}.__gom_depth = {max_depth} AND NOT EXISTS (SELECT 1 FROM {cte} AS {seen_row} \
-         WHERE {seen} AND {seen_row}.__gom_depth < {max_depth})))))"
+         WHERE {seen} AND {seen_row}.__gom_depth < {max_depth}))))"
     );
+    // The optional seed has no verdict and is not part of the walk.
+    let incomplete_row = if columns_for_truth.is_some() {
+        format!("{node}.__gom_depth IS NOT NULL AND ({incomplete_row})")
+    } else {
+        incomplete_row
+    };
+    let incomplete = format!("EXISTS (SELECT 1 FROM {cte} AS {node} WHERE {incomplete_row})");
     let verdict = match quantifier {
         ReadPredicateQuantifier::Any => format!(
             "CASE WHEN MAX(__gom_truth) = 2 THEN 1 WHEN MAX(__gom_truth) = 1 OR {incomplete} THEN NULL ELSE 0 END"
@@ -2166,6 +2194,77 @@ fn render_recursive_closure(
             dialect.delimited_column_identifier(pointer)
         ));
     }
+    if let Some(columns) = columns_for_truth {
+        // Start with a seed outside the walk, then emit the governed row
+        // at depth zero and the reached rows at subsequent depths from the
+        // same SELECT. Each iteration still performs an indexed lookup on
+        // the physical key when one is available.
+        let input = format!("{cte}_i");
+        let depth = format!("{cte}.__gom_depth");
+        if dialect == DatabaseBackend::Postgres {
+            // A lateral projection supplies both the pointers and the
+            // target's columns, retaining their types and collations.
+            let mut columns = columns.to_vec();
+            let pointers = join(
+                indexed(&|_, pointer, _| {
+                    format!("{input}.{}", dialect.delimited_column_identifier(pointer))
+                }),
+                ", ",
+            );
+            for (pointer, _) in keys {
+                let pointer = dialect.delimited_column_identifier(pointer);
+                if !columns.contains(&pointer) {
+                    columns.push(pointer);
+                }
+            }
+            let reached_columns = closure_column_projection(&columns, &reached);
+            clause.push_str(&format!(
+                ", NULL::integer, NULL::integer UNION SELECT {pointers}, COALESCE({depth} + 1, 0), \
+                 {target_truth} FROM {cte} CROSS JOIN LATERAL (SELECT {reached_columns} \
+                 FROM {table} AS {reached} WHERE {depth} < {max_depth} AND {step} UNION ALL ",
+                target_truth = truth.bind(&input),
+                reached_columns = reached_columns.trim_start_matches(", "),
+            ));
+            clause.push(&closure_anchor_projection(&columns, None));
+            clause.push_str(&format!(
+                " WHERE {depth} IS NULL) AS {input}) SELECT {verdict} FROM {cte})"
+            ));
+            return clause;
+        }
+        // Keep the pointer's affinity and collation in both SELECTs.
+        // SQLite CASE expressions over the pointers would lose them.
+        clause.push_str(", NULL, NULL UNION SELECT ");
+        for (index, (pointer, _)) in keys.iter().enumerate() {
+            if index > 0 {
+                clause.push_str(", ");
+            }
+            let pointer = dialect.delimited_column_identifier(pointer);
+            clause.push_str(&format!(
+                "(SELECT {reached}.{pointer} WHERE {cte}.__gom_depth IS NOT NULL \
+                 UNION ALL SELECT "
+            ));
+            clause.push_row();
+            clause.push_str(&format!(".{pointer} WHERE {cte}.__gom_depth IS NULL)"));
+        }
+        let reached_columns = closure_column_projection(columns, &reached);
+        clause.push_str(&format!(
+            ", COALESCE({cte}.__gom_depth + 1, 0), (SELECT {target_truth} \
+             FROM (SELECT {reached_columns} WHERE {cte}.__gom_depth IS NOT NULL \
+             UNION ALL ",
+            target_truth = truth.bind(&input),
+            reached_columns = reached_columns.trim_start_matches(", "),
+        ));
+        clause.push(&closure_anchor_projection(columns, None));
+        // A successful equality match always has a non-NULL key.
+        let key = dialect.delimited_column_identifier(keys[0].1);
+        clause.push_str(&format!(
+            " WHERE {cte}.__gom_depth IS NULL) AS {input}) \
+             FROM {cte} LEFT JOIN {table} AS {reached} ON {cte}.__gom_depth < {max_depth} AND {step} \
+             WHERE {cte}.__gom_depth IS NULL OR {reached}.{key} IS NOT NULL) \
+             SELECT {verdict} FROM {cte})"
+        ));
+        return clause;
+    }
     clause.push_str(", 0, ");
     clause.push(truth);
     clause.push_str(&format!(
@@ -2184,6 +2283,43 @@ fn truth(predicate: &RowBoundSql, false_rows: &RowBoundSql) -> RowBoundSql {
     sql.push(false_rows);
     sql.push_str(" THEN 0 ELSE 1 END");
     sql
+}
+
+/// Render 0 = FALSE, 1 = UNKNOWN and 2 = TRUE for a policy built from
+/// column tests. SQL Server cannot cast a boolean predicate to an integer,
+/// so combine numeric verdicts: AND is MIN, OR is MAX and NOT swaps 0 and
+/// 2. Each nested walk appears once.
+fn mssql_column_truth(policy: &Policy, prefix: &str, binds: &mut Vec<SqlValue>) -> RowBoundSql {
+    match policy {
+        Policy::Sql { sql, values } => {
+            binds.extend(values.iter().cloned());
+            binds.extend(values.iter().cloned());
+            truth(sql, &sql.wrapped("NOT (", ")"))
+        }
+        Policy::Closure { scalar, .. } => {
+            let (sql, values) = scalar.as_ref();
+            binds.extend(values.iter().cloned());
+            sql.wrapped("ISNULL(2 * ", ", 1)")
+        }
+        Policy::Not(child) => mssql_column_truth(child, prefix, binds).wrapped("2 - (", ")"),
+        Policy::And(children) | Policy::Or(children) => {
+            let aggregate = if matches!(policy, Policy::And(_)) {
+                "MIN"
+            } else {
+                "MAX"
+            };
+            let mut sql =
+                RowBoundSql::sql(format!("(SELECT {aggregate}(__gom_truth) FROM (VALUES "));
+            for (index, child) in children.iter().enumerate() {
+                if index != 0 {
+                    sql.push_str(", ");
+                }
+                sql.push(&mssql_column_truth(child, prefix, binds).wrapped("(", ")"));
+            }
+            sql.push_str(&format!(") AS {prefix}_b (__gom_truth))"));
+            sql
+        }
+    }
 }
 
 /// A validated key relation from `S` to `T` with its target predicate over
@@ -2811,15 +2947,12 @@ impl ReadPredicate {
     ///
     /// **Rendering.** A correlated scalar subquery, used wherever the policy
     /// clause is applied: reads, counts, aggregates, keyset and connection
-    /// pages, search and subscription delivery re-reads. SQLite renders
-    /// every closure in the original form, single-level and nested, with
-    /// separate TRUE and FALSE tests carried in the recursive tuple. On SQL
-    /// Server a standalone closure can share the target SQL between the
-    /// governed and reached rows. PostgreSQL keeps one traversal join and can
-    /// use a single scalar truth test at each site. On PostgreSQL and SQL
-    /// Server, a root closure directly wrapping a closure over built-in
-    /// column tests can also reuse the inner walk's scalar result. Other
-    /// compositions keep the separate TRUE and FALSE tests.
+    /// pages, search and subscription delivery re-reads. Nested closures
+    /// over built-in column comparisons and NULL tests can share one target
+    /// expression across the governed and reached rows. SQLite and
+    /// PostgreSQL carry the truth in the recursive tuple so collation-equal
+    /// pointers with distinct truths are followed separately. Targets that
+    /// contain filters or relations keep their existing evaluation sites.
     /// SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
@@ -2874,23 +3007,8 @@ impl ReadPredicate {
         } else {
             0
         };
-        // The rows where the target is FALSE. `NOT (target)` is exact for a
-        // target SQL negates. A three-valued relation target supplies its own
-        // FALSE rows. A target that cannot be negated still decides which
-        // rows the closure admits, so it keeps `NOT`, and the closure then
-        // refuses negation.
-        let explicit = match &target.negation {
-            Negation::Explicit(policy, cost) => Some((policy.flatten(), cost.bytes)),
-            Negation::Sql | Negation::Unsupported => None,
-        };
-        let false_bytes = explicit
-            .as_ref()
-            .map_or(target.cost.bytes.saturating_add(8), |(_, bytes)| *bytes);
-        reserve(
-            target.cost.bytes.saturating_add(false_bytes),
-            2,
-            4096 + walk,
-        )?;
+        let overhead = 4096 + walk;
+        reserve(0, 0, overhead)?;
         let closures = target.cost.closures;
         let relation = Relation::new::<B, T, T>(keys, &target)?;
         if relation
@@ -2901,15 +3019,7 @@ impl ReadPredicate {
         {
             return Err(invalid());
         }
-        let uses_native_truth = explicit.is_none();
-        let (false_rows, false_values) = match explicit {
-            Some(((sql, values), _)) => (sql.wrapped("(", ")"), values),
-            None => (
-                relation.predicate.wrapped("NOT (", ")"),
-                relation.values.clone(),
-            ),
-        };
-        let negation = match target.negation {
+        let negation = match &target.negation {
             Negation::Unsupported => Negation::Unsupported,
             Negation::Sql | Negation::Explicit(..) => Negation::Sql,
         };
@@ -2939,14 +3049,84 @@ impl ReadPredicate {
                     keys,
                     quantifier,
                     truth,
+                    columns,
                     max_depth,
                 )
             }
         };
 
-        // Build and check exactly the original composition, including every
-        // copy of the TRUE and FALSE tests. Relations, negations and
-        // statement-level budgets still use this rendering.
+        // Column tests and their compositions have native three-valued
+        // SQL on the recursive backends. SQL Server combines numeric
+        // verdicts, so it can use the same inner walk under AND, OR or NOT.
+        if closures != 0
+            && target.column_tests_only
+            && reserve(target.cost.bytes, 1, overhead).is_ok()
+        {
+            let (truth, values) = match dialect {
+                DatabaseBackend::Sqlite => (
+                    relation.predicate.wrapped("COALESCE(2 * (", "), 1)"),
+                    relation.values.clone(),
+                ),
+                DatabaseBackend::Postgres => match &target.policy {
+                    Policy::Closure { scalar, .. } => {
+                        let (sql, values) = scalar.as_ref();
+                        (sql.wrapped("COALESCE(2 * ", ", 1)"), values.clone())
+                    }
+                    _ => (
+                        relation
+                            .predicate
+                            .wrapped("COALESCE(2 * ((", ")::integer), 1)"),
+                        relation.values.clone(),
+                    ),
+                },
+                DatabaseBackend::Mssql => {
+                    let mut values = Vec::new();
+                    let sql = mssql_column_truth(&target.policy, &cte, &mut values);
+                    (sql, values)
+                }
+                _ => unreachable!("closure backend checked above"),
+            };
+            if let Some(columns) = closure_columns(dialect, &truth).filter(|cols| !cols.is_empty())
+            {
+                let scalar = render(&truth, Some(&columns));
+                if let Ok(mut predicate) = Self::fragment(
+                    TypeId::of::<T>(),
+                    dialect,
+                    Some(T::TABLE_NAME),
+                    scalar.wrapped("", " = 1"),
+                    values.clone(),
+                    closures + 1,
+                ) {
+                    predicate.negation = negation;
+                    predicate.column_tests_only = true;
+                    return Ok(predicate.with_compact_closure(scalar, values));
+                }
+            }
+        }
+
+        // The rows where the target is FALSE. `NOT (target)` is exact for a
+        // target SQL negates. A three-valued relation target supplies its own
+        // FALSE rows. A target that cannot be negated still decides which
+        // rows the closure admits, so it keeps `NOT`, and the closure then
+        // refuses negation.
+        let explicit = match &target.negation {
+            Negation::Explicit(policy, cost) => Some((policy.flatten(), cost.bytes)),
+            Negation::Sql | Negation::Unsupported => None,
+        };
+        let false_bytes = explicit
+            .as_ref()
+            .map_or(target.cost.bytes.saturating_add(8), |(_, bytes)| *bytes);
+        reserve(target.cost.bytes.saturating_add(false_bytes), 2, overhead)?;
+        let uses_native_truth = explicit.is_none();
+        let (false_rows, false_values) = match explicit {
+            Some(((sql, values), _)) => (sql.wrapped("(", ")"), values),
+            None => (
+                relation.predicate.wrapped("NOT (", ")"),
+                relation.values.clone(),
+            ),
+        };
+        // The original composition carries separate TRUE and FALSE tests
+        // for the governed row and the reached rows.
         let legacy_truth = truth(&relation.predicate, &false_rows);
         let mut legacy_values = relation.values.clone();
         legacy_values.extend(false_values);
@@ -2962,14 +3142,8 @@ impl ReadPredicate {
         )?;
         predicate.negation = negation;
         predicate.column_tests_only = target.column_tests_only;
-        // SQLite always uses the original rendering. Its recursive CTE
-        // deduplicates rows under `UNION` with the pointer column's
-        // collation. The original tuple carries the target's truth, so two
-        // collation-equal pointers with different truths are both followed.
-        // A walk over `(pointer, depth)` alone keeps only one of them, and
-        // a key column whose collation distinguishes them (for example
-        // BINARY against a NOCASE or RTRIM pointer) names different rows
-        // for each.
+        // SQLite's standalone and fallback forms use the original
+        // rendering, including the target truth in the recursive tuple.
         if dialect == DatabaseBackend::Sqlite {
             return Ok(predicate);
         }
@@ -4107,42 +4281,66 @@ where
         before: bool,
         inclusive: bool,
     ) -> async_graphql::Result<Self> {
-        let parameter_type = |column: &str| {
-            if B::DIALECT == DatabaseBackend::Mssql {
-                mssql_parameter_type::<T>(column)
-            } else {
-                None
-            }
-        };
-        let render = if before {
-            super::query::render_keyset_before_with_types
-        } else {
-            super::query::render_keyset_after_with_types
-        };
-        let (mut clause, mut binds) = render(
+        let invalid_cursor =
+            || OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error();
+        if order.len() != values.len() {
+            return Err(invalid_cursor());
+        }
+        let cursor = order
+            .iter()
+            .zip(values)
+            .map(|(column, value)| {
+                let dialect = B::DIALECT;
+                let decimal_column = T::columns().iter().find_map(|field| {
+                    let definition = field.decimal.filter(|def| !def.is_mssql_money())?;
+                    (dialect.quote_identifier_path(field.name)
+                        == dialect.quote_identifier_path(column.column))
+                    .then_some((definition, field.nullable))
+                });
+                if let Some((definition, nullable)) = decimal_column {
+                    // Decimal cursor values are canonical text. The column's
+                    // definition supplies the scale and selects the exact bind.
+                    return match value {
+                        KeysetValue::Null if nullable => Ok(None),
+                        KeysetValue::String(text) => parse_runtime_decimal(definition, text)
+                            .ok()
+                            .filter(|value| canonical_runtime_decimal(*value) == *text)
+                            .map(|value| Some(SqlValue::Decimal(value)))
+                            .ok_or_else(invalid_cursor),
+                        _ => Err(invalid_cursor()),
+                    };
+                }
+                if matches!(value, KeysetValue::Null) {
+                    return Ok(None);
+                }
+                let mut value = super::keyset_sql_value(value).ok_or_else(invalid_cursor)?;
+                if dialect == DatabaseBackend::Mssql {
+                    value = value
+                        .with_mssql_type(mssql_parameter_type::<T>(column.column).unwrap_or(""));
+                }
+                Ok(Some(value))
+            })
+            .collect::<async_graphql::Result<Vec<_>>>()?;
+        let (mut clause, mut binds) = super::query::render_keyset_bound(
             B::DIALECT,
             order,
-            values,
+            &cursor,
             self.values.len() + 1,
-            parameter_type,
+            before,
         )
         .map_err(|e| e.into_graphql_error())?;
         if inclusive {
             let mut equal = Vec::new();
-            for (column, value) in order.iter().zip(values) {
-                if matches!(value, KeysetValue::Null) {
-                    equal.push(format!("{} IS NULL", column.column));
-                } else {
+            for (column, value) in order.iter().zip(cursor) {
+                if let Some(value) = value {
                     equal.push(format!(
                         "{} = {}",
                         column.column,
                         B::DIALECT.placeholder(self.values.len() + binds.len() + 1)
                     ));
-                    binds.push(
-                        super::keyset_sql_value(value)
-                            .ok_or_else(input_error)?
-                            .with_mssql_type(parameter_type(column.column).unwrap_or("")),
-                    );
+                    binds.push(value);
+                } else {
+                    equal.push(format!("{} IS NULL", column.column));
                 }
             }
             clause = format!("({clause}) OR ({})", equal.join(" AND "));
@@ -4347,16 +4545,16 @@ where
                     .map_err(|e| e.into_graphql_error())
             })
             .transpose()?;
-        let total_count = if page.include_total_count {
-            Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
-        } else {
-            None
-        };
         let mut query = if let Some(values) = &after {
             base.clone()
                 .keyset_bound_with_order(order, values, backward, false)?
         } else {
             base.clone()
+        };
+        let total_count = if page.include_total_count {
+            Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
+        } else {
+            None
         };
         if backward {
             query.order_clauses = order.iter().map(|c| c.reversed().order_sql()).collect();
@@ -4643,7 +4841,7 @@ mod predicate_tests {
                     format!("{row}.[ordinal] = @P2"),
                 ],
                 vec![
-                    SqlValue::mssql_varchar_comparison("item-42".into(), "VARCHAR(32)"),
+                    SqlValue::String("item-42".into()),
                     SqlValue::Int(42).with_mssql_type("SMALLINT"),
                 ],
             )

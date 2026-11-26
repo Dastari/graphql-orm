@@ -641,12 +641,6 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     request.auth.as_ref(),
                     context_exempt,
                 );
-                row_security.admit(&module, None).await.map_err(safe)?;
-                let mut receiver = source
-                    .0
-                    .subscribe(&module.schema.fingerprint(), &c.id)
-                    .map_err(safe)?;
-                let mut pending = std::collections::VecDeque::new();
                 let document = document(ctx.ctx);
                 let mut planner = Planner {
                     document: &document,
@@ -691,6 +685,22 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     RuntimeReadPurpose::SubscriptionRegistration,
                 )
                 .map_err(safe)?;
+                plan.enforce_target_assurance(
+                    &|name| {
+                        crate::graphql::assurance::enforce_operation_assurance(
+                            ctx.ctx,
+                            GraphqlOperationKind::Query,
+                            name,
+                        )
+                    },
+                    false,
+                )?;
+                row_security.admit(&module, None).await.map_err(safe)?;
+                let mut receiver = source
+                    .0
+                    .subscribe(&module.schema.fingerprint(), &c.id)
+                    .map_err(safe)?;
+                let mut pending = std::collections::VecDeque::new();
                 // Event identity itself is disclosure: authorize every complete key member,
                 // including payloads that select only `action`.
                 for id in &c.primary_key {

@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.20.0
+
+- Explain why the stream returned by `StorageByteStream::into_inner` must be
+  used. The message preserves the discarded-stream warning and satisfies Rust
+  1.99 Clippy.
+- Forbid unsafe Rust in library builds except with the Windows local provider,
+  where the existing atomic no-replace rename is the only permitted unsafe
+  operation. The library continues to check public API documentation.
+
+## Unreleased - 0.19.0
+
+- Run the storage integration tests from the core, local, S3 and SMB
+  test binaries. ([#771](https://github.com/Dastari/graphql-orm/issues/771))
+
 ## Unreleased - 0.18.3
 
 - Install from a reviewed Git revision using the package inventory and release manifest.

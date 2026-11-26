@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.32.0 groups integration tests by lane. See the
+[migration guide](MIGRATION.md#0310-to-0320-integration-test-binaries).
+
 Version 0.30.0 supports the SQLite and PostgreSQL ORM adapters when other
 workspace members enable additional ORM backends. See the
 [migration guide](MIGRATION.md#0290-to-0300-adapter-backend-selection).
@@ -122,6 +125,9 @@ crate does not define application authorization, scheduling, object metadata,
 cloud credentials, application transactions, or a claim that a restore is safe
 for an unverified target.
 
+Workspace lints forbid unsafe Rust in this crate and check documentation
+for its public API.
+
 ## Install
 
 Find the package manifest in the
@@ -196,12 +202,12 @@ the host validates its target and recovery process. Both modes check manifest
 backend/schema compatibility before adapter writes.
 
 The canonical executable fixture is
-[`tests/full_backup_creation.rs`](tests/full_backup_creation.rs); it supplies
+[`tests/backup_core/full_backup_creation.rs`](tests/backup_core/full_backup_creation.rs); it supplies
 test-only adapters and verifies repository layout, checksums, deduplication,
 and manifest-last publication. Run it with:
 
 ```sh
-cargo test -p graphql-orm-backup --test full_backup_creation
+cargo test -p graphql-orm-backup --test backup_core full_backup_creation::
 ```
 
 ## Features and safety boundary
@@ -229,6 +235,12 @@ encryption and content-defined chunking are out of scope.
 Composite-key tables, including many-to-many link tables, are covered by full
 snapshots only: their rows are identified by a JSON array of key parts, and
 `compact_chain` refuses incremental changes to them.
+
+PostgreSQL hosts can enable the `canonical-journal-keys` feature and use
+`OrmBackupAdapter::with_canonical_change_journal_keys` after cutting over the
+database. Treat the exported key strings as opaque when assembling changes.
+Use a build with the same feature to compact canonical chains. Start a new full backup and checkpoint before producing
+incrementals. See the [opt-in procedure](MIGRATION.md#0300-to-0310-canonical-postgresql-journal-keys).
 
 ## Configuration and operations
 

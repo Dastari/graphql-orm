@@ -72,6 +72,8 @@ mutation ConfigureCompatibleProvider {
 ```
 
 The mutation still requires host configuration authorization and recent MFA.
+On profile create or edit, the normalized endpoint must have a non-root path
+of at most 2,048 bytes.
 The endpoint must pass `AiProviderEndpointPolicy`; that policy owns the actual
 host/port/TLS/network-zone and local-container rules. Library URL validation,
 normalization, and redirect denial do not prevent DNS rebinding on their own.

@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -256,9 +256,23 @@ records itself and delegates everything else to the host policy.
 
 Deletes write no field. The ORM's own maintenance writes (managed versions and
 timestamps, dependent `set_null` updates, retention purges, search documents)
-are not caller-supplied field writes and ask no field decision. The static
-macros generate no relation-link mutation and no nested-object input: a link
-row is an entity and is written through the paths above.
+are not caller-supplied field writes and ask no field decision. Link rows are
+entities and use the write paths above.
+
+With [opt-in nested create](runtime-and-writes.md#creating-a-parent-with-child-rows),
+each child uses its own create coordinate and policy context. The generated
+create enforces the child's entity write policy, fixed scopes, assurance and
+field writes. It requires a row write provider when the child declares a
+write policy, handles its managed version, and checks the stored row against
+row policy after insert. A field-write denial on any row refuses the entire
+call, even when the field policy allows legacy omission on a standalone
+create.
+
+The catalogue and the parent mutation's `@requiresScopes` and
+`@authenticated` directives publish only the parent's requirements, so
+router prechecks and host extensions that filter by root field can see weaker
+requirements than the ORM enforces at runtime. An opted-in parent can create
+a child whose own create root is excluded from the schema.
 
 ## Policy Callback Errors
 
@@ -279,12 +293,91 @@ policy callback, on every generated path:
 | `Changed` subscription event | the event is dropped; a timer refusal ends the stream with `FORBIDDEN` | the stream ends with a continuity-loss error |
 | Repository field policy callbacks | its code and message when the code is an ORM public code; otherwise `INTERNAL_ERROR`, default message | `INTERNAL_ERROR` or `SERVICE_UNAVAILABLE`, default message |
 
+## The Generated Write Pipeline
+
+Generated GraphQL create, update, upsert, delete, bulk and nested-create
+mutations do not carry their own authorization sequence. They call the
+runtime's write pipeline (`graphql_orm::graphql::orm::write_pipeline` in the
+ORM source), which fixes the order of the checks in one place:
+
+1. **Request admission.** Resolver authentication (`auth`), the PostgreSQL RLS
+   request context, the operation's declared scopes, then its declared
+   [assurance](../../architecture/operation-assurance.md). A nested child row
+   is admitted the same way against its entity's own create root.
+2. **Entity admission.** The request's `Database`, the entity write decision on
+   the `GraphqlMutation` surface, then the check that a row policy provider is
+   registered when the entity declares a row write policy key. A
+   [principal-bound upsert](runtime-and-writes.md#principal-bound-upserts)
+   resolves its key between steps 1 and 2.
+3. **Target admission.** A single-row update or delete locks its row through
+   the write-target prefilter and classifies it with the row read and write
+   decisions; a bulk write does the same for every row its filter selects. See
+   [row policy on generated writes](#row-policy-on-generated-writes).
+4. **Hook dispatch.** Each `Before` and `After` hook invocation, the hook's
+   [request authority](#hook-writes-on-the-originating-requests-authority) and
+   the change journal record.
+
+These are four kinds of step, not one linear sequence. The input transform,
+the field write decisions, value binding, the SQL statement and the
+written-row check stay in generated code, because they are typed per entity
+field. Each write shape runs them in its own order, unchanged from before the
+pipeline existed. In every shape the `Before` hook runs before the SQL
+statement and the `After` hook after it, inside the transaction.
+
+| Write | Order |
+| --- | --- |
+| Create | request admission; entity admission; input transform; field write decisions; begin transaction; `Before` hook; `INSERT`; written-row check; `After` hook; commit |
+| Create with child rows | the parent's steps up to its field write decisions; then for each child, before the transaction: request admission against the child's own create root, entity admission, input transform, field write decisions; begin transaction; the parent's `Before` hook, `INSERT`, written-row check and `After` hook; the same four for each child in list order; commit |
+| Update | request admission; entity admission; begin transaction; target admission; expected-version check; input transform; field write decisions; conditional [assurance selection](../../architecture/operation-assurance.md) when declared; `Before` hook; `UPDATE`; written-row check; `After` hook; commit |
+| Delete | request admission; entity admission; begin transaction; target admission; expected-version check; `Before` hook; `DELETE`; `After` hook; commit |
+| Upsert | request admission; principal-bound key resolution when declared; entity admission; begin transaction; input transform; the bound key applied again; locked lookup of the existing row by conflict key; row write decision on that row when it exists; field write decisions; `Before` hook, which may [acknowledge](runtime-and-writes.md#principal-bound-upserts) and end the write; the statement; written-row check; `After` hook; commit |
+| Bulk update | request admission; entity admission; filter validation and read authority for the filtered fields; entity admission again on the shared write path; begin transaction; target admission for every selected row; per row, input transform and field write decisions; the `Before` hook for every row; the `UPDATE` for every row; per row, written-row check and `After` hook; commit |
+| Bulk delete | as bulk update up to target admission; the `Before` hook for every row; the `DELETE` for every row; the `After` hook for every row; commit |
+
+A `dependent_deletes` entity plans its delete first: the root admits its
+target without a lock, and the plan locks and admits each row again before it
+writes. See [hooks](runtime-and-writes.md#hooks) for commit, `Changed` events,
+deferred actions and `notify_with`.
+
+### What the pipeline does and does not enforce
+
+A mutation hook's transaction presents the originating request only when the
+hook dispatch is given a `GeneratedWriteAuthority` for the event's entity.
+That type has no public constructor. It is issued only by the pipeline's
+entity admission, which can only start from a completed request admission.
+An authority issued for one entity attaches nothing to a hook event of
+another.
+
+That is the whole boundary. It is not a seal against host Rust code:
+
+- The pipeline's functions are macro-internal and hidden from the API
+  documentation, but they are `pub`, because generated code compiles in the
+  host's crate. Host Rust code is trusted and can call them.
+- Request admission takes the authentication mode, the scopes and the
+  assurance coordinate from its caller. A generated resolver passes the
+  entity's declarations. Host code that calls it passes its own.
+- The authority is issued at entity admission, before any target row is
+  admitted.
+- The authority is not bound to the request, operation or `Database` it was
+  issued under. The entity write decision is asked again, for the request
+  presented at dispatch, before each hook invocation that attaches authority.
+
+Do not treat these functions as an authorization API. A custom resolver
+declares its own [authorization](resolver-operation-metadata.md) and writes
+through the repository or `Database::transaction`, and dispatches a hook with
+`MutationContext::run_mutation_hook`, which attaches no request authority.
+
 ## Row Policy On Generated Writes
 
 `RowPolicy` decides three things for every generated write: which existing
 rows it may target, whether the row it writes is allowed, and whether the
 caller receives that row back. Row-level isolation that rests on `RowPolicy`
 instead of PostgreSQL RLS relies on all three.
+
+A [principal-bound upsert](runtime-and-writes.md#principal-bound-upserts) takes
+its conflict key from the verified request instead of the input. It narrows
+which row the upsert can reach and replaces no check: the entity, row and field
+write decisions below apply to it unchanged, after the key is bound.
 
 **The written row.** Generated creates, updates, upserts and bulk updates check
 `can_write_row` on the row as written (the post-image), inside the transaction
@@ -535,7 +628,8 @@ refuses these calls as unauthenticated. A custom resolver applies its own checks
 
 Writes from a mutation hook reach policies the same way, without the originating request, so
 `ScopeEntityPolicy::new` refuses them too. By default a policy can't distinguish hooks, workers
-and custom resolvers on this surface.
+and custom resolvers on this surface. A named system access (below) or the opt-in
+[originating request](#hook-writes-on-the-originating-requests-authority) tells them apart.
 
 Do not treat `None` as system authority. A trusted caller presents a named one instead, and the
 policy decides on it:
@@ -577,10 +671,125 @@ its future completes and restores the previous access; if the future is dropped 
 transaction can no longer commit. Keep a labelled handle out of GraphQL schema data, and let a
 policy that honours a label also require `ctx` to be `None`.
 
-Hook writes still use the `Repository` surface, and nested writes do not receive the originating
-request's `Context`. [#291](https://github.com/Dastari/graphql-orm/issues/291) tracks whether to
-add a separate surface or to carry the request, both of which would change what existing policies
-observe.
+### The authority a policy receives
+
+Every entity, row and repository field callback the ORM makes goes through a `*_with_authority`
+method (`can_access_entity_with_authority`, `read_visibility_with_authority`,
+`can_read_row_with_authority`, `can_write_row_with_authority`,
+`can_read_repository_field_with_authority`, `can_write_repository_field_with_authority`). It
+receives the existing arguments and a `PolicyAuthority`:
+
+| `PolicyAuthority` | Meaning |
+| --- | --- |
+| `system()` | The named `SystemAccess` of the handle or scope, the same value as `db.system_access()` |
+| `hook_request()` | The originating request of the mutation hook making the call, when the host opted in (below). Entity and row decisions only |
+| `is_none()` | Neither is presented |
+
+The default implementations ignore the authority and call the method without it, with the same
+arguments, so a policy that overrides none of them decides exactly as before. `ctx = None` with
+`is_none()` is a call that presents no authority at all, and a policy can refuse it while
+admitting a named worker or a hook:
+
+```rust
+fn can_access_entity_with_authority<'a>(
+    &'a self,
+    authority: PolicyAuthority<'a>,
+    ctx: Option<&'a async_graphql::Context<'_>>,
+    db: &'a Database,
+    entity_name: &'static str,
+    policy_key: Option<&'static str>,
+    kind: EntityAccessKind,
+    surface: EntityAccessSurface,
+) -> BoxFuture<'a, async_graphql::Result<bool>> {
+    Box::pin(async move {
+        if let Some(ctx) = ctx {
+            return self.request_may(ctx, entity_name, kind);
+        }
+        if let Some(access) = authority.system() {
+            return Ok(access.name == "billing-worker" && entity_name == "Invoice");
+        }
+        if let Some(request) = authority.hook_request() {
+            // The same rule the request's own operations get.
+            return Ok(request.subject().is_some_and(|subject| subject.has_scope("orders.write")));
+        }
+        Ok(false) // no authority
+    })
+}
+```
+
+A policy that wraps another forwards the authority to the inner policy's `*_with_authority`
+method. `RowPolicy::can_read_deleted_preimage` and `write_target_prefilter` have no such form:
+they are asked only for a GraphQL request or subscription, which presents its `ctx`.
+
+### Hook writes on the originating request's authority
+
+By default a mutation hook's nested writes present nothing of the request that caused them.
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
+`Database::with_request_authority_propagated_to_hooks(true)`) opts in on the handle the schema
+serves. A mutation hook that a generated GraphQL mutation invokes then presents a
+`HookRequestAuthority` on the **entity and row** policy checks of the operations it makes through
+its `MutationContext`, including the hooks those nested writes invoke in turn. It holds the
+request's `AuthSubject` (and, with `auth-agql`, its accepted identity), not the GraphQL `Context`.
+`ctx` stays `None` and the surface stays `Repository`.
+
+The opt-in grants nothing by itself; a policy decides on the authority:
+
+- `ScopeEntityPolicy` holds the originating subject to the same scope requirement as the
+  request's own operations. A cleanup hook then succeeds for a caller holding the write scope and
+  is still refused for one that does not, or without the opt-in.
+- A host `EntityPolicy` or `RowPolicy` reads `authority.hook_request()` as above. One that
+  overrides no `*_with_authority` method refuses the hook write as before.
+- `AgqlCurrentAuthorityPolicy` is an entity policy. For every nested **entity** decision it
+  revalidates the originating identity's status and current authority around the binding check
+  and the business entity policy, as it does for a request, and asks
+  `AgqlBindingAuthorizer::authorize_hook_operation` in place of `authorize`. Its default denies,
+  so the host also implements that method. Row decisions are not revalidated by the bridge,
+  for a hook write as for a request; they follow the entity decision of the same operation. See
+  the [agql-auth bridge](agql-auth-bridge.md#accepted-request-and-current-authority).
+
+The authority belongs to the hook's transaction, and to nothing else:
+
+- **No `Database` handle carries it.** The handle `MutationContext::database()` returns, a clone
+  of it, and the `db` a policy callback receives all present no originating request. A
+  repository call, a `Database::transaction`, or a task spawned from the hook therefore has no
+  request authority, whichever handle it uses, also while the hook is still running.
+- **It is attached only with a pipeline admission,** and only when the request is admitted to
+  write the event's entity: the entity decision is asked once more, on the `GraphqlMutation`
+  surface, before each hook invocation that attaches it. The hook dispatch of the
+  [write pipeline](#the-generated-write-pipeline) takes the request only together with a
+  `GeneratedWriteAuthority` for that entity, which only the pipeline's request and entity
+  admission issue. A generated GraphQL mutation runs that admission with the entity's declared
+  authentication, scopes and assurance. `MutationContext::run_mutation_hook`, the dispatcher
+  for host code, runs the hook without request authority.
+  This does not constrain host Rust code, which is trusted: the admission functions are
+  macro-internal but callable, take their caller's arguments, and issue an authority that is
+  not bound to one request. See
+  [what the pipeline does and does not enforce](#what-the-pipeline-does-and-does-not-enforce).
+- **It ends with the hook invocation,** including on an error or a dropped future, and every read
+  of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
+  return `None` afterwards, also for a value obtained earlier. Post-commit actions, later
+  transactions and later requests start with none. Revocation applies to the marker and its
+  accessors. A policy callback that clones the `AuthSubject` or the accepted agql-auth identity
+  into its own state keeps identity data only: the ORM never reads authority from a copy, so it
+  cannot attach to a write, and a host must not treat it as live authority.
+- A hook invoked by a repository write or a worker's transaction has no originating request.
+- Inside `MutationContext::with_system_access`, the scope's named access replaces it.
+
+What it does not cover:
+
+- **Repository field decisions.** `can_read_repository_field_with_authority` and
+  `can_write_repository_field_with_authority` receive the named system access only;
+  `hook_request()` is always `None` there. A hook write of a field with a declared policy key is
+  decided as before, by key, entity and field name or a named hook scope.
+- **`RuntimeMutationHook`.** Only `MutationHook` invocations of statically generated mutations
+  present the request. The runtime GraphQL surface does not.
+- **Policies wrapped by a companion crate** receive what that crate forwards. `graphql-orm-ai`
+  forwards host-owned repository field decisions on its internal handle to the host policy's
+  `*_with_authority` methods (AI 0.165.0); its own key-less fields are answered by the crate.
+
+A policy that honours the originating request trusts every installed mutation hook to act for
+the caller on the entities and rows that request could itself write. Decide per entity where a
+hook must not have that reach.
 
 ## Subscriptions
 

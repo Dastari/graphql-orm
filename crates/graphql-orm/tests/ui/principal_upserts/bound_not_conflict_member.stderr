@@ -1,0 +1,5 @@
+error: upsert_bound_key field `payload` must name a member of the upsert conflict key: only the key the conflict lookup uses can be bound
+  --> tests/ui/principal_upserts/bound_not_conflict_member.rs:24:5
+   |
+24 |     upsert_bound_key(field = "payload", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^
