@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.236.0 preserves authorized direct queries for generated
+Version 0.235.0 preserves authorized direct queries for generated
 relations without a compatible registered loader. See
 [generated relation loaders](../../docs/reference/graphql-orm/entities-and-relations.md#current-authority-for-generated-relationship-targets).
 

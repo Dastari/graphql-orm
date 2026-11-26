@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.236.0 generates a checked loader lookup for both to-one and
+Version 0.235.0 generates a checked loader lookup for both to-one and
 to-many relation fields. See the
-[migration guide](../../MIGRATION.md#02340-to-02360-optional-relation-loaders).
+[migration guide](../../MIGRATION.md#02340-to-02350-optional-relation-loaders).
 
 Version 0.234.0 aligns with the ORM's internal date-time engine update.
 See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).

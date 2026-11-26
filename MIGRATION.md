@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.234.0 to 0.236.0: Optional relation loaders
+## 0.234.0 to 0.235.0: Optional relation loaders
 
 **No action.** Upgrade ORM and macros together. Generated relation
 resolvers still use authorized direct queries when a compatible loader
