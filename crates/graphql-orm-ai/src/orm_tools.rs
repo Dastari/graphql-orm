@@ -5514,7 +5514,7 @@ mod broker_correction_tests {
             (
                 crate::AI_CAPABILITY_STALE,
                 Code::CapabilityStale,
-                "catalogue changed",
+                "capability changed",
             ),
             (
                 crate::AI_CAPABILITY_SELECTION_STALE,
