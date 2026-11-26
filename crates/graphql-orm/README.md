@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.236.0 reports missing generated relation loaders as GraphQL errors.
+Handwritten schemas can register target loaders or opt into direct relation
+queries. See the [migration guide](../../MIGRATION.md#02350-to-02360-relation-loaders-and-default-sort).
+
 Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
 chrono fields and stored date-time formats carry forward without migration.
 See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).

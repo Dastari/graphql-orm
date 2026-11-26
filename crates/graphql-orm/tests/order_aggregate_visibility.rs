@@ -377,6 +377,7 @@ async fn schema() -> async_graphql::Schema<QueryRoot, MutationRoot, Subscription
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db)
+    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .data(owned)
     .data(AuthSubject::builder("reader").build())
     .finish()

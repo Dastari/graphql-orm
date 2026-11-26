@@ -745,8 +745,7 @@ async fn sql(db: &Database, statement: &str) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// The generated roots with no `DataLoader` registered: every relation reads
-/// through the direct path.
+/// The generated roots configured to read relations through the direct path.
 fn unbatched_schema(db: &Database) -> AppSchema {
     async_graphql::Schema::build(
         QueryRoot::default(),
@@ -755,6 +754,7 @@ fn unbatched_schema(db: &Database) -> AppSchema {
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
+    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .finish()
 }
 

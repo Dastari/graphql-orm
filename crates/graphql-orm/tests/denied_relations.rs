@@ -371,6 +371,7 @@ async fn denial_matrix() -> Result<(), Box<dyn std::error::Error>> {
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
+    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .finish();
     let list_schema = async_graphql::Schema::build(
         ListQuery,
@@ -379,6 +380,7 @@ async fn denial_matrix() -> Result<(), Box<dyn std::error::Error>> {
     )
     .extension(graphql_orm::graphql::input_validation::GeneratedInputValidation)
     .data(db.clone())
+    .data(graphql_orm::graphql::loaders::DirectRelationQueries)
     .finish();
     assert!(schema.sdl().contains("optional: Target"));
     assert!(!schema.sdl().contains("optional: Target!"));

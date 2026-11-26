@@ -809,8 +809,8 @@ one pair must stay public. The macro also requires:
 Generated traversal always binds the complete tuple on the server: to-one,
 nullable and to-many fields, relation `where`/`orderBy`/`page` arguments, page
 windows and counts, both the batched `RelationLoader` path and the direct
-query used without a registered loader. For such a relation the loader
-associates rows by database match identity. Each batched statement joins its
+query path. The loader associates rows by database match identity. Each
+batched statement joins its
 parent tuples as a derived table with one ordinal per parent, and rows,
 counts and page windows are grouped by that ordinal. Key text is never
 compared again in Rust, so the loader returns what the direct query returns
@@ -1191,11 +1191,14 @@ The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its defaul
 `NoCache` storage. The loader and its keys are generated-resolver plumbing:
 its key constructors are generated-only, hidden and outside semver, and apply
 no policy if called by hand. A handwritten schema registers the loader
-with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent loads without reusing results across
-requests; other cache types are not accepted as authoritative targets and the
-resolver falls back to a fresh typed query. Current visibility predicates and
-structural `DbAuthContext::partition_key()` values participate in SQL batch grouping. A cursor, snapshot,
-source record or cached row never grants target access.
+with `graphql::loaders::relation_data_loader::<T, B>(db)`. It batches concurrent
+loads without reusing results across requests. If batching is selected and the
+loader is missing, the field returns a configuration error. To use direct
+queries for all generated relations in a schema, register
+`graphql::loaders::DirectRelationQueries` in schema data. Current visibility
+predicates and structural `DbAuthContext::partition_key()` values participate
+in SQL batch grouping. A cursor, snapshot, source record or cached row never
+grants target access.
 
 To-many SQL-complete visibility is applied before page windows and counts.
 Callback-only/prefilter visibility uses the existing host-owned

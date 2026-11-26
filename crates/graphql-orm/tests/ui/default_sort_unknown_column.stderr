@@ -1,0 +1,5 @@
+error: default_sort column `missing` is not a persisted column of this entity
+ --> tests/ui/default_sort_unknown_column.rs:4:75
+  |
+4 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "missing ASC")]
+  |                                                                           ^^^^^^^^^^^^^

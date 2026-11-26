@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.236.0
+
+- **Changed (refs #542).** Generated relation resolvers report a missing
+  batching loader as a GraphQL error. Explicit `default_sort` declarations
+  are validated against physical columns and rendered for the selected backend.
+  [Migration](MIGRATION.md#02350-to-02360-relation-loaders-and-default-sort)
+
 ## Unreleased - ORM/macros 0.234.0
 
 - **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time

@@ -23,7 +23,6 @@ struct RelationDef {
     source_field_idents: Vec<syn::Ident>,
     source_kinds: Vec<RelationValueKind>,
     source_optional: Vec<bool>,
-    source_supports_dataloader: bool,
     emit_foreign_key: bool,
     on_delete: proc_macro2::TokenStream,
     propagate_change: proc_macro2::TokenStream,
@@ -398,7 +397,6 @@ pub(crate) fn generate_graphql_relations(
             source_kinds.push(source_kind);
             source_optional.push(source_is_option);
         }
-        let source_supports_dataloader = true;
         let is_multiple = meta.relation_multiple;
         let emits_foreign_key = meta.relation_emit_foreign_key.unwrap_or(!is_multiple);
         if (meta.relation_source_condition.is_some() || meta.relation_target_condition.is_some())
@@ -479,7 +477,6 @@ pub(crate) fn generate_graphql_relations(
             source_field_idents,
             source_kinds,
             source_optional,
-            source_supports_dataloader,
             emit_foreign_key: emits_foreign_key,
             on_delete,
             propagate_change,
@@ -568,7 +565,6 @@ pub(crate) fn generate_graphql_relations(
             .iter()
             .map(|column| backend_render_identifier_path(backend, column))
             .collect::<Vec<_>>();
-        let source_supports_dataloader = r.source_supports_dataloader;
         let source_fields = &r.source_field_idents;
         let source_kinds = &r.source_kinds;
         let source_optional = &r.source_optional;
@@ -896,20 +892,14 @@ pub(crate) fn generate_graphql_relations(
                     // Use DataLoader whenever the relation key can be batched.
                     #source_binding_multiple
 
-                    let use_dataloader = #source_supports_dataloader
-                        && !visibility.requires_residual_checks()
-                        && ctx.data_opt::<::graphql_orm::async_graphql::dataloader::DataLoader<
-                            ::graphql_orm::graphql::loaders::RelationLoader<#target_type, #backend_marker>
-                        >>().is_some()
+                    let use_dataloader = !visibility.requires_residual_checks()
+                        && ctx.data_opt::<::graphql_orm::graphql::loaders::DirectRelationQueries>().is_none()
                         && order_by
                             .as_ref()
                             .is_none_or(|order| !order.requires_context());
 
                     let loaded = if use_dataloader {
-                        use ::graphql_orm::graphql::loaders::RelationLoader;
-                        use ::graphql_orm::async_graphql::dataloader::DataLoader;
-
-                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
+                        let loader = ::graphql_orm::graphql::loaders::request_relation_loader::<#target_type, #backend_marker>(ctx)?;
                         // Loaded with its own outcome: another caller's
                         // failing group in the same batch does not fail this one.
                         ::graphql_orm::graphql::loaders::isolated_load_result(loader
@@ -1031,15 +1021,8 @@ pub(crate) fn generate_graphql_relations(
                     ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
                     #source_binding_single
 
-                    let result = if #source_supports_dataloader && ctx.data_opt::<
-                        ::graphql_orm::async_graphql::dataloader::DataLoader<
-                            ::graphql_orm::graphql::loaders::RelationLoader<#target_type, #backend_marker>
-                        >
-                    >().is_some() {
-                        use ::graphql_orm::graphql::loaders::RelationLoader;
-                        use ::graphql_orm::async_graphql::dataloader::DataLoader;
-
-                        let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
+                    let result = if ctx.data_opt::<::graphql_orm::graphql::loaders::DirectRelationQueries>().is_none() {
+                        let loader = ::graphql_orm::graphql::loaders::request_relation_loader::<#target_type, #backend_marker>(ctx)?;
                         ::graphql_orm::graphql::loaders::isolated_load_result(loader
                             .load_one(::graphql_orm::graphql::loaders::IsolatedLoad(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
                                 #single_relation_query_key, &visibility,
@@ -1439,6 +1422,33 @@ mod object_visibility_tests {
             "#[graphql(skip)] {relation} kept: Option<Target>, #[graphql(skip, owned, derived(name = \"kept\", into = \"String\"))] label: String,"
         ));
         assert!(!derived.contains("\"kept\""), "{derived}");
+    }
+
+    #[test]
+    fn generated_relations_use_fallible_loader_lookups() {
+        let backend = crate::backend::enabled_backends()[0].name();
+        let input: DeriveInput = syn::parse_quote! {
+            #[graphql(complex)]
+            #[graphql_entity(backend = #backend, table = "records")]
+            struct Record {
+                #[primary_key]
+                id: String,
+                #[graphql(skip)]
+                #[relation(target = "Target", from = "id", to = "id", emit_fk = false)]
+                target: Option<Target>,
+                #[graphql(skip)]
+                #[relation(target = "Target", from = "id", to = "id", multiple, emit_fk = false)]
+                targets: Vec<Target>,
+            }
+        };
+        let generated = generate_graphql_relations(&input).unwrap().to_string();
+        assert_eq!(
+            generated
+                .matches("loaders :: request_relation_loader")
+                .count(),
+            2,
+        );
+        assert!(!generated.contains("data_unchecked"));
     }
 
     #[test]

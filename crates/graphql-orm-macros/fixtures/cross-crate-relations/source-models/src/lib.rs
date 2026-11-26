@@ -576,7 +576,9 @@ mod tests {
                 .data(graphql_orm::graphql::loaders::relation_data_loader::<Endpoint, DefaultBackend>(db))
                 .finish()
         } else {
-            builder.finish()
+            builder
+                .data(graphql_orm::graphql::loaders::DirectRelationQueries)
+                .finish()
         }
     }
     fn preloaded(id: &str, tenant: &str, name: &str) -> Endpoint {
@@ -641,6 +643,10 @@ mod tests {
         .data(db.clone())
         .data(graphql_orm::graphql::auth::AuthSubject::new("fixture-user"))
         .data(loader)
+        .data(graphql_orm::graphql::loaders::relation_data_loader::<
+            Endpoint,
+            DefaultBackend,
+        >(db.clone()))
         .finish();
         let current = schema
             .execute(async_graphql::Request::new(CHILD).data(identity("one")))

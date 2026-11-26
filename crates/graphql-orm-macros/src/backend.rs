@@ -226,6 +226,52 @@ pub(crate) fn backend_is_one_delimited_identifier(backend: BackendKind, identifi
     false
 }
 
+/// Split a SQL identifier path from the start of `input`. Each part must be
+/// a bare token or one well-formed delimited identifier.
+pub(crate) fn identifier_path_prefix(backend: BackendKind, input: &str) -> Option<(&str, &str)> {
+    let mut rest = input;
+    loop {
+        let first = rest.chars().next()?;
+        let length = if let Some(&(_, close, doubled)) = backend_identifier_delimiters(backend)
+            .iter()
+            .find(|(open, _, _)| *open == first)
+        {
+            let mut characters = rest.char_indices().skip(1).peekable();
+            let end = loop {
+                let (offset, character) = characters.next()?;
+                if character == close {
+                    if doubled && characters.peek().is_some_and(|&(_, next)| next == close) {
+                        characters.next();
+                    } else {
+                        break offset + close.len_utf8();
+                    }
+                }
+            };
+            if !backend_is_one_delimited_identifier(backend, &rest[..end]) {
+                return None;
+            }
+            end
+        } else {
+            let starts_identifier = |ch: char| {
+                ch == '_'
+                    || ch.is_ascii_alphabetic()
+                    || (!ch.is_ascii() && !ch.is_whitespace())
+                    || (backend == BackendKind::Mssql && matches!(ch, '#' | '@'))
+            };
+            if !starts_identifier(first) {
+                return None;
+            }
+            rest.find(|ch: char| !starts_identifier(ch) && !ch.is_ascii_digit() && ch != '$')
+                .unwrap_or(rest.len())
+        };
+        rest = &rest[length..];
+        match rest.strip_prefix('.') {
+            Some(next_part) => rest = next_part,
+            None => return Some((&input[..input.len() - rest.len()], rest)),
+        }
+    }
+}
+
 /// Refuse a declared identifier path with a part that starts and ends with a
 /// matching delimiter pair but is not exactly one well-formed, non-empty
 /// delimited identifier for `backend`, such as `"a"b"`, `[a]]` or
@@ -329,7 +375,7 @@ fn identifier_part_name(backend: BackendKind, part: &str) -> String {
     }
 }
 
-fn same_identifier_part(backend: BackendKind, left: &str, right: &str) -> bool {
+pub(crate) fn same_identifier_part(backend: BackendKind, left: &str, right: &str) -> bool {
     match backend {
         BackendKind::Postgres => {
             // A bare part PostgreSQL folds; a delimited or quoted part keeps
