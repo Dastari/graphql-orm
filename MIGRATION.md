@@ -122,6 +122,10 @@ discover, browse and execute broker fingerprints change in this same
 release. Approved generated mutations now execute instead of converging to
 `RecoveryRequired`. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-mutations-through-the-capability-broker-551).
 
+Build the broker index from the compiled mutation catalogue in the running
+process. The compiler rejects mutations with `@transientInput` arguments,
+and restored index metadata cannot supply that check.
+
 ### 9. Describe fixed-broker candidates by reference (graphql-orm-ai)
 
 **Action needed** for fixed-broker hosts of graphql-orm-ai, and for tests or
@@ -148,6 +152,171 @@ once. Pinned rules for brokered mutations stop admitting them after any
 catalogue edit until refreshed (known limitation). See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references).
 No data migration is needed.
+
+## 0.229.0 to 0.230.0: Shared generated read execution
+
+**No action.** Upgrade ORM and macros together. Generated list and aggregate
+resolvers use shared execution helpers. Their schema, catalogue and
+authorization contracts are unchanged.
+
+## 0.228.0 to 0.229.0: Decimal keyset ordering
+
+**No action.** Generated keyset `OrderBy` inputs now include sortable,
+readable portable Decimal fields (#920). The SDL diff consists of those
+additional input members. The corresponding input shapes and catalogue
+fingerprints that include them change. Existing cursor order and filter
+bindings carry through the upgrade.
+Hand-written `AuthorizedKeysetEntity` implementations whose configured keyset
+order contains a non-MONEY Decimal column must encode that value as canonical
+Decimal text at the declared scale; the former scaled-integer encoding now
+returns `CURSOR_INVALID`. `KeysetOrderByInput::ordered` now accepts sortable
+Decimal fields instead of refusing them.
+[Decimal keyset ordering](docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering)
+
+## 0.227.0 to 0.228.0: Transient input validation errors
+
+**No action.** Generated schema builders now return a fixed message when
+async-graphql rejects a transient argument, its variable default, or another
+argument that shares the variable.
+[Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
+
+## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
+
+**Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on
+columns using a legacy `SQL_` collation. Move the column to a Windows
+collation after reviewing its comparison rules, or add a persisted computed
+Unicode column and index it for the affected comparison.
+
+Upgrade ORM and macros together. The 0.215.0 ASCII VARCHAR conversion could
+match different rows under `SQL_` collations, including
+`SQL_Latin1_General_CP1_CI_AS`. String filters now bind as NVARCHAR with
+either pool setting. In the SQL Server fixture, a `SQL_` index scanned at
+31 logical reads with NVARCHAR, compared with a 2-read VARCHAR seek in
+0.215.0. The Windows CP1252 and UTF-8 VARCHAR indexes already sought with
+NVARCHAR at 2 reads each. A tested VARCHAR rewrite with per-statement
+collation and conversion checks used 10 reads on each Windows index.
+
+Opt-in integer narrowing to INT, SMALLINT and TINYINT still uses BIGINT when
+a signed comparison operand exceeds the declared width. Generated updates
+and upserts, including transactional writes, return `INVALID_INPUT` for
+out-of-range unsigned inputs before selecting targets. Updates validate the
+input even when no rows match.
+See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+
+## 0.225.0 to 0.226.0: Generated nested create
+
+**No action** unless opting in (#353). Add `nested_create` to the parent
+collection relation and declare the child's `nested_create_keys`. For an
+opted-in parent, regenerate the SDL and catalogues and update clients using
+GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
+The standalone child create keeps its shape. See
+[creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
+
+## 0.224.0 to 0.225.0: Opaque partial-index predicates
+
+**Action needed.** Review schema validation and migration plans before applying
+the upgrade to existing databases. SQLite and PostgreSQL now retain filters
+they cannot represent as portable predicates. SQL Server retains the presence
+of a filter even when its definition is unavailable. For a same-name live
+index whose filter differs from the declaration, a replacement plan contains
+a destructive `DropIndex` followed by `CreateIndex`. Confirm who owns the index
+and whether the declared index should replace it before applying the plan
+with `allow_destructive`.
+
+Re-plan against the live database after upgrading if you prepared the plan
+before the upgrade. The owned apply path checks the source hash and refuses an
+older plan when the live hash changes because introspection now retains its
+filter.
+
+`build_migration_plan` and `render_migration_step` return a refusal statement
+that fails on execution when rendering would recreate an opaque predicate the
+backend cannot reproduce. Opaque SQLite and PostgreSQL predicates are
+inspection metadata. Use explicitly reviewed DDL to recreate one.
+
+SQL Server `INCLUDE` columns are still unrepresented in the schema model.
+The follow-up on `next/breaking` will add an included-columns field and mark
+the public index structs `#[non_exhaustive]`.
+
+## 0.223.0 to 0.224.0: explicit authority for hooks and workers
+
+**No action.** Upgrade ORM and macros together. Existing policies decide
+exactly as before: the new `*_with_authority` methods on `EntityPolicy`,
+`RowPolicy` and `FieldPolicy` have defaults that call the existing methods
+with the same arguments, and nothing is propagated unless the host opts in.
+
+To let a mutation hook's nested writes be authorized from the GraphQL request
+that caused them, set
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)` (or
+`Database::with_request_authority_propagated_to_hooks(true)`) on the handle
+the schema serves. Then:
+
+- `ScopeEntityPolicy` applies its scope requirement to the originating
+  subject for the hook's nested operations.
+- A host `EntityPolicy` or `RowPolicy` reads `PolicyAuthority::hook_request()`
+  in a `*_with_authority` method and decides. Repository field decisions do
+  not receive the request. A policy that wraps another forwards
+  the authority to the inner policy's `*_with_authority` method.
+- Under `AgqlCurrentAuthorityPolicy`, also implement
+  `AgqlBindingAuthorizer::authorize_hook_operation`; its default denies.
+
+Do not call `MutationContext::__run_generated_mutation_hook` from host code.
+It is macro-internal: it attaches the caller's request authority after only
+an entity write-policy check, without the generated resolver's scope,
+assurance or target admission. Host code that dispatches hooks itself uses
+`run_mutation_hook`, which attaches none.
+[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
+admission into the runtime and seal that entry.
+
+See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
+
+## 0.222.0 to 0.223.0: SQL Server exact string filter seeks
+
+Upgrade ORM and macros together. With `exact_string_filters` enabled, SQL
+Server can seek on declared BIN2 Unicode key columns for `eq` and nonempty
+`in_list` filters (#867). The SQL text changes for every opted-in exact
+comparison, including on non-BIN2 columns and for `ne` and `not_in`. This
+also applies to the AI crate's opted-in entities. Review SQL Server plan
+guides and Query Store forced plans for these queries because they match on
+statement text. The generated SQL always converts the column to Unicode
+for the exactness check, including the byte-length check on non-seek paths.
+
+**Action needed** if a live column has drifted. Compare the live column
+types with the ORM declarations for opted-in entities and review affected
+read policies. On a live `VARCHAR` column declared as `NVARCHAR`, the old
+length check compared bytes across encodings. It rejected true matches when
+the byte counts differed, including every nonempty single-byte exact match.
+It could also admit a space-padded value whose byte count happened to
+match, such as stored `'bob   '` for operand `'bob'`. Exact comparisons now
+accept the true match and reject the padded value. A read policy that
+matches an owner exactly can now return rows to the true owner that it
+previously denied. The upgrade itself requires no schema or data migration.
+
+## 0.221.0 to 0.222.0: principal-bound upserts
+
+**No action.** Upgrade ORM and macros together. `upsert_bound_key`,
+`transient_input` and `upsert_acknowledge` are new, opt-in entity options.
+Entities that declare none of them generate the same schema, SQL, hooks and
+operation fingerprints as before. An entity that declares one changes its own
+upsert's arguments and its operation `schema_signature`, so rebind a pinned
+fingerprint for that entity. An upsert result can have `success: true` with
+`action: null` only on an entity that declares `upsert_acknowledge`.
+See [principal-bound upserts](docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+## 0.220.0 to 0.221.0: generated Changed replay
+
+**No action.** Upgrade ORM and macros together. No data migration is needed.
+To adopt replay, set `changed_started = true, changed_replay = true` on the
+entity. Update clients to save `Cursor`, resume with `After` and resubscribe
+without a cursor before refetching on `SUBSCRIPTION_REPLAY_RESET`. Operation
+catalogue 0.16.0 describes the replay window in exported client metadata.
+
+A resume waits for the authority tick within the advertised 120-second
+window. Base intervals of 120 seconds or more make every resume age out.
+The reset bit is visible at tick granularity. Parallel probes with reusable
+cursors can estimate when total writes after a checkpoint cross the 128-event
+bound, including hidden and other-tenant writes. An oversized delete preimage
+or a value whose storage cannot be measured clears the ring.
+[Changed replay reference](docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
 
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 

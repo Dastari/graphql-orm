@@ -147,7 +147,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 #authority_boundary
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                hook_ctx.run_mutation_hook(
+                hook_ctx.__run_generated_mutation_hook(
                     ::std::option::Option::Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
                         phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
@@ -178,7 +178,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
 
                 match result {
                     ::std::result::Result::Ok(r) if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&r) == 1 => {
-                        hook_ctx.run_mutation_hook(
+                        hook_ctx.__run_generated_mutation_hook(
                             ::std::option::Option::Some(ctx),
                             &::graphql_orm::graphql::orm::MutationEvent {
                                 phase: ::graphql_orm::graphql::orm::MutationPhase::After,

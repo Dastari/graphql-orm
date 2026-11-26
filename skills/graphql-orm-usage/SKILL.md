@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-16
+last_reviewed: 2026-11-23
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -633,16 +633,24 @@ See [strict authorization](../../docs/reference/graphql-orm/strict-authorization
 ### In-process writes
 
 `hook_ctx`, repository helpers and workers all reach policies with `ctx = None` and
-`EntityAccessSurface::Repository`. The library can't tell them apart, and the GraphQL caller's authority
-doesn't carry into a hook's writes ([#291](https://github.com/Dastari/graphql-orm/issues/291)).
+`EntityAccessSurface::Repository`. By default the library can't tell them apart, and the GraphQL
+caller's authority doesn't carry into a hook's writes. Two explicit authorities change that
+([strict authorization](../../docs/reference/graphql-orm/strict-authorization.md#repository-system-access)):
+a named `SystemAccess` for workers and hook scopes, and, with
+`DatabaseBuilder::propagate_request_authority_to_hooks(true)`, the originating request for a hook's
+nested writes. Policies receive them as a `PolicyAuthority` in their `*_with_authority` methods; the
+originating request reaches entity and row decisions only.
 
-- `ScopeEntityPolicy::new` refuses all of them as `UNAUTHENTICATED`, so a hook's cleanup makes the
-  mutation fail. A service with writing hooks needs its own `EntityPolicy`.
-- `None` proves nothing about the caller, and it isn't system authority. `SystemAccess` and
-  `AccessContext` reach only repository field policies today. So the only available decision is whether
-  to allow the `Repository` surface, and allowing it means trusting all in-process code. Make that
-  decision explicitly, in the policy, with a comment, and make sure client intent can't reach those
-  calls unchecked. [The example](examples.md#a-custom-action-with-row-policies) shows one.
+- `ScopeEntityPolicy::new` refuses all of them as `UNAUTHENTICATED` by default, so a hook's cleanup
+  makes the mutation fail. With the opt-in it holds the originating subject to its scope requirement
+  for the hook's nested writes; without it, a service with writing hooks needs its own `EntityPolicy`
+  or a named hook scope.
+- `None` proves nothing about the caller, and it isn't system authority. A policy that overrides no
+  `*_with_authority` method can only decide whether to allow the `Repository` surface, and allowing it
+  means trusting all in-process code. Prefer deciding on the `PolicyAuthority`: admit the named
+  workers and hook requests you expect, and refuse a call that presents none. Whichever you choose,
+  make the decision explicitly, in the policy, with a comment, and make sure client intent can't reach
+  those calls unchecked. [The example](examples.md#a-custom-action-with-row-policies) shows one.
 
 ### Custom resolvers don't inherit authorization
 

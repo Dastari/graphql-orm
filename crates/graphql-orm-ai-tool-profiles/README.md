@@ -10,22 +10,16 @@ supersedes: []
 
 # `graphql-orm-ai-tool-profiles`
 
-AI tool profiles 0.34.0 adds a model-facing contract fingerprint to every
-capability and index entry, which leaves out catalogue-wide fingerprints.
-Capability index, index-set and entry fingerprints change once. See the
-[migration guide](MIGRATION.md#0340-capability-contract-fingerprints).
+The next breaking tool-profile release adds continuable keyset pages, compact mutation
+and subscription signatures, and capability contract fingerprints.
+See the [migration guide](MIGRATION.md).
 
-Version 0.33.0 renders compact typed signatures for generated
-mutations and subscriptions, so the capability broker can describe generated
-mutations. See the
-[migration guide](MIGRATION.md#0330-mutation-and-subscription-signatures).
+AI tool profiles 0.32.0 refuses tool profiles, loaded manifests and typed
+capabilities that would carry a transient mutation argument
+(`@transientInput`).
+See the [migration guide](MIGRATION.md#0320-transient-mutation-arguments).
 
-Version 0.32.0 compiles continuable keyset pages with a server-held
-cursor and lists capability index entries for hierarchical browsing, for
-capability broker version 3. Existing fingerprints are unchanged. See the
-[migration guide](MIGRATION.md#0320-continuable-keyset-pages).
-
-Version 0.31.0 adds typed endpoint validation reasons for provider
+AI tool profiles 0.31.0 adds typed endpoint validation reasons for provider
 profile saves and reports, including missing or malformed stored endpoints.
 See the [migration guide](MIGRATION.md#0310-provider-endpoint-path-error).
 

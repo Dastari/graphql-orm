@@ -1,0 +1,5 @@
+error: upsert_bound_key field `machine_key` must be #[graphql_orm(private)] with no filter, order, subscribe, search, input or primary-key exposure: a principal-bound key has no GraphQL surface
+  --> tests/ui/principal_upserts/bound_filterable.rs:24:5
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Machine"),
+   |     ^^^^^^^^^^^^^^^^

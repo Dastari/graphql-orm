@@ -1,0 +1,5 @@
+error: transient_input name must be an ASCII GraphQL argument name other than `input`
+  --> tests/ui/principal_upserts/transient_named_input.rs:25:59
+   |
+25 |     transient_input(type = "Proof", on = "upsert", name = "input"),
+   |                                                           ^^^^^^^

@@ -1369,7 +1369,7 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
-        self.search_admitted(principal_reference, run, query, false, |_| true)
+        self.search_admitted(principal_reference, run, query, false, |_, _| true)
             .await
             .map(|(result, _)| result)
     }
@@ -1385,7 +1385,7 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         query: &AiCapabilitySearchQuery,
         per_root: bool,
-        admit: impl Fn(&AiCapabilityIndexEntry) -> bool,
+        admit: impl Fn(&AiCapabilityIndex, &AiCapabilityIndexEntry) -> bool,
     ) -> Result<(AiCapabilityIndexSetSearchResult, Vec<String>), AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
@@ -1394,7 +1394,7 @@ impl AiCapabilityDiscoveryBroker {
         } else {
             indexes.ranked_matches(query)?
         };
-        ranked.retain(|candidate| admit(candidate.entry()));
+        ranked.retain(|candidate| admit(candidate.index(), candidate.entry()));
         let kept = Box::pin(self.admit_ranked(&principal, run, &ranked, per_root)).await?;
         // Rank again on each entity's own metadata and its admitted roots,
         // so a denied root's text decides neither whether nor where its
@@ -1860,7 +1860,7 @@ impl AiCapabilityDiscoveryBroker {
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
             .ok_or_else(stale_capability)?;
-        if entry.kind != loaded.capability_kind {
+        if entry.kind != loaded.capability_kind || !session.brokers_entry(index, entry) {
             return Err(AiError::Forbidden);
         }
         let mut current = self
@@ -2330,18 +2330,19 @@ impl AiCapabilityBrokerSession {
 
     /// Whether the bound rules admit this generated mutation entry at its
     /// reviewed classification.
-    fn brokers_mutation_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+    fn brokers_mutation_entry(
+        &self,
+        index: &AiCapabilityIndex,
+        entry: &AiCapabilityIndexEntry,
+    ) -> bool {
         entry.kind == AiCapabilityKind::GeneratedMutation
+            && index.mutations_checked_against_finished_schema()
             && self.brokers_mutation(&entry.capability_fingerprint, entry.approval)
     }
 
     /// Whether the bound rules admit a generated mutation with this exact
     /// capability fingerprint at the reviewed classification `approval`.
     fn brokers_mutation(&self, capability_fingerprint: &str, approval: AiApprovalRule) -> bool {
-        // TODO(#910): a generated `@transientInput` argument must never be
-        // offered through the broker. The marker is not on this base yet;
-        // once it is, refuse any mutation whose compact schema carries one
-        // here, before discovery, describe or execute can reach it.
         if !self.brokered_mutations {
             return false;
         }
@@ -2383,12 +2384,12 @@ impl AiCapabilityBrokerSession {
 
     /// Whether this run's broker reaches the entry at all: a generated read,
     /// a brokered static tool, or an admitted generated mutation.
-    fn brokers_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+    fn brokers_entry(&self, index: &AiCapabilityIndex, entry: &AiCapabilityIndexEntry) -> bool {
         matches!(
             entry.kind,
             AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
         ) || self.brokers_static_entry(entry)
-            || self.brokers_mutation_entry(entry)
+            || self.brokers_mutation_entry(index, entry)
     }
 
     /// Exact bounds applied to retained searches, loaded bindings, and one
@@ -3768,34 +3769,28 @@ impl AiCapabilityDiscoveryBroker {
         // Generated reads are entity capabilities plus any root without an
         // entity. Without brokered static tools the search covers only
         // those; with them, an unfiltered search covers both families.
-        let generated = |entry: &AiCapabilityIndexEntry| {
-            matches!(
-                entry.kind,
-                AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
-            )
-        };
-        let admit: Box<dyn Fn(&AiCapabilityIndexEntry) -> bool + Send + Sync> = match parsed.kind {
-            Some(AiCapabilityKind::GeneratedQuery) => Box::new(generated),
+        let admit: fn(
+            &AiCapabilityBrokerSession,
+            &AiCapabilityIndex,
+            &AiCapabilityIndexEntry,
+        ) -> bool = match parsed.kind {
+            Some(AiCapabilityKind::GeneratedQuery) => |_, _, entry| {
+                matches!(
+                    entry.kind,
+                    AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
+                )
+            },
             Some(AiCapabilityKind::GeneratedEntity) => {
-                Box::new(|entry: &AiCapabilityIndexEntry| {
-                    entry.kind == AiCapabilityKind::GeneratedEntity
-                })
+                |_, _, entry| entry.kind == AiCapabilityKind::GeneratedEntity
             }
             Some(AiCapabilityKind::ReviewedStatic) if brokers_static => {
-                let session = session.clone();
-                Box::new(move |entry: &AiCapabilityIndexEntry| session.brokers_static_entry(entry))
+                |session, _, entry| session.brokers_static_entry(entry)
             }
             Some(AiCapabilityKind::GeneratedMutation) if session.brokers_mutations() => {
-                let session = session.clone();
-                Box::new(move |entry: &AiCapabilityIndexEntry| {
-                    session.brokers_mutation_entry(entry)
-                })
+                AiCapabilityBrokerSession::brokers_mutation_entry
             }
             Some(_) => return Err(malformed_broker_arguments()),
-            None => {
-                let session = session.clone();
-                Box::new(move |entry: &AiCapabilityIndexEntry| session.brokers_entry(entry))
-            }
+            None => AiCapabilityBrokerSession::brokers_entry,
         };
         let query = AiCapabilitySearchQuery {
             text: parsed.text,
@@ -3805,7 +3800,9 @@ impl AiCapabilityDiscoveryBroker {
             maximum_results: parsed.maximum_results,
         };
         let (result, visible) = self
-            .search_admitted(principal_reference, run, &query, false, admit)
+            .search_admitted(principal_reference, run, &query, false, |index, entry| {
+                admit(session, index, entry)
+            })
             .await?;
         // Each candidate carries a fresh opaque reference bound to this
         // principal and run, and to this exact snapshot. The index-set and
@@ -3903,7 +3900,7 @@ impl AiCapabilityDiscoveryBroker {
             match parsed.level {
                 // Operations belong to an entity capability alone.
                 BrowseLevel::Operations => entry.kind == AiCapabilityKind::GeneratedEntity,
-                _ => session.brokers_entry(entry),
+                _ => session.brokers_entry(candidate.index(), entry),
             }
         });
         // Policy decides the listed entries in order, in batches of at most
@@ -4102,7 +4099,7 @@ impl AiCapabilityDiscoveryBroker {
         // Client-deferred delivery installs one exact definition per root,
         // so it ranks roots: an entity's roots stand in for the entity.
         let (result, _) = self
-            .search_admitted(principal_reference, run, &query, true, |_| true)
+            .search_admitted(principal_reference, run, &query, true, |_, _| true)
             .await?;
         if result.candidates.len() > usize::from(session.limits().maximum_deferred_definitions) {
             return Err(AiError::InvalidConfiguration(
@@ -4219,7 +4216,7 @@ impl AiCapabilityDiscoveryBroker {
         // A static tool is loadable only while this run brokers its exact
         // fingerprint. A cached discovery from a run that did, or any other
         // capability family, is the same stale selection as an unknown ID.
-        if !session.brokers_entry(entry) {
+        if !session.brokers_entry(index, entry) {
             return Err(stale_selection());
         }
         if candidate.kind != entry.kind {
@@ -4333,13 +4330,6 @@ impl AiCapabilityDiscoveryBroker {
             )
             .await?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        if loaded.capability_kind == AiCapabilityKind::GeneratedMutation
-            && !indexes
-                .entry(&loaded.capability_id)
-                .is_some_and(|(_, entry)| session.brokers_mutation_entry(entry))
-        {
-            return Err(AiError::Forbidden);
-        }
         let field_descriptions = indexes
             .entry(&loaded.capability_id)
             .map(|(_, entry)| {
@@ -4526,24 +4516,6 @@ impl AiCapabilityDiscoveryBroker {
                 parsed.operation.as_deref(),
             )
             .await?;
-        if static_tool || loaded.capability_kind == AiCapabilityKind::GeneratedMutation {
-            // A static tool or mutation is executable only while this run
-            // still brokers it: for a mutation, while the bound rules still
-            // admit its exact fingerprint at its reviewed classification.
-            let indexes = self.current_indexes.current_index_set(run)?;
-            if !indexes
-                .entry(&loaded.capability_id)
-                .is_some_and(|(_, entry)| {
-                    if static_tool {
-                        session.brokers_static_entry(entry)
-                    } else {
-                        session.brokers_mutation_entry(entry)
-                    }
-                })
-            {
-                return Err(AiError::Forbidden);
-            }
-        }
         if parsed.arguments.len() > 64
             || parsed.selections.len() > 256
             || parsed
@@ -7925,11 +7897,28 @@ mod tests {
     /// One automatic `CreateRecord` and one approval-required
     /// `ArchiveRecord` mutation of the `Record` entity.
     fn mutation_index(target_policy: &str) -> Arc<AiCapabilityIndex> {
+        compile_mutation_index(target_policy, false).expect("mutation capability index")
+    }
+
+    fn compile_mutation_index(
+        target_policy: &str,
+        transient_argument: bool,
+    ) -> Result<Arc<AiCapabilityIndex>, AiError> {
         let sdl = "schema { query: Query, mutation: Mutation }
             type Query { health: Boolean! }
             type Mutation { CreateRecord(input: RecordInput!): Record!, ArchiveRecord(recordId: ID!): Record! }
             input RecordInput { subject: String! }
             type Record { recordId: ID!, subject: String! }";
+        let marked_sdl;
+        let sdl = if transient_argument {
+            marked_sdl = format!(
+                "directive @transientInput on ARGUMENT_DEFINITION\n{}",
+                sdl.replace("input: RecordInput!", "input: RecordInput! @transientInput")
+            );
+            marked_sdl.as_str()
+        } else {
+            sdl
+        };
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
             field_name: field_name.to_owned(),
             description: format!("Reviewed public {field_name}."),
@@ -8020,22 +8009,19 @@ mod tests {
                     .with_exportable_field("RecordInput", "subject")
                     .expect("custom input disclosure"),
             ),
+        )?;
+        AiCapabilityIndex::compile(
+            target,
+            catalogue.finished_schema_fingerprint(),
+            &semantics,
+            None,
+            Some(&catalogue),
+            None,
+            [],
+            target_policy,
+            crate::AiCapabilityIndexLimits::default(),
         )
-        .expect("mutation capabilities");
-        Arc::new(
-            AiCapabilityIndex::compile(
-                target,
-                catalogue.finished_schema_fingerprint(),
-                &semantics,
-                None,
-                Some(&catalogue),
-                None,
-                [],
-                target_policy,
-                crate::AiCapabilityIndexLimits::default(),
-            )
-            .expect("mutation capability index"),
-        )
+        .map(Arc::new)
     }
 
     fn mutation_rules(allowed: Option<BTreeSet<String>>) -> crate::AiResolvedRuleSet {
@@ -8064,6 +8050,55 @@ mod tests {
             }],
         )
         .expect("rules")
+    }
+
+    #[tokio::test]
+    async fn broker_discovery_requires_mutations_checked_against_finished_sdl() {
+        assert!(matches!(
+            compile_mutation_index("target-policy-v1", true),
+            Err(AiError::InvalidConfiguration(message)) if message.contains("transient")
+        ));
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let index = mutation_index("target-policy-v1");
+        // Transporting the index leaves only discovery metadata. It cannot
+        // prove the original mutation compiler checked @transientInput.
+        let decoded: AiCapabilityIndex =
+            serde_json::from_value(serde_json::to_value(index.as_ref()).unwrap()).unwrap();
+        let indexes = |index| Arc::new(AiCapabilityIndexSet::compile([index]).expect("index set"));
+        let current = Arc::new(CurrentIndexes(RwLock::new(indexes(index))));
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            current.clone(),
+            Arc::new(Authority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("session")
+            .with_brokered_mutations()
+            .bind_mutation_rules(&mutation_rules(None))
+            .expect("bind rules");
+        let run = run_binding();
+        let search =
+            json!({"text": "create record", "kind": "generated_mutation", "maximumResults": 8});
+
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &session, &search)
+            .await
+            .expect("discovery using the compiled index");
+        assert!(candidate_kinds(&discovery).contains("generated_mutation"));
+
+        *current.0.write().unwrap() = indexes(Arc::new(decoded));
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &session, &search)
+            .await
+            .expect("discovery using serialized metadata");
+        assert!(discovery["candidates"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -826,7 +826,11 @@ where
         let (mut this, metadata) = self.authorize().await?;
         // Resolve the read decision once. Its predicate narrows the base query,
         // so the initial SQL window and the scan both carry it.
-        let mode = repository_read_plan::<T, B>(this.db, Some(&mut this.query)).await?;
+        let mode = repository_read_plan::<T, B>(
+            super::core::PolicyView::of(this.db),
+            Some(&mut this.query),
+        )
+        .await?;
         let config = this
             .db
             .pagination_config()
@@ -2283,15 +2287,20 @@ pub(crate) enum RowCheckMode {
 /// one, the read's executor does not receive the predicate, so the row
 /// callback stays the authority and `Complete` is residual for paging.
 pub(crate) async fn repository_read_plan<T, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
     query: Option<&mut EntityQuery<T, B>>,
 ) -> crate::Result<RowCheckMode>
 where
     T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     B: OrmBackend,
 {
+    let db = view.db;
     let visibility = db
-        .read_visibility::<T>(None, super::core::EntityAccessSurface::Repository)
+        .read_visibility_as::<T>(
+            view.authority,
+            None,
+            super::core::EntityAccessSurface::Repository,
+        )
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     let applies_predicate = query.is_some();
@@ -2786,18 +2795,55 @@ pub fn render_keyset_after(
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
-    render_keyset_after_with_types(backend, columns, cursor, start_index, |_| None)
+    render_keyset_bound(
+        backend,
+        columns,
+        &keyset_scalar_binds(cursor)?,
+        start_index,
+        false,
+    )
 }
 
-pub(super) fn render_keyset_after_with_types(
+/// Render the lexicographic `before` predicate with explicit nullable ordering.
+pub fn render_keyset_before(
     backend: DatabaseBackend,
     columns: &[KeysetOrderColumn],
     cursor: &[crate::graphql::pagination::KeysetValue],
     start_index: usize,
-    parameter_type: impl Fn(&str) -> Option<&'static str>,
 ) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    render_keyset_bound(
+        backend,
+        columns,
+        &keyset_scalar_binds(cursor)?,
+        start_index,
+        true,
+    )
+}
+
+fn keyset_scalar_binds(
+    cursor: &[crate::graphql::pagination::KeysetValue],
+) -> Result<Vec<Option<SqlValue>>, crate::graphql::errors::OrmPublicError> {
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
     use crate::graphql::pagination::KeysetValue;
+    cursor
+        .iter()
+        .map(|value| match value {
+            KeysetValue::Null => Ok(None),
+            value => keyset_sql_value(value)
+                .map(Some)
+                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid)),
+        })
+        .collect()
+}
+
+pub(super) fn render_keyset_bound(
+    backend: DatabaseBackend,
+    columns: &[KeysetOrderColumn],
+    cursor: &[Option<SqlValue>],
+    start_index: usize,
+    before: bool,
+) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
     if columns.len() != cursor.len() || columns.is_empty() {
         return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
     }
@@ -2808,28 +2854,30 @@ pub(super) fn render_keyset_after_with_types(
         for prior in 0..index {
             let column = columns[prior];
             match &cursor[prior] {
-                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
-                value => {
-                    let value = keyset_sql_value(value)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+                None => terms.push(format!("{} IS NULL", column.column)),
+                Some(value) => {
                     terms.push(format!(
                         "{} = {}",
                         column.column,
                         backend.placeholder(start_index + values.len())
                     ));
-                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                    values.push(value.clone());
                 }
             }
         }
-        let column = columns[index];
+        // Before the position in the requested order is after it in the
+        // reversed order, including the placement of null values.
+        let column = if before {
+            columns[index].reversed()
+        } else {
+            columns[index]
+        };
         let comparison = match &cursor[index] {
-            KeysetValue::Null => match column.nulls {
+            None => match column.nulls {
                 KeysetNulls::First => format!("{} IS NOT NULL", column.column),
                 KeysetNulls::Last => "1 = 0".to_string(),
             },
-            value => {
-                let value = keyset_sql_value(value)
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
+            Some(value) => {
                 let operator = match column.direction {
                     KeysetDirection::Asc => ">",
                     KeysetDirection::Desc => "<",
@@ -2840,90 +2888,10 @@ pub(super) fn render_keyset_after_with_types(
                     operator,
                     backend.placeholder(start_index + values.len())
                 );
-                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
+                values.push(value.clone());
                 match column.nulls {
                     KeysetNulls::First => format!("({} IS NOT NULL AND {scalar})", column.column),
                     KeysetNulls::Last => format!("({} IS NULL OR {scalar})", column.column),
-                }
-            }
-        };
-        terms.push(comparison);
-        branches.push(format!("({})", terms.join(" AND ")));
-    }
-    // Parenthesized as a whole, like the `before` form: the predicate stays
-    // one condition wherever a caller places it.
-    Ok((format!("({})", branches.join(" OR ")), values))
-}
-
-/// Render the lexicographic `before` predicate with explicit nullable ordering.
-pub fn render_keyset_before(
-    backend: DatabaseBackend,
-    columns: &[KeysetOrderColumn],
-    cursor: &[crate::graphql::pagination::KeysetValue],
-    start_index: usize,
-) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
-    render_keyset_before_with_types(backend, columns, cursor, start_index, |_| None)
-}
-
-pub(super) fn render_keyset_before_with_types(
-    backend: DatabaseBackend,
-    columns: &[KeysetOrderColumn],
-    cursor: &[crate::graphql::pagination::KeysetValue],
-    start_index: usize,
-    parameter_type: impl Fn(&str) -> Option<&'static str>,
-) -> Result<(String, Vec<SqlValue>), crate::graphql::errors::OrmPublicError> {
-    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    use crate::graphql::pagination::KeysetValue;
-    if columns.len() != cursor.len() || columns.is_empty() {
-        return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid));
-    }
-    let mut branches = Vec::new();
-    let mut values = Vec::new();
-    for index in 0..columns.len() {
-        let mut terms = Vec::new();
-        for prior in 0..index {
-            let column = columns[prior];
-            match &cursor[prior] {
-                KeysetValue::Null => terms.push(format!("{} IS NULL", column.column)),
-                value => {
-                    let value = keyset_sql_value(value)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                    terms.push(format!(
-                        "{} = {}",
-                        column.column,
-                        backend.placeholder(start_index + values.len())
-                    ));
-                    values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
-                }
-            }
-        }
-        let column = columns[index];
-        let comparison = match &cursor[index] {
-            KeysetValue::Null => match column.nulls {
-                KeysetNulls::First => "1 = 0".to_string(),
-                KeysetNulls::Last => format!("{} IS NOT NULL", column.column),
-            },
-            value => {
-                let value = keyset_sql_value(value)
-                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::CursorInvalid))?;
-                let operator = match column.direction {
-                    KeysetDirection::Asc => "<",
-                    KeysetDirection::Desc => ">",
-                };
-                let scalar = format!(
-                    "{} {} {}",
-                    column.column,
-                    operator,
-                    backend.placeholder(start_index + values.len())
-                );
-                values.push(value.with_mssql_type(parameter_type(column.column).unwrap_or("")));
-                match column.nulls {
-                    KeysetNulls::First => {
-                        format!("({} IS NULL OR {scalar})", column.column)
-                    }
-                    KeysetNulls::Last => {
-                        format!("({} IS NOT NULL AND {scalar})", column.column)
-                    }
                 }
             }
         };
@@ -5177,14 +5145,16 @@ where
 }
 
 async fn ensure_projection_access<P, B>(
-    db: &crate::db::Database<B>,
+    view: super::core::PolicyView<'_, B>,
 ) -> crate::Result<super::ReadVisibility>
 where
     B: OrmBackend,
     P: ReadProjection<B>,
 {
     let metadata = P::Entity::metadata();
-    db.ensure_entity_access(
+    let db = view.db;
+    db.ensure_entity_access_as(
+        view.authority,
         None,
         metadata.entity_name,
         metadata.read_policy,
@@ -5214,7 +5184,7 @@ where
         .map_err(crate::graphql::errors::sqlx_error_from_public)?;
     }
     let visibility = db
-        .projection_read_visibility::<P>()
+        .projection_read_visibility::<P>(view.authority)
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
     if visibility.requires_residual_checks() {
@@ -5326,7 +5296,8 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5350,7 +5321,8 @@ where
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5375,7 +5347,8 @@ where
     }
 
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.db).await?;
+        let visibility =
+            ensure_projection_access::<P, B>(super::core::PolicyView::of(self.db)).await?;
         self.state.validate()?;
         let bound = self
             .state
@@ -5499,7 +5472,8 @@ where
     }
 
     async fn fetch(self, read: ProjectionRead) -> crate::Result<Vec<P>> {
-        let visibility = ensure_projection_access::<P, B>(self.context.policy_database()).await?;
+        let policy = self.context.__policy();
+        let visibility = ensure_projection_access::<P, B>(policy.view()).await?;
         self.state.validate()?;
         let bound = self
             .state

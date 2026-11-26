@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.35.0 brokered mutation indexes
+
+**Action needed** for hosts serving brokered mutations from a serialized
+index. Build the index in process with a typed mutation catalogue compiled
+against the finished SDL. This lets the broker rely on the mutation
+compiler's `@transientInput` refusal. No database migration is needed.
+
 ## 0.34.0 capability contract fingerprints
 
 **Action needed** if you construct `AiCapabilityIndexEntry` or
@@ -54,6 +61,22 @@ has its own document and plan fingerprint, and the same disclosure schema.
 Read its resolver response through `take_page_info` before disclosure: the
 page info is server state and not part of the disclosure schema. Keep the
 cursor server-side. No schema or data migration is needed.
+
+## 0.32.0 transient mutation arguments
+
+**No action.** Profile compilation, schema-aware manifest validation and typed
+capability compilation now fail with `InvalidConfiguration` when a tool
+document, argument plan or AI-classified operation uses an argument that the
+finished schema declares `@transientInput`. The ORM adds that directive only
+to the transient argument of a generated upsert that opts in (ORM 0.222.0), so
+no existing schema has one. Manifests and fingerprints of existing profiles
+are unchanged.
+
+`AiGraphqlToolManifest::register_into` does not receive the finished SDL. If
+you register a manifest that this process did not compile from the same SDL,
+validate it first with `validate_against_finished_schema`, or call the new
+`register_into_with_finished_schema`. Manifest validation now also refuses a
+tool document that contains a fragment spread; compiled documents never do.
 
 ## 0.31.0 provider endpoint path error
 

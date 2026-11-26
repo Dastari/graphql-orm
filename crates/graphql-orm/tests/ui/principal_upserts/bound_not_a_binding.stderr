@@ -1,0 +1,39 @@
+error[E0277]: the trait bound `Proof: graphql_orm::prelude::PrincipalKeyBinding` is not satisfied
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:24:55
+   |
+24 |     upsert_bound_key(field = "machine_key", binding = "Proof"),
+   |                                                       ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `graphql_orm::prelude::PrincipalKeyBinding` is not implemented for `Proof`
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:14:1
+   |
+14 | struct Proof {
+   | ^^^^^^^^^^^^
+help: the trait `graphql_orm::prelude::PrincipalKeyBinding` is implemented for `Machine`
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:5:1
+   |
+ 5 | impl PrincipalKeyBinding for Machine {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `graphql_orm::prelude::__bind_principal_key`
+  --> src/graphql/orm/core.rs
+   |
+   | pub fn __bind_principal_key<K: PrincipalKeyBinding>(
+   |                                ^^^^^^^^^^^^^^^^^^^ required by this bound in `__bind_principal_key`
+
+error[E0277]: the trait bound `Proof: graphql_orm::prelude::PrincipalKeyBinding` is not satisfied
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:18:25
+   |
+18 | #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |                         ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `graphql_orm::prelude::PrincipalKeyBinding` is not implemented for `Proof`
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:14:1
+   |
+14 | struct Proof {
+   | ^^^^^^^^^^^^
+help: the trait `graphql_orm::prelude::PrincipalKeyBinding` is implemented for `Machine`
+  --> tests/ui/principal_upserts/bound_not_a_binding.rs:5:1
+   |
+ 5 | impl PrincipalKeyBinding for Machine {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the derive macro `GraphQLOperations` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -690,6 +690,22 @@ offset that trusted code sets with a builder's own `offset(n)`, including
 `paginate` after `offset` makes the page's offset a client offset again.
 Keyset connections take no offset.
 
+### Decimal keyset ordering
+
+A readable field declared with `#[graphql_orm(decimal(precision = P, scale = S))]`
+and `#[sortable]` can be selected through the generated keyset `orderBy` input.
+As with other runtime sorts, NULLs are last in both ascending and descending
+order, and the primary key breaks ties. The cursor carries the Decimal as
+canonical text with exactly the declared scale. Continuation validates that
+text against the field definition. It binds scaled integers on SQLite and
+native decimals on PostgreSQL and SQL Server, matching `DecimalFilter`.
+Invalid Decimal operands return `CURSOR_INVALID`. Cursor
+integrity and authorization follow the same rules as for other order fields.
+
+The new SDL members update the corresponding catalogue input descriptions and
+fingerprints that include those input shapes. Existing orders keep their
+cursor bindings.
+
 ### What a keyset cursor is bound to
 
 A generated keyset cursor (`gomk1.`) holds the order values of one row. It is

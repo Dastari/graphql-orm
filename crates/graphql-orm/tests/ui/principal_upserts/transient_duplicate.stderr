@@ -1,0 +1,5 @@
+error: transient_input may only be declared once per entity
+  --> tests/ui/principal_upserts/transient_duplicate.rs:26:5
+   |
+26 |     transient_input(type = "Proof", on = "upsert", name = "proof"),
+   |     ^^^^^^^^^^^^^^^

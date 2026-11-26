@@ -20,6 +20,38 @@ physical column. A literal dot requires one delimited identifier, such as
 `db_column = "[event.code]"` on SQL Server. See the
 [migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
 
+Version 0.230.0 splits query emission by operation family and delegates offset
+list and aggregate execution to the ORM runtime.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
+Version 0.228.0 aligns with the ORM's
+[transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
+
+Version 0.227.0 validates SQL Server unsigned inputs before selecting targets
+for updates and upserts, including updates that would affect zero rows.
+See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation).
+
+Version 0.225.0 aligns with the ORM's
+[partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
+
+Version 0.224.0 lets a mutation hook's nested writes be authorized from the
+originating request, as an opt-in, and passes an explicit `PolicyAuthority` to
+entity, row and repository field policies. See the
+[migration guide](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers).
+
+Version 0.223.0 selects the ORM's seek-capable exact string filter renderer for
+declared SQL Server BIN2 Unicode key columns (#867).
+[Migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks)
+
+Version 0.222.0 adds the `upsert_bound_key`, `transient_input` and
+`upsert_acknowledge` entity options.
+See [principal-bound upserts](../../docs/reference/graphql-orm/runtime-and-writes.md#principal-bound-upserts).
+
+Version 0.221.0 adds `changed_replay = true` for generated Changed streams
+with `changed_started = true`. Clients can resume from an opaque cursor
+within the process-local retention window.
+[Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
+
 Version 0.220.0 stays aligned with the ORM's opt-in canonical PostgreSQL
 journal keys. Existing macro call sites require no changes. See the
 [migration guide](../../MIGRATION.md#02190-to-02200-canonical-postgresql-journal-keys).
@@ -756,6 +788,9 @@ Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).
 
+Derived keyset order inputs include sortable portable Decimal fields. See
+[Decimal keyset ordering](../../docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering).
+
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current
 field authorization are described in the
@@ -1014,6 +1049,10 @@ reads and DML onto one driver-neutral mutation transaction. Existing-row
 decisions use backend write locks, predicate mutations materialize typed
 primary keys before exact-key DML, and absent-key upserts require the runtime's
 state-machine isolation mode. Consumers do not provide SQL or lock clauses.
+
+Collection relations can opt into
+[generated nested create](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows)
+with `nested_create` and a matching child `nested_create_keys` declaration.
 
 Generated to-many relation resolvers accept one nullable `OrderByInput`
 object, while generated root list resolvers retain their nullable list of

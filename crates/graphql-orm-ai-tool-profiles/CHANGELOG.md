@@ -10,7 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.34.0
+## Unreleased - 0.35.0 (breaking release)
+
+- A capability index tracks whether its mutation catalogue was compiled
+  against the finished SDL in this process. The fixed broker uses that check
+  to exclude mutations that could accept a transient argument.
 
 - **Action needed** if you construct `AiCapabilityIndexEntry` or
   `AiCapabilityOperationMember` literally, or compare stored index, index-set
@@ -42,7 +46,7 @@ supersedes: []
   broker can decide rule admission from a held candidate. Deserializing a
   candidate without it yields `never`.
 
-## Unreleased - 0.32.0
+## Unreleased - Continuable keyset pages
 
 - **No action (#551).** Generated keyset roots can compile continuable
   pages: `AiGraphqlQueryCapability::supports_continuation` and
@@ -54,6 +58,31 @@ supersedes: []
   of a compiled page redacts the cursor. Existing capability, catalogue,
   index and plan fingerprints, documents and plan schemas are unchanged.
   [Migration](MIGRATION.md#0320-continuable-keyset-pages)
+
+## Unreleased - 0.32.0
+
+- **No action (graphql-orm #908).** An argument declared `@transientInput` in
+  the finished schema is request-only data, and tool arguments are retained
+  with the run. Every AI path that sees the finished SDL now refuses to carry
+  one. `AiGraphqlToolManifest::register_into` and `from_extension_payload` do
+  not see the SDL, so a manifest this process did not compile must be
+  validated first (see the migration note). The marker covers field arguments
+  only, not arguments of executable directives.
+  - The GraphQL tool-profile compiler refuses an argument plan that maps it.
+    A mutation whose transient argument is required therefore has no profile;
+    an optional one is never sent.
+  - `AiGraphqlToolManifest::validate_against_finished_schema`, and so
+    `AiGraphqlToolManifestSet::aggregate`, check every entry's document
+    against the owning SDL and refuse one that passes such an argument, for
+    example a manifest written by an older compiler. An entry whose document
+    does not execute on the entry's root type is refused. The new
+    `register_into_with_finished_schema` validates and then registers.
+  - The typed query, mutation and subscription capability catalogues fail to
+    compile when an operation admitted for AI execution takes one. For
+    mutations this is checked on every `Automatic` or `ApprovalRequired`
+    mutation, including one whose result is not exportable.
+
+  [Migration](MIGRATION.md#0320-transient-mutation-arguments)
 
 ## Unreleased - 0.31.0
 

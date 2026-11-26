@@ -96,10 +96,13 @@ impl EntityPolicy for AllowEntityPolicy {
 /// - a GraphQL request may write any row;
 /// - `admin` may write any row;
 /// - `zone-a` may write only rows whose zone is `a`;
+/// - a mutation hook's originating request whose subject holds `zone.c` may
+///   write only rows whose zone is `c` (#291);
 /// - a repository call with no access may write nothing.
 struct ZoneRows;
 impl ZoneRows {
     fn may_write(
+        authority: PolicyAuthority<'_>,
         ctx: Option<&async_graphql::Context<'_>>,
         db: &Database,
         row: &(dyn std::any::Any + Send + Sync),
@@ -111,7 +114,14 @@ impl ZoneRows {
         match db.system_access().map(|access| access.name.as_str()) {
             Some("admin") => true,
             Some("zone-a") => row.zone == "a",
-            _ => false,
+            Some(_) => false,
+            None => {
+                authority
+                    .hook_request()
+                    .and_then(HookRequestAuthority::subject)
+                    .is_some_and(|subject| subject.has_scope("zone.c"))
+                    && row.zone == "c"
+            }
         }
     }
 }
@@ -136,7 +146,19 @@ impl RowPolicy for ZoneRows {
         _: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async move { Ok(Self::may_write(ctx, db, row)) })
+        Box::pin(async move { Ok(Self::may_write(PolicyAuthority::none(), ctx, db, row)) })
+    }
+    fn can_write_row_with_authority<'a>(
+        &'a self,
+        authority: PolicyAuthority<'a>,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        db: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(Self::may_write(authority, ctx, db, row)) })
     }
 }
 
@@ -178,6 +200,72 @@ impl MutationHook for ScopeHook {
                     .with_system_access(SystemAccess::new("zone-a"), |tx| {
                         Box::pin(async move { tx.insert::<ScopedRecord>(record(&id, "a")).await })
                     })
+                    .await
+                    .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+            }
+            // Nested writes with no scope of the hook's own: an insert, single
+            // and bulk updates and a bulk delete on this backend's templates.
+            if ctx.is_some()
+                && event.action == ChangeAction::Created
+                && created.is_some_and(|row| row.note == "with-request")
+            {
+                let zone = created.map(|row| row.zone.clone()).unwrap_or_default();
+                let id = format!("nested-{}", event.id);
+                let gone = format!("gone-{}", event.id);
+                let by_id = |id: &str| ScopedRecordWhereInput {
+                    id: Some(graphql_orm::graphql::filters::StringFilter {
+                        eq: Some(id.into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let noted = |note: &str| UpdateScopedRecordInput {
+                    note: Some(note.into()),
+                    ..Default::default()
+                };
+                // A task the hook spawns opens its own transaction on the
+                // handle the hook can reach, while the hook is still running.
+                // PostgreSQL lets it run beside the mutation's transaction; it
+                // presents no request, so the write is refused instead of
+                // committing apart from the mutation.
+                #[cfg(feature = "postgres")]
+                {
+                    let handle = hook_ctx
+                        .database()
+                        .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?
+                        .clone();
+                    let escaped = record(&format!("escaped-{}", event.id), &zone);
+                    let outcome = tokio::spawn(async move {
+                        handle
+                            .transaction(TransactionMode::Default, |tx| {
+                                Box::pin(async move {
+                                    tx.insert::<ScopedRecord>(escaped)
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    Ok(())
+                                })
+                            })
+                            .await
+                    })
+                    .await
+                    .expect("the spawned task ran");
+                    assert_eq!(rejected_code(outcome), OrmErrorCode::Forbidden);
+                }
+                let nested = async {
+                    hook_ctx.insert::<ScopedRecord>(record(&id, &zone)).await?;
+                    hook_ctx
+                        .insert::<ScopedRecord>(record(&gone, &zone))
+                        .await?;
+                    hook_ctx
+                        .update_by_id::<ScopedRecord>(&id, noted("single"))
+                        .await?;
+                    hook_ctx
+                        .update_where::<ScopedRecord>(by_id(&id), noted("bulk"))
+                        .await?;
+                    hook_ctx.delete_where::<ScopedRecord>(by_id(&gone)).await?;
+                    Ok::<(), graphql_orm::sqlx::Error>(())
+                };
+                nested
                     .await
                     .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
             }
@@ -518,5 +606,58 @@ async fn hooks_read_the_transaction_extension_on_every_generated_write() {
         .await
         .unwrap();
     assert_eq!(*seen.lock().unwrap(), [false]);
+    owner.cleanup().unwrap();
+}
+
+/// A hook's nested writes with no scope of its own are authorized from the
+/// originating request only when the host opted in and the caller's own
+/// authority covers the rows, on this backend's generated write templates.
+#[tokio::test]
+async fn a_hook_write_is_authorized_from_the_originating_request_when_opted_in() {
+    let (db, mut owner, _) = setup().await;
+    let create = |db: &Database, id: &str, zone: &str, scopes: &[&str]| {
+        let schema = schema_builder(db.clone())
+            .data(AuthSubject::from_parts(
+                "user-1",
+                Vec::new(),
+                scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                None,
+            ))
+            .finish();
+        let query = format!(
+            r#"mutation {{ createScopedRecord(input: {{id: "{id}", zone: "{zone}", note: "with-request"}}) {{ success }} }}"#
+        );
+        async move {
+            let response = schema.execute(query).await;
+            response.errors.is_empty()
+                && response.data.into_json().unwrap()["createScopedRecord"]["success"] == true
+        }
+    };
+    let seeded = pairs(&[("r1", "a"), ("r2", "a")]);
+
+    // Without the opt-in the nested writes present nothing, as before.
+    assert!(!create(&db, "h0", "c", &["zone.c"]).await);
+    assert_eq!(stored(&db).await, seeded);
+
+    let opted_in = db.clone().with_request_authority_propagated_to_hooks(true);
+    // The caller's request does not hold the scope the policy asks for.
+    assert!(!create(&opted_in, "h1", "c", &["zone.x"]).await);
+    // It holds the scope, but for another zone than the rows written.
+    assert!(!create(&opted_in, "h2", "b", &["zone.c"]).await);
+    assert_eq!(stored(&db).await, seeded);
+
+    // Opted in, and the caller holds the authority for these rows.
+    assert!(create(&opted_in, "h3", "c", &["zone.c"]).await);
+    assert_eq!(
+        stored(&db).await,
+        pairs(&[("h3", "c"), ("nested-h3", "c"), ("r1", "a"), ("r2", "a")])
+    );
+
+    // Outside the hook the same handle presents nothing.
+    assert!(
+        ScopedRecord::insert(&opted_in, record("later", "c"))
+            .await
+            .is_err()
+    );
     owner.cleanup().unwrap();
 }

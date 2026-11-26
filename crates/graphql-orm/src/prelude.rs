@@ -9,8 +9,9 @@ pub use crate::graphql::assurance::{
     enforce_resolver_assurance,
 };
 pub use crate::graphql::auth::{
-    AccessContext, AuthExt, AuthSubject, AuthSubjectBuilder, AuthorizationMode, ResolverAuthConfig,
-    ResolverAuthMode, SystemAccess, enforce_resolver_auth,
+    AccessContext, AuthExt, AuthSubject, AuthSubjectBuilder, AuthorizationMode,
+    HookRequestAuthority, PolicyAuthority, ResolverAuthConfig, ResolverAuthMode, SystemAccess,
+    enforce_resolver_auth,
 };
 #[cfg(feature = "auth-agql")]
 pub use crate::graphql::auth_agql::{

@@ -346,6 +346,9 @@ pub struct AiCapabilityIndex {
     /// index. Never serialized or compared.
     #[serde(skip)]
     membership: MembershipCache,
+    /// An in-process mutation catalogue checked against its finished SDL.
+    #[serde(skip)]
+    compiled_mutations: bool,
 }
 
 impl AiCapabilityIndex {
@@ -551,6 +554,7 @@ impl AiCapabilityIndex {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: mutation_catalogue.is_some(),
         };
         let member_ids = index
             .entries
@@ -671,6 +675,15 @@ impl AiCapabilityIndex {
             ));
         }
         Ok(*self.membership.0.get_or_init(|| entry_bytes))
+    }
+
+    /// Whether this index was built in process from a typed mutation catalogue.
+    ///
+    /// The mutation compiler checks the finished SDL and refuses any
+    /// classified mutation with an argument marked `@transientInput`. This
+    /// proof does not survive serialization and grants no execution authority.
+    pub const fn mutations_checked_against_finished_schema(&self) -> bool {
+        self.compiled_mutations
     }
 
     /// Canonical index fingerprint.
@@ -2862,6 +2875,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
         }
     }
 
@@ -3029,6 +3043,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3075,6 +3090,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
         };
         let result = index
             .search(&AiCapabilitySearchQuery {
@@ -3727,6 +3743,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
             ..roots
         }
     }
@@ -4041,6 +4058,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
             ..roots
         }
     }
@@ -4193,6 +4211,7 @@ mod tests {
             operation_entries: OperationEntryCache::default(),
             root_search: RootSearchCache::default(),
             membership: MembershipCache::default(),
+            compiled_mutations: false,
             ..index.clone()
         };
         for text in [
