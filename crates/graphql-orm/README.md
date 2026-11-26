@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.233.0 shares the SQL of nested closure read predicates built from
+column tests. [Migration](../../MIGRATION.md#02320-to-02330-nested-closure-sql).
+
 Version 0.232.0 aligns the receiver-admission test suite with the workspace's
 jsonwebtoken 11 dependency. [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
 

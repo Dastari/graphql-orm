@@ -72,6 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.232.0**; **`graphql-orm-macros` 0.232.0**; `graphql-orm-operation-catalog` 0.16.0; **`graphql-orm-storage` 0.19.0**; **`graphql-orm-backup` 0.32.0**; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.21.0**.
 
+- **No action** — ORM/macros 0.233.0 shares SQL for nested read-predicate closures over built-in column tests (#785). [Migration](../../MIGRATION.md#02320-to-02330-nested-closure-sql)
 - **No action** — router 0.21.0 replaces sleep-based waits in its tests with explicit signals; runtime behaviour is unchanged (#545). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0200-to-0210-deterministic-test-waits)
 - **No action** — Backup 0.32.0 and storage 0.19.0 group their integration tests by lane (#771). [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0310-to-0320-integration-test-binaries) · [Storage migration](../../crates/graphql-orm-storage/MIGRATION.md#0183-to-0190-integration-test-binaries)
 - **No action** — ORM/macros 0.232.0 align jsonwebtoken in tests and isolates the full-stack fixture's database dependencies (#498). [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)

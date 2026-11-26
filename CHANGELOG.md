@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.233.0
+
+- **No action** — Nested closure read predicates over built-in column tests
+  share the inner walk's SQL across the governed and reached rows on SQLite,
+  PostgreSQL and SQL Server (#785). The byte and weighted-relation budgets
+  are measured on the smaller shared rendering, so some nested compositions
+  previously refused with `AUTHORIZATION_MISCONFIGURED` now build.
+  [Migration](MIGRATION.md#02320-to-02330-nested-closure-sql)
+
 ## Unreleased - ORM/macros 0.232.0
 
 - **No action** — ORM receiver-admission tests share the workspace's
