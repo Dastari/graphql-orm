@@ -21,8 +21,9 @@ for historical context.
   admission, entity admission, target admission and hook dispatch. The checks
   and their order are unchanged, as are the SDL and catalogues; generated code
   is smaller. A mutation hook receives the originating request's authority
-  only through that pipeline's admission, and the hidden macro-internal
-  `MutationContext::__run_generated_mutation_hook` is removed.
+  only with an authority that pipeline's admission issued. The hidden
+  macro-internal `MutationContext::__run_generated_mutation_hook` is removed,
+  which is a source break for host code that called it.
   [Migration](MIGRATION.md#02270-to-02280-generated-write-pipeline)
 
 ## Unreleased - ORM/macros 0.227.0

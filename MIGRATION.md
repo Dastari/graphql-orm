@@ -12,17 +12,28 @@ supersedes: []
 
 ## 0.227.0 to 0.228.0: Generated write pipeline
 
-**No action.** Generated GraphQL writes call shared runtime functions for
-their authorization sequence instead of inlining it (#724). The checks, their
-order, the refusals, the SDL and the catalogues are unchanged. Recompile with
-matching `graphql-orm` and `graphql-orm-macros` versions, as for every release.
+**No action** for supported callers: hosts that use the derives, the
+repository API, `Database::transaction` and
+`MutationContext::run_mutation_hook`. Generated GraphQL writes call shared
+runtime functions for their authorization sequence instead of inlining it
+(#724). The checks, their order, the refusals, the SDL and the catalogues are
+unchanged. Recompile with matching `graphql-orm` and `graphql-orm-macros`
+versions, as for every release.
 
-`MutationContext::__run_generated_mutation_hook` is removed. It was hidden,
-macro-internal, and documented as not callable from host code. Host code that
-dispatches a hook itself uses `MutationContext::run_mutation_hook`, as before.
-Request authority for a hook is now issued only by the write pipeline's own
-admission. See
-[the generated write pipeline](docs/reference/graphql-orm/strict-authorization.md#the-generated-write-pipeline).
+**Action needed** only for host code that called the hidden
+`MutationContext::__run_generated_mutation_hook` directly, against its
+documentation. The method is removed, so that code no longer compiles.
+Replace the call with `MutationContext::run_mutation_hook(ctx, &event)`,
+which runs the hook and the change journal record and attaches no request
+authority. If the hook's nested writes relied on the originating request's
+authority, authorize them explicitly instead: run them in
+`MutationContext::with_system_access` under a named `SystemAccess` that the
+policy admits, or move the write into a generated mutation.
+
+Request authority for a hook now requires a `GeneratedWriteAuthority`, which
+only the write pipeline's admission issues. The pipeline's entry points are
+macro-internal and hidden; they are not a supported replacement. See
+[what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
 
 ## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
 

@@ -28,7 +28,15 @@
 //!
 //! Everything here is macro-internal and hidden from the documentation. A
 //! [`GeneratedWriteAuthority`] has no public constructor: the only way to
-//! obtain one is to run steps 1 and 2 on the request.
+//! obtain one is to run steps 1 and 2.
+//!
+//! That is not a seal against host Rust code, which is trusted. These
+//! functions are `pub` because generated code compiles in the host's crate.
+//! Request admission takes its authentication mode, scopes and assurance
+//! coordinate from its caller. The authority is issued before target
+//! admission and is not bound to the request, operation or `Database` it was
+//! issued under; hook dispatch only checks that it names the event's entity
+//! and asks the entity decision again for the request it is given.
 
 use super::{
     DatabaseEntity, DatabaseRls, DbAuthContext, Entity, EntityAccessKind, EntityAccessSurface,

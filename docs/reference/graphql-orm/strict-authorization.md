@@ -313,21 +313,59 @@ ORM source), which fixes the order of the checks in one place:
    the write-target prefilter and classifies it with the row read and write
    decisions; a bulk write does the same for every row its filter selects. See
    [row policy on generated writes](#row-policy-on-generated-writes).
-4. **Hook dispatch.** The `Before` and `After` hooks, the hook's
+4. **Hook dispatch.** Each `Before` and `After` hook invocation, the hook's
    [request authority](#hook-writes-on-the-originating-requests-authority) and
    the change journal record.
 
-The input transform, the field write decisions, value binding and the SQL
-statement run between steps 3 and 4 in generated code, because they are typed
-per entity field. Their order is unchanged; see
-[hooks](runtime-and-writes.md#hooks) for the order around the write itself.
+These are four kinds of step, not one linear sequence. The input transform,
+the field write decisions, value binding, the SQL statement and the
+written-row check stay in generated code, because they are typed per entity
+field. Each write shape runs them in its own order, unchanged from before the
+pipeline existed. In every shape the `Before` hook runs before the SQL
+statement and the `After` hook after it, inside the transaction.
 
-The pipeline's functions are macro-internal and hidden from the API
-documentation. They take the operation's scopes and assurance coordinate from
-the generated resolver, so they are not an authorization API for host code:
-a custom resolver declares its own
-[authorization](resolver-operation-metadata.md) and writes through the
-repository or `Database::transaction`.
+| Write | Order |
+| --- | --- |
+| Create | request admission; entity admission; input transform; field write decisions; begin transaction; `Before` hook; `INSERT`; written-row check; `After` hook; commit |
+| Create with child rows | the parent's steps up to its field write decisions; then for each child, before the transaction: request admission against the child's own create root, entity admission, input transform, field write decisions; begin transaction; the parent's `Before` hook, `INSERT`, written-row check and `After` hook; the same four for each child in list order; commit |
+| Update | request admission; entity admission; begin transaction; target admission; expected-version check; input transform; field write decisions; conditional [assurance selection](../../architecture/operation-assurance.md) when declared; `Before` hook; `UPDATE`; written-row check; `After` hook; commit |
+| Delete | request admission; entity admission; begin transaction; target admission; expected-version check; `Before` hook; `DELETE`; `After` hook; commit |
+| Upsert | request admission; principal-bound key resolution when declared; entity admission; begin transaction; input transform; the bound key applied again; locked lookup of the existing row by conflict key; row write decision on that row when it exists; field write decisions; `Before` hook, which may [acknowledge](runtime-and-writes.md#principal-bound-upserts) and end the write; the statement; written-row check; `After` hook; commit |
+| Bulk update | request admission; entity admission; filter validation and read authority for the filtered fields; entity admission again on the shared write path; begin transaction; target admission for every selected row; per row, input transform and field write decisions; the `Before` hook for every row; the `UPDATE` for every row; per row, written-row check and `After` hook; commit |
+| Bulk delete | as bulk update up to target admission; the `Before` hook for every row; the `DELETE` for every row; the `After` hook for every row; commit |
+
+A `dependent_deletes` entity plans its delete first: the root admits its
+target without a lock, and the plan locks and admits each row again before it
+writes. See [hooks](runtime-and-writes.md#hooks) for commit, `Changed` events,
+deferred actions and `notify_with`.
+
+### What the pipeline does and does not enforce
+
+A mutation hook's transaction presents the originating request only when the
+hook dispatch is given a `GeneratedWriteAuthority` for the event's entity.
+That type has no public constructor. It is issued only by the pipeline's
+entity admission, which can only start from a completed request admission.
+An authority issued for one entity attaches nothing to a hook event of
+another.
+
+That is the whole boundary. It is not a seal against host Rust code:
+
+- The pipeline's functions are macro-internal and hidden from the API
+  documentation, but they are `pub`, because generated code compiles in the
+  host's crate. Host Rust code is trusted and can call them.
+- Request admission takes the authentication mode, the scopes and the
+  assurance coordinate from its caller. A generated resolver passes the
+  entity's declarations. Host code that calls it passes its own.
+- The authority is issued at entity admission, before any target row is
+  admitted.
+- The authority is not bound to the request, operation or `Database` it was
+  issued under. The entity write decision is asked again, for the request
+  presented at dispatch, before each hook invocation that attaches authority.
+
+Do not treat these functions as an authorization API. A custom resolver
+declares its own [authorization](resolver-operation-metadata.md) and writes
+through the repository or `Database::transaction`, and dispatches a hook with
+`MutationContext::run_mutation_hook`, which attaches no request authority.
 
 ## Row Policy On Generated Writes
 
@@ -715,15 +753,18 @@ The authority belongs to the hook's transaction, and to nothing else:
   of it, and the `db` a policy callback receives all present no originating request. A
   repository call, a `Database::transaction`, or a task spawned from the hook therefore has no
   request authority, whichever handle it uses, also while the hook is still running.
-- **Only a generated GraphQL mutation attaches it,** and only when its request is admitted to
-  write the mutation's entity: the entity decision is asked once more, on the `GraphqlMutation`
-  surface, before each hook invocation that attaches it. `MutationContext::run_mutation_hook`,
-  which host code can call, runs the hook without it.
-  The generated mutation presents it through the
-  [write pipeline](#the-generated-write-pipeline): its hook dispatch takes the request only
-  together with the authority that the pipeline's request and entity admission issued for that
-  entity. That authority has no public constructor, so host code that dispatches a hook itself
-  has none to present and attaches nothing.
+- **It is attached only with a pipeline admission,** and only when the request is admitted to
+  write the event's entity: the entity decision is asked once more, on the `GraphqlMutation`
+  surface, before each hook invocation that attaches it. The hook dispatch of the
+  [write pipeline](#the-generated-write-pipeline) takes the request only together with a
+  `GeneratedWriteAuthority` for that entity, which only the pipeline's request and entity
+  admission issue. A generated GraphQL mutation runs that admission with the entity's declared
+  authentication, scopes and assurance. `MutationContext::run_mutation_hook`, the dispatcher
+  for host code, runs the hook without request authority.
+  This does not constrain host Rust code, which is trusted: the admission functions are
+  macro-internal but callable, take their caller's arguments, and issue an authority that is
+  not bound to one request. See
+  [what the pipeline does and does not enforce](#what-the-pipeline-does-and-does-not-enforce).
 - **It ends with the hook invocation,** including on an error or a dropped future, and every read
   of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
   return `None` afterwards, also for a value obtained earlier. Post-commit actions, later

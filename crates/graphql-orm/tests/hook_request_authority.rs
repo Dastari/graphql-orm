@@ -51,16 +51,49 @@ struct HostMutation;
 #[Object]
 impl HostMutation {
     /// Dispatch the order-delete hook on a transaction of the host's own,
-    /// through the public dispatcher or the generated-write one. Host code
-    /// holds no `GeneratedWriteAuthority` (it has no public constructor and
-    /// only the runtime write pipeline's admission issues one), so the
-    /// generated-write dispatcher takes no request from it. Returns whether
-    /// the hook's cleanup was admitted; nothing is committed.
+    /// through the public dispatcher or the generated-write one. A
+    /// `GeneratedWriteAuthority` has no public constructor: only the runtime
+    /// write pipeline's admission issues one. With `admitted`, this resolver
+    /// runs that macro-internal admission itself for the named entity, as
+    /// trusted host code can, and presents the authority it gets. Returns
+    /// whether the hook's cleanup was admitted; nothing is committed.
     async fn host_dispatch(
         &self,
         ctx: &Context<'_>,
         generated: bool,
+        admitted: Option<String>,
     ) -> graphql_orm::async_graphql::Result<bool> {
+        use graphql_orm::graphql::orm::{
+            __admit_generated_write_request, GeneratedWriteAssurance, GeneratedWriteEntity,
+        };
+        let orders = GeneratedWriteEntity::new("HookOrder", "hook_orders", HookOrder::metadata);
+        let no_scopes = || Ok(());
+        let admission = match admitted.as_deref() {
+            Some("HookOrder") => Some(
+                __admit_generated_write_request::<HookOrder, graphql_orm::SqliteBackend>(
+                    ctx,
+                    None,
+                    &no_scopes,
+                    GeneratedWriteAssurance::Resolver,
+                )?
+                .__admit_entity::<graphql_orm::SqliteBackend>(ctx, orders)
+                .await?,
+            ),
+            Some(_) => Some(
+                __admit_generated_write_request::<HookLine, graphql_orm::SqliteBackend>(
+                    ctx,
+                    None,
+                    &no_scopes,
+                    GeneratedWriteAssurance::Resolver,
+                )?
+                .__admit_entity::<graphql_orm::SqliteBackend>(
+                    ctx,
+                    GeneratedWriteEntity::new("HookLine", "hook_lines", HookLine::metadata),
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let db = ctx.data::<Database>()?;
         let mut tx = MutationContext::begin(db, TransactionMode::Default)
             .await
@@ -78,12 +111,10 @@ impl HostMutation {
         };
         let outcome = if generated {
             tx.__run_generated_write_hook(
-                &graphql_orm::graphql::orm::GeneratedWriteEntity::new(
-                    event.entity_name,
-                    event.table_name,
-                    HookOrder::metadata,
-                ),
-                None,
+                &orders,
+                admission
+                    .as_ref()
+                    .map(|admission| (ctx, admission.authority())),
                 event.phase,
                 event.action,
                 event.id.clone(),
@@ -996,11 +1027,22 @@ async fn an_abandoned_hook_invocation_leaves_no_authority_behind() {
 }
 
 async fn host_dispatch(db: &Database, subject: AuthSubject, generated: bool) -> bool {
+    host_dispatch_admitted(db, subject, generated, None).await
+}
+
+/// `host_dispatch` after the resolver ran the pipeline admission for `entity`.
+async fn host_dispatch_admitted(
+    db: &Database,
+    subject: AuthSubject,
+    generated: bool,
+    entity: Option<&str>,
+) -> bool {
+    let admitted = entity.map_or_else(String::new, |entity| format!(", admitted: \"{entity}\""));
     let response = schema_builder(db.clone())
         .data(subject)
         .finish()
         .execute(format!(
-            "mutation {{ hostDispatch(generated: {generated}) }}"
+            "mutation {{ hostDispatch(generated: {generated}{admitted}) }}"
         ))
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
@@ -1042,11 +1084,35 @@ async fn the_public_dispatcher_issues_no_request_authority() {
 }
 
 #[tokio::test]
+async fn an_authority_for_one_entity_attaches_nothing_for_another() {
+    // The caller is admitted to write both entities and the database opted
+    // in. An authority the pipeline issued for lines is presented with an
+    // order event: the dispatch attaches nothing, so the hook's cleanup is
+    // refused as for a call with no authority.
+    let both = || subject(&["orders.write", "lines.write"]);
+    let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
+    assert!(!host_dispatch_admitted(&fixture.db, both(), true, Some("HookLine")).await);
+    assert_untouched(&fixture.db).await;
+    // The authority for the event's own entity does attach it. Host Rust
+    // code is trusted: it can run the macro-internal admission itself, with
+    // its own arguments. The boundary is the entity, not the caller.
+    assert!(host_dispatch_admitted(&fixture.db, both(), true, Some("HookOrder")).await);
+    // Admission is still the pipeline's: a caller the entity policy refuses
+    // gets no authority to present.
+    let response = schema_builder(fixture.db.clone())
+        .data(subject(&["lines.write"]))
+        .finish()
+        .execute(r#"mutation { hostDispatch(generated: true, admitted: "HookOrder") }"#)
+        .await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+}
+
+#[tokio::test]
 async fn request_authority_is_issued_only_by_the_write_pipeline_admission() {
     // The generated-write dispatcher attaches a request only together with
-    // the authority the runtime write pipeline issued for it (#724). Host
-    // code cannot construct one, so its own dispatch presents nothing, also
-    // for a caller who is admitted to delete orders and to write lines.
+    // an authority the runtime write pipeline issued (#724). Host code cannot
+    // construct one, so a dispatch without an admission presents nothing,
+    // also for a caller who is admitted to delete orders and to write lines.
     let fixture = setup(Policy::PerEntity, true, Cleanup::Plain).await;
     assert!(!host_dispatch(&fixture.db, subject(&["lines.write"]), true).await);
     assert!(!host_dispatch(&fixture.db, subject(&["orders.write", "lines.write"]), true).await);
