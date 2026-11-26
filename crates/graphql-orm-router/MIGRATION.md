@@ -10,6 +10,21 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.19.0 to 0.20.0
+
+**No action.** The existing downstream error response is unchanged by
+default. Queries and mutations now emit bounded warning events for downstream
+GraphQL errors with messages truncated to 256 characters. See the
+[subgraph error settings](docs/configuration.md#subgraph-errors) for log
+redaction and optional client message disclosure.
+
+When you opt into `allowlist-by-code` or `none`, downstream error extensions
+other than `code` are dropped, so clients read `outcome` as unknown. While
+warnings are enabled for the subgraph error target, router log events emitted
+after the request is parsed also carry `client_operation_name`. The router
+rejects a non-empty `subgraphErrorCodeAllowlist` without `allowlist-by-code`,
+and `allowlist-by-code` without any code.
+
 ## 0.18.0 to 0.19.0: Changed replay gateway coverage
 
 **No action.** The router forwards the optional resume argument and

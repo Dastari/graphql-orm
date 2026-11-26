@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.20.0 logs downstream GraphQL errors with a shared rate limit and
+offers opt-in client message disclosure by error code. See
+[subgraph errors](docs/configuration.md#subgraph-errors).
+
 Version 0.19.0 adds WebSocket regression coverage for subgraph Changed replay
 arguments, cursor and started frames, and the reset-required error.
 

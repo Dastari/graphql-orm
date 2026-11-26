@@ -298,6 +298,11 @@ deployment grace period exceeds the router drain deadline.
   operation the router refused before any subgraph request then carries
   `outcome: "refused"`; an error without it may come from execution, so the
   client treats it as unknown unless the subgraph sent its own `outcome`.
+- **HTTP 200 with masked errors and null data.** Check the
+  `graphql_orm_router::subgraph_errors` events for the request ID and subgraph.
+  A non-null root field can cause the whole `data` value to become null. See
+  [subgraph error configuration](configuration.md#subgraph-errors) for
+  logging and client disclosure settings.
 - **HTTP allowed by router but denied downstream:** expected defence in depth.
   Align protocol metadata and the authoritative subgraph guard; do not weaken
   the guard.
