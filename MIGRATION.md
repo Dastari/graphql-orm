@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.228.0 to 0.231.0: Decimal keyset ordering
+
+**No action.** Generated keyset `OrderBy` inputs now include sortable,
+readable portable Decimal fields (#920). The SDL diff consists of those
+additional input members. The corresponding input shapes and catalogue
+fingerprints that include them change. Existing cursor order and filter
+bindings carry through the upgrade.
+[Decimal keyset ordering](docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering)
+
 ## 0.227.0 to 0.228.0: Transient input validation errors
 
 **No action.** Generated schema builders now return a fixed message when

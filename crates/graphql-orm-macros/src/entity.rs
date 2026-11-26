@@ -3958,7 +3958,7 @@ fn generated_hidden_input_members(
             && !meta.graphql_skip
             && meta.transform_read.is_none()
             && (is_key || (meta.sortable && meta.order))
-            && crate::operations::runtime_keyset_value(&field.ty).is_some()
+            && crate::operations::runtime_keyset_value(&field.ty, &meta).is_some()
         {
             append(
                 "KeysetOrderBy",
