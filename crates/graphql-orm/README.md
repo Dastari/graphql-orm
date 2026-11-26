@@ -18,6 +18,10 @@ In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
 fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.230.0 shares offset list and aggregate execution across generated
+resolvers.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
 Version 0.228.0 redacts validation messages for generated transient mutation
 arguments. [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 

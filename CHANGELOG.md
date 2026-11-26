@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.230.0 (breaking release)
+## Unreleased - ORM/macros 0.231.0 (breaking release)
 
 - **Breaking (#905):** Generated relation search documents reject statically
   unreadable target fields unless the target field opts in with
@@ -38,6 +38,11 @@ for historical context.
   with a literal dot must be explicitly delimited as a single identifier.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
+## Unreleased - ORM/macros 0.230.0
+
+- Generated list and aggregate execution moved to shared runtime helpers; no
+  measurable compile-cost change (groundwork for #677/#358).
 
 ## Unreleased - ORM/macros 0.229.0
 

@@ -153,6 +153,12 @@ catalogue edit until refreshed (known limitation). See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references).
 No data migration is needed.
 
+## 0.229.0 to 0.230.0: Shared generated read execution
+
+**No action.** Upgrade ORM and macros together. Generated list and aggregate
+resolvers use shared execution helpers. Their schema, catalogue and
+authorization contracts are unchanged.
+
 ## 0.228.0 to 0.229.0: Decimal keyset ordering
 
 **No action.** Generated keyset `OrderBy` inputs now include sortable,
