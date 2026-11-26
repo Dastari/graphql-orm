@@ -3,10 +3,10 @@
 #![cfg(not(windows))]
 
 #[allow(dead_code)]
-#[path = "support/owned_postgres.rs"]
+#[path = "../support/owned_postgres.rs"]
 mod owned_postgres;
 
-include!("support/orm_016_conformance.rs");
+include!("../support/orm_016_conformance.rs");
 
 #[tokio::test]
 #[ignore = "requires test-owned PostgreSQL container"]

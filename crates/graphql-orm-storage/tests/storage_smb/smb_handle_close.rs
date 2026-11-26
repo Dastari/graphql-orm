@@ -1,7 +1,6 @@
 //! Vendored SMB client handle and client close regressions for the
 //! test-owned Samba fixture. Never use against a live or application-owned
 //! share.
-#![cfg(feature = "smb")]
 use smb::{
     Client, ClientConfig, ConnectionConfig, Error as SmbError, File, FileCreateArgs, UncPath,
 };

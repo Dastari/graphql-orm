@@ -1,15 +1,15 @@
 #[cfg(feature = "azure")]
-use graphql_orm_storage::{AzureBlobStorageBackend, AzureBlobStorageConfig};
-#[cfg(any(feature = "azure", feature = "s3"))]
 use graphql_orm_storage::{
-    BlobPutOptions, BlobStore, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
-    StorageNamespace, StoredObject, sha256_hex,
+    AzureBlobStorageBackend, AzureBlobStorageConfig, BlobPutOptions, ObjectStorage,
+    StorageByteStream, StorageError, StorageNamespace, StoredObject, sha256_hex,
 };
+#[cfg(any(feature = "azure", feature = "s3"))]
+use graphql_orm_storage::{BlobStore, StorageBackend};
 #[cfg(feature = "s3")]
 use graphql_orm_storage::{S3StorageBackend, S3StorageConfig};
-#[cfg(any(feature = "azure", feature = "s3"))]
+#[cfg(feature = "azure")]
 use time::OffsetDateTime;
-#[cfg(any(feature = "azure", feature = "s3"))]
+#[cfg(feature = "azure")]
 use uuid::Uuid;
 
 #[cfg(feature = "s3")]
@@ -118,7 +118,7 @@ fn azure_config() -> AzureBlobStorageConfig {
     }
 }
 
-#[cfg(any(feature = "azure", feature = "s3"))]
+#[cfg(feature = "azure")]
 fn test_object(backend: StorageBackend) -> StoredObject {
     StoredObject {
         object_id: Uuid::parse_str("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").expect("valid uuid"),
@@ -133,7 +133,7 @@ fn test_object(backend: StorageBackend) -> StoredObject {
     }
 }
 
-#[cfg(any(feature = "azure", feature = "s3"))]
+#[cfg(feature = "azure")]
 fn assert_unsupported<T>(result: Result<T, StorageError>, expected_backend: &str) {
     assert!(matches!(
         result,

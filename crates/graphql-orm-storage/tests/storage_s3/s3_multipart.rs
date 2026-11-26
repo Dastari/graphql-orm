@@ -1,4 +1,3 @@
-#![cfg(feature = "s3")]
 //! Resumable multipart uploads on a test-owned S3-compatible server.
 //!
 //! The ignored test starts a digest-pinned RustFS container with random
@@ -7,12 +6,12 @@
 //! configuration:
 //!
 //! ```sh
-//! cargo test -p graphql-orm-storage --no-default-features --features s3 --test s3_multipart -- --ignored
+//! cargo test -p graphql-orm-storage --no-default-features --features s3 --test storage_s3 s3_multipart:: -- --ignored
 //! ```
 
-#[path = "support/listing_contract.rs"]
+#[path = "../support/listing_contract.rs"]
 mod listing_contract;
-#[path = "support/multipart_conformance.rs"]
+#[path = "../support/multipart_conformance.rs"]
 mod multipart_conformance;
 
 use std::{process::Command, sync::Arc, time::Duration};

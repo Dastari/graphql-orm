@@ -1,5 +1,3 @@
-#![cfg(feature = "s3")]
-
 use std::{
     io::{BufRead, BufReader},
     path::Path,
@@ -119,7 +117,12 @@ fn owned_https_transport_fixture() {
         // process-global certificate environment in parallel Rust tests.
         assert!(
             Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--ignored", "--exact", "owned_https_client", "--nocapture"])
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "s3_https_transport::owned_https_client",
+                    "--nocapture"
+                ])
                 .env(
                     "STORAGE_OWNED_HTTPS_ENDPOINT",
                     format!("https://127.0.0.1:{port}")

@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-storage
 
+Version 0.19.0 groups integration tests by lane. See the
+[migration guide](MIGRATION.md#0183-to-0190-integration-test-binaries).
+
 Version 0.18.2 adds a seeded property suite for blob key validation: each validator
 matches an independent model of its documented contract, accepted keys stay below their
 root, and the local provider round-trips them without writing outside its root
