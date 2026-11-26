@@ -70,8 +70,9 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.227.0**; **`graphql-orm-macros` 0.227.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.228.0**; **`graphql-orm-macros` 0.228.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
 
+- **No action** — ORM/macros 0.228.0 redact generated transient input validation messages (#913). [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 - **Action needed** — ORM/macros 0.227.0 removes the 0.215.0 ASCII VARCHAR conversion and validates unsigned inputs before selecting update and upsert targets (#860). Hosts relying on that seek under a legacy `SQL_` collation can move to a Windows collation or index a persisted computed Unicode column. [Migration](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
 - **No action** unless opting in to generated nested create in ORM/macros 0.226.0 (#353). Opted-in parents expose typed child lists on their create input. [Migration](../../MIGRATION.md#02250-to-02260-generated-nested-create)
 - **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`); **no action** for hosts using the built-in AI approval service. AI 0.167.0 verifies the stored provider plan hash when executing an approved generated mutation. Hosts that construct a binding for a prepared generated mutation must use its plan digest. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01660-to-01670-approved-generated-mutations)

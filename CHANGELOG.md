@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.228.0
+
+- **No action** — Generated schemas redact validation messages for transient
+  arguments, the defaults of their variables, and other arguments that share
+  those variables (#913).
+  [Migration](MIGRATION.md#02270-to-02280-transient-input-validation-errors)
+
 ## Unreleased - ORM/macros 0.227.0
 
 - **Fixed (#860).** Removed the 0.215.0 ASCII VARCHAR conversion because it

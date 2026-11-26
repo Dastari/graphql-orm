@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.228.0 aligns with the ORM's
+[transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
+
 Version 0.227.0 validates SQL Server unsigned inputs before selecting targets
 for updates and upserts, including updates that would affect zero rows.
 See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation).

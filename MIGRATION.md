@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.227.0 to 0.228.0: Transient input validation errors
+
+**No action.** Generated schema builders now return a fixed message when
+async-graphql rejects a transient argument, its variable default, or another
+argument that shares the variable.
+[Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
+
 ## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
 
 **Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on

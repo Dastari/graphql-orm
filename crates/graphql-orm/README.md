@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.228.0 redacts validation messages for generated transient mutation
+arguments. [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
+
 Version 0.227.0 uses Unicode string binds for SQL Server filters, including
 VARCHAR columns. The 0.215.0 ASCII VARCHAR conversion could change matches
 under legacy `SQL_` collations. Windows-collation VARCHAR indexes can seek
