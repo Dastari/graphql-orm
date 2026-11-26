@@ -528,7 +528,8 @@ fn document_nodes(document: &ExecutableDocument) -> usize {
 /// either mode.
 ///
 /// It also redacts async-graphql validation messages for arguments marked
-/// `@transientInput` and defaults of variables used in those arguments.
+/// `@transientInput`, defaults of variables used in those arguments, and
+/// other arguments that reference the same variable names in the document.
 ///
 /// Generated `schema_builder` helpers install this automatically. A schema
 /// built by hand from generated roots must install it too: the extension

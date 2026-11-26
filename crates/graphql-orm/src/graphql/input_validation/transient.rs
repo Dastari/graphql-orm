@@ -1,6 +1,6 @@
 use async_graphql::{
-    Name, Pos, ServerError, Value,
-    parser::types::{ExecutableDocument, Selection, SelectionSet},
+    Name, Pos, Positioned, ServerError, Value,
+    parser::types::{Directive, ExecutableDocument, Selection, SelectionSet},
     registry::{MetaType, Registry},
 };
 use std::collections::{HashMap, HashSet};
@@ -31,7 +31,7 @@ pub(super) fn redact_errors(
     // Strict validation checks every operation and fragment, including those
     // outside the requested operation. A default belongs to a particular
     // operation, while a fragment can use that operation's variables.
-    let mut transient_locations = HashSet::new();
+    let mut locations = RedactionLocations::default();
     let fragments: HashMap<_, _> = document
         .fragments
         .iter()
@@ -43,7 +43,8 @@ pub(super) fn redact_errors(
                     .types
                     .get(fragment.type_condition.node.on.node.as_str()),
                 &fragment.selection_set.node,
-                &mut transient_locations,
+                &fragment.directives,
+                &mut locations,
             );
             (name, uses)
         })
@@ -55,7 +56,8 @@ pub(super) fn redact_errors(
             registry,
             root,
             &operation.selection_set.node,
-            &mut transient_locations,
+            &operation.directives,
+            &mut locations,
         );
         let defaults: Vec<_> = operation
             .variable_definitions
@@ -76,7 +78,7 @@ pub(super) fn redact_errors(
                 uses.spreads.extend(&fragment.spreads);
             }
         }
-        transient_locations.extend(
+        locations.redacted.extend(
             defaults
                 .into_iter()
                 .filter(|definition| uses.variables.contains(&definition.node.name.node))
@@ -84,12 +86,29 @@ pub(super) fn redact_errors(
         );
     }
 
+    // With no selected operation, validation can substitute the supplied value
+    // at every use of the name across the document.
+    for (position, variables) in locations.ordinary_arguments {
+        if variables
+            .iter()
+            .any(|name| locations.transient_variables.contains(name))
+        {
+            locations.redacted.insert(position);
+        }
+    }
     for error in errors {
-        if matches!(error.locations.as_slice(), [position] if transient_locations.contains(position))
+        if matches!(error.locations.as_slice(), [position] if locations.redacted.contains(position))
         {
             error.message = TRANSIENT_INPUT_INVALID.to_owned();
         }
     }
+}
+
+#[derive(Default)]
+struct RedactionLocations {
+    redacted: HashSet<Pos>,
+    transient_variables: HashSet<Name>,
+    ordinary_arguments: Vec<(Pos, Vec<Name>)>,
 }
 
 #[derive(Default)]
@@ -103,33 +122,36 @@ impl<'a> TransientUses<'a> {
         registry: &Registry,
         root: Option<&MetaType>,
         selection_set: &'a SelectionSet,
-        locations: &mut HashSet<Pos>,
+        directives: &'a [Positioned<Directive>],
+        locations: &mut RedactionLocations,
     ) -> Self {
         let mut uses = Self::default();
+        let directive_arguments = |directives: &'a [Positioned<Directive>]| {
+            directives
+                .iter()
+                .flat_map(|directive| &directive.node.arguments)
+                .map(|argument| (argument, false))
+        };
+        let mut arguments: Vec<_> = directive_arguments(directives).collect();
         let mut pending = vec![(root, selection_set)];
         while let Some((parent, set)) = pending.pop() {
             for selection in &set.items {
+                arguments.extend(directive_arguments(selection.node.directives()));
                 match &selection.node {
                     Selection::Field(field) => {
                         let field = &field.node;
                         let definition = parent.and_then(|ty| ty.field_by_name(&field.name.node));
-                        if let Some(definition) = definition {
-                            for (name, value) in &field.arguments {
-                                let marked =
-                                    definition.args.get(name.node.as_str()).is_some_and(|arg| {
-                                        arg.directive_invocations
-                                            .iter()
-                                            .any(|d| d.name == "transientInput")
-                                    });
-                                if marked {
-                                    locations.insert(name.pos);
-                                    let _ = value.node.clone().into_const_with(|name| {
-                                        uses.variables.insert(name);
-                                        Ok::<_, Infallible>(Value::Null)
-                                    });
-                                }
-                            }
-                        }
+                        arguments.extend(field.arguments.iter().map(|argument| {
+                            let (name, _) = argument;
+                            let marked = definition
+                                .and_then(|field| field.args.get(name.node.as_str()))
+                                .is_some_and(|arg| {
+                                    arg.directive_invocations
+                                        .iter()
+                                        .any(|d| d.name == "transientInput")
+                                });
+                            (argument, marked)
+                        }));
                         pending.push((
                             definition.and_then(|field| registry.concrete_type_by_name(&field.ty)),
                             &field.selection_set.node,
@@ -147,6 +169,22 @@ impl<'a> TransientUses<'a> {
                         uses.spreads.push(&spread.node.fragment_name.node);
                     }
                 }
+            }
+        }
+        for ((name, value), marked) in arguments {
+            let mut variables = Vec::new();
+            let _ = value.node.clone().into_const_with(|name| {
+                variables.push(name);
+                Ok::<_, Infallible>(Value::Null)
+            });
+            if marked {
+                locations.redacted.insert(name.pos);
+                locations
+                    .transient_variables
+                    .extend(variables.iter().cloned());
+                uses.variables.extend(variables);
+            } else if !variables.is_empty() {
+                locations.ordinary_arguments.push((name.pos, variables));
             }
         }
         uses

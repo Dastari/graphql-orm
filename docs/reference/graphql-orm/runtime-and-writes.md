@@ -758,20 +758,27 @@ let proof = hook_ctx.transient_input::<SnapshotProof>();
     execution (`ai_mutations(upsert = "automatic" | "approval_required")`) takes one. Leave such
     an upsert prohibited, which is the default.
 
-How the schema handles transient values in errors and logs
+How the schema handles transient values in errors and logs:
 
 - **Redacted.** The argument is marked `secret`. async-graphql's rendered execution document
   (`ExtensionContext::stringify_execute_doc`, which its `Logger` extension records) shows
   `"<secret>"` in place of the whole value, whether it was sent as a literal or as a variable.
+  The rendered document can still show the value at another argument that shares the variable.
 - **Redacted in validation responses.** `GeneratedInputValidation`, installed by the generated
-  schema builders, replaces upstream validation messages for transient arguments and their
-  variable defaults with `transient input is not a valid value`. The error locations, paths and
-  extensions are retained. An ordinary argument with the same input type keeps its own
-  diagnostics. Custom validation hooks inside the extension chain can see upstream messages
-  before redaction, so use the final response for error logging.
+  schema builders, replaces upstream validation messages for transient arguments, their
+  variable defaults, and other arguments that reference a variable used by a transient argument
+  with `transient input is not a valid value`. Shared variable names are matched across the entire
+  document. Ordinary arguments using independent values keep their own diagnostics.
+  Validation hooks in extensions added after `GeneratedInputValidation` can see the upstream
+  messages. This includes extensions the host adds with `.extension(...)` on the builder
+  returned by `schema_builder`. Use the final response for validation error logging.
+  The built-in `Tracing`, `OpenTelemetry` and `Logger` extensions do not record validation messages.
 - **Not redacted: the raw request.** `Debug` of an `async_graphql::Request`, its `query` text and
   its `variables`, and anything your HTTP layer logs before the schema runs, still contain the
-  value. Do not log raw requests for a schema that accepts transient input.
+  value. The built-in `OpenTelemetry` extension records raw variables and can record the raw query
+  on a parse failure. Do not log raw requests for a schema that accepts transient input.
+- **Not redacted: syntax errors.** A parse error can repeat the line of the query where it
+  occurred. Treat syntax errors like the raw request.
 - **Not redacted: variable defaults in a logging extension.** async-graphql's opt-in `Logger`
   extension, and any extension that prints the rendered document, prints variable definitions with
   their default values verbatim. Only the argument is redacted. The upsert refuses such an

@@ -17,7 +17,8 @@ for historical context.
 ## Unreleased - ORM/macros 0.227.0
 
 - **No action** — Generated schemas redact validation messages for transient
-  arguments and defaults of variables used in those arguments (#913).
+  arguments, the defaults of their variables, and other arguments that share
+  those variables (#913).
   [Migration](MIGRATION.md#02250-to-02270-transient-input-validation-errors)
 
 ## Unreleased - ORM/macros 0.225.0

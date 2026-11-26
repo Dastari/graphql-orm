@@ -1666,29 +1666,27 @@ async fn transient_argument_is_secret_and_bounded(base: &Database<Backend>) -> T
     }
     assert_eq!(probe.counts(), before, "refused before the resolver ran");
     assert_eq!(stored_for(&db, "bounded-machine").await?[0].sequence, 1);
-    // A value of the wrong shape is refused without being quoted back, and
-    // so is a variable default, which would put the value in the query text.
+    // Wrong scalar types receive the fixed validation message. Variable
+    // defaults are refused because they put the value in the query text.
     let before = probe.counts();
     const LEAK: &str = "leak-9f2c-not-for-logs";
     let mut malformed = proof("d2", 0);
     malformed["sequence"] = json!(LEAK);
     let wrong_shape = run(with_variable.clone(), json!({ "proof": malformed })).await;
-    assert!(!wrong_shape.errors.is_empty());
-    assert!(
-        !serde_json::to_string(&wrong_shape)?.contains(LEAK),
-        "{:?}",
-        wrong_shape.errors
+    assert_eq!(wrong_shape.errors.len(), 1, "{:?}", wrong_shape.errors);
+    assert_eq!(
+        wrong_shape.errors[0].message,
+        "transient input is not a valid value"
     );
     let wrong_literal = run(
         snapshot_mutation("x", 2, "d2").replace("sequence: 2", &format!("sequence: \"{LEAK}\"")),
         json!({}),
     )
     .await;
-    assert!(!wrong_literal.errors.is_empty());
-    assert!(
-        !serde_json::to_string(&wrong_literal)?.contains(LEAK),
-        "{:?}",
-        wrong_literal.errors
+    assert_eq!(wrong_literal.errors.len(), 1, "{:?}", wrong_literal.errors);
+    assert_eq!(
+        wrong_literal.errors[0].message,
+        "transient input is not a valid value"
     );
     let defaulted = run(
         with_variable.replace(
@@ -2002,19 +2000,22 @@ async fn every_contract_step(
 }
 
 #[cfg(feature = "sqlite")]
+fn snapshot_upsert_field(proof: &str) -> String {
+    format!(
+        "{}({}: {{ {}: \"x\" }}, {}: {proof}) {{ success }}",
+        r("upsertStatusSnapshot"),
+        a("input"),
+        f("payload"),
+        a("proof"),
+    )
+}
+
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn transient_validation_errors_do_not_echo_values() -> TestResult {
     let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
     let schema = schema_builder(db).finish();
-    let upsert = |proof: &str| {
-        format!(
-            "{}({}: {{ {}: \"x\" }}, {}: {proof}) {{ success }}",
-            r("upsertStatusSnapshot"),
-            a("input"),
-            f("payload"),
-            a("proof"),
-        )
-    };
+    let upsert = snapshot_upsert_field;
     let ordinary = |proof: &str| format!("ordinaryProof(proof: {proof})");
     let valid_base = r#"sequence: 1, digest: "digest", nonce: "nonce""#;
     let secret = "TRANSIENT_SENTINEL";
@@ -2025,6 +2026,7 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
         (
             format!("mutation {{ {} }}", upsert(&invalid_enum)),
             json!({}),
+            Some(secret),
         ),
         (
             format!(
@@ -2033,6 +2035,7 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
             ),
             json!({"proof": {"sequence": 1, "digest": "digest", "nonce": "nonce",
                 "checks": [{"state": secret}]}}),
+            Some(secret),
         ),
         (
             format!(
@@ -2044,13 +2047,15 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
                 ))
             ),
             json!({}),
+            Some(secret),
         ),
         (
             format!(
                 "mutation {{ {} }}",
-                upsert(&format!(r#"{{ {valid_base}, tags: ["{secret}"] }}"#))
+                upsert(&format!("{{ {valid_base}, tags: [false] }}"))
             ),
             json!({}),
+            None,
         ),
         (
             format!(
@@ -2058,6 +2063,7 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
                 upsert(r#"{sequence: 1, digest: "digest"}"#)
             ),
             json!({}),
+            None,
         ),
         (
             format!(
@@ -2066,9 +2072,10 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
                  fragment Proof on Mutation {{ {fragment} }}"
             ),
             json!({}),
+            Some(secret),
         ),
     ];
-    for (query, variables) in cases {
+    for (query, variables, sensitive_value) in cases {
         let mut request = async_graphql::Request::new(query)
             .variables(async_graphql::Variables::from_json(variables));
         if request.query.contains("mutation Selected") {
@@ -2082,7 +2089,9 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
         assert_eq!(error.locations.len(), 1);
         assert!(error.path.is_empty());
         assert!(error.extensions.is_none());
-        assert!(!serde_json::to_string(&response)?.contains(secret));
+        if let Some(value) = sensitive_value {
+            assert!(!serde_json::to_string(&response)?.contains(value));
+        }
     }
 
     let public = "ORDINARY_SENTINEL";
@@ -2118,6 +2127,105 @@ async fn transient_validation_errors_do_not_echo_values() -> TestResult {
         ordinary_default.errors
     );
     assert!(ordinary_default.errors[0].message.contains(public));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn transient_validation_redacts_shared_variables() -> TestResult {
+    struct OrdinaryProofDirective;
+    #[async_graphql::async_trait::async_trait]
+    impl async_graphql::CustomDirective for OrdinaryProofDirective {}
+
+    #[async_graphql::Directive(location = "Field")]
+    fn ordinary_proof_directive(proof: SnapshotProof) -> impl async_graphql::CustomDirective {
+        let _ = proof;
+        OrdinaryProofDirective
+    }
+
+    let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let schema = schema_builder(db)
+        .directive(ordinary_proof_directive)
+        .finish();
+    const SECRET: &str = "SHARED_PROOF_SENTINEL";
+    let transient = snapshot_upsert_field("$proof");
+    let ordinary = "ordinaryProof(proof: $proof)";
+    let proof_variables = json!({"proof": {"sequence": 1, "digest": "digest", "nonce": "nonce",
+        "checks": [{"state": SECRET}]}});
+    let nested_proof = r#"{ sequence: 1, digest: "digest", nonce: "nonce",
+        checks: [{ state: $state }] }"#;
+    let cases = [
+        (
+            format!("mutation($proof: SnapshotProof!) {{ {transient} {ordinary} }}"),
+            proof_variables.clone(),
+            2,
+        ),
+        (
+            format!(
+                "mutation($proof: SnapshotProof!) {{
+                    visible: {ordinary}
+                    ... on Mutation {{ hidden: {transient} }}
+                }}"
+            ),
+            proof_variables.clone(),
+            2,
+        ),
+        (
+            format!(
+                "mutation First($proof: SnapshotProof!) {{ {ordinary} }}
+                 mutation Second($proof: SnapshotProof!) {{ ...Transient }}
+                 mutation Third($proof: SnapshotProof!) {{ ... on Mutation {{ {ordinary} }} }}
+                 fragment Transient on Mutation {{ {transient} }}"
+            ),
+            proof_variables.clone(),
+            3,
+        ),
+        (
+            format!(
+                "mutation($proof: SnapshotProof!) {{
+                    {transient}
+                    ordinaryProof(proof: {{ sequence: 1, digest: \"digest\", nonce: \"nonce\" }})
+                        @ordinary_proof_directive(proof: $proof)
+                }}"
+            ),
+            proof_variables,
+            2,
+        ),
+        (
+            format!(
+                "mutation($state: SnapshotCheckState!) {{ {} ordinaryProof(proof: {nested_proof}) }}",
+                snapshot_upsert_field(nested_proof),
+            ),
+            json!({"state": SECRET}),
+            2,
+        ),
+    ];
+    for (query, variables, expected_errors) in cases {
+        let response = schema
+            .execute(
+                async_graphql::Request::new(&query)
+                    .variables(async_graphql::Variables::from_json(variables)),
+            )
+            .await;
+        assert_eq!(response.data, async_graphql::Value::Null, "{query}");
+        assert_eq!(
+            response.errors.len(),
+            expected_errors,
+            "{query}: {:?}",
+            response.errors
+        );
+        for error in &response.errors {
+            assert_eq!(
+                error.message, "transient input is not a valid value",
+                "{query}"
+            );
+            assert_eq!(error.locations.len(), 1, "{query}");
+        }
+        assert!(
+            !serde_json::to_string(&response)?.contains(SECRET),
+            "{query}"
+        );
+    }
     Ok(())
 }
 
