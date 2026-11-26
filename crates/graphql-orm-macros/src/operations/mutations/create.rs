@@ -1,4 +1,4 @@
-use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
+use super::{Hook, admit_nested_create_request, admit_request, admitted_request, write_entity};
 use crate::operations::nested_create::{Child, ChildPipeline, Parent};
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -118,26 +118,22 @@ pub(in crate::operations) fn create(
     };
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = |assurance| {
-        admit_request(
-            struct_name,
-            backend_marker,
-            "Create",
-            create_scope_arguments,
-            assurance,
-        )
-    };
-    let admit_parent = admit(Assurance::Resolver);
-    // A child row is admitted under its own field context, which carries its
-    // parent's request and database, and enforces its entity's own create
-    // root.
+    let admit_parent = admit_request(
+        struct_name,
+        backend_marker,
+        "Create",
+        create_scope_arguments,
+    );
+    // A child row is admitted through its parent's admission, under its own
+    // field context, which carries the parent's request and database. It
+    // enforces its entity's own create root.
     let admit_child = {
-        let admit_request = admit(Assurance::Operation);
+        let admit_request = admit_nested_create_request(struct_name, backend_marker);
         quote! {
             #entity
             #admit_request
             let __gom_authority = __gom_request
-                .__admit_entity::<#backend_marker>(ctx)
+                .__admit_entity(ctx)
                 .await?
                 .into_authority();
         }
@@ -278,7 +274,7 @@ pub(in crate::operations) fn create(
 
                 #entity
                 #admit_parent
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx).await?;
+                let __gom_write = __gom_request.__admit_entity(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();

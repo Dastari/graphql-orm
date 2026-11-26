@@ -1,4 +1,4 @@
-use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
+use super::{Hook, admit_request, admitted_request, write_entity};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -135,7 +135,6 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         backend_marker,
         "Upsert",
         upsert_scope_arguments,
-        Assurance::Resolver,
     );
     let before_hook = Hook {
         request: &request,
@@ -178,7 +177,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 // before the entity policy, the transaction and any read or
                 // write; a failed binding refuses the mutation.
                 #principal_key_resolution
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx).await?;
+                let __gom_write = __gom_request.__admit_entity(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();

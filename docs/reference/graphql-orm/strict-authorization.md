@@ -301,9 +301,10 @@ runtime's write pipeline (`graphql_orm::graphql::orm::write_pipeline` in the
 ORM source), which fixes the order of the checks in one place:
 
 1. **Request admission.** Resolver authentication (`auth`), the PostgreSQL RLS
-   request context, the operation's declared scopes, then its declared
-   [assurance](../../architecture/operation-assurance.md). A nested child row
-   is admitted the same way against its entity's own create root.
+   request context, the operation's declared scopes, then the
+   [assurance](../../architecture/operation-assurance.md) declared for the
+   operation's own root field. A nested child row is admitted the same way
+   against its entity's own create root.
 2. **Entity admission.** The request's `Database`, the entity write decision on
    the `GraphqlMutation` surface, then the check that a row policy provider is
    registered when the entity declares a row write policy key. A
@@ -348,26 +349,42 @@ type has no public constructor: only the pipeline's own admission produces
 one.
 
 - **Admission is derived from the entity.** Request admission is told which
-  entity and which operation (create, update, bulk update, delete, bulk
-  delete or upsert). It reads the authentication mode, the scope requirement
-  and the operation's coordinate from the configuration `GraphQLOperations`
-  generates for that entity. Its caller supplies only the request's values
-  of the scalar arguments a scope template names.
+  entity, which operation (create, update, bulk update, delete, bulk delete
+  or upsert) and which backend. It reads the authentication mode, the scope
+  declarations and the operation's coordinate from the configuration
+  `GraphQLOperations` generates for that entity:
+  - the scope declarations, fixed scopes or scope templates, come from the
+    configuration. The values a template's placeholders take are the
+    request's scalar arguments, which the caller supplies, because only the
+    resolver holds its arguments. A generated resolver passes its own;
+  - the assurance requirement is the one declared for the operation's own
+    root field, whatever field is being resolved. A resolver that is not the
+    operation's root cannot substitute its own field's requirement;
+  - the admitted request is typed by the backend whose RLS request context
+    was checked, and entity admission runs on that backend's `Database`.
 - **The authority is issued when admission is complete.** A create has no
   target, so entity admission issues it. For an update, a delete, an upsert
   and a bulk write, target admission issues it. A target that is absent or
-  refused, and the unlocked read of a `dependent_deletes` root, issue
-  nothing.
+  refused, a bulk filter that admits no row, and the unlocked read of a
+  `dependent_deletes` root issue nothing.
 - **The authority is bound to what it was earned under:**
-  - one request: the request itself and the root field being resolved. The
-    synthetic child-field contexts of a nested create share both with their
-    root;
+  - one request and one invocation: the request itself, the root field being
+    resolved, and one invocation of it. A nested child is admitted through
+    its parent's admission and inherits the parent's invocation, so the
+    synthetic child-field contexts of a nested create share it with their
+    root. A second selection of the same root field in one request is
+    another invocation;
   - one operation: the operation, the entity and the field whose context was
-    admitted, which is the root field or a nested child's own create field.
-    A single-row authority covers one row, so each nested child row needs
-    its own admission;
+    admitted, which is the root field or a nested child's own create field;
   - one `Database`: the handle the entity was admitted on, which must be the
-    handle of the transaction that dispatches the hook.
+    handle of the transaction that dispatches the hook. A handle keeps one
+    identity for its lifetime and a clone is another handle;
+  - one transaction: the one target admission ran in, or for a create the one
+    its root's admission began;
+  - the admitted rows: the row a single-row target admission locked, the
+    branch an upsert decided (a new row, or the row its key found), or the
+    rows a bulk target admission selected. Each row dispatches one `Before`
+    and one `After`, so each nested child row needs its own admission.
 - **A mismatch is refused.** Entity admission, target admission, the bulk
   entry points and hook dispatch fail when they are given a request,
   admission or authority that does not match the call, before any hook runs.
@@ -385,9 +402,9 @@ macro-internal and hidden from the API documentation, but they are `pub`,
 because generated code compiles in the host's crate. Host Rust code is
 trusted and can run the whole pipeline itself, in order, for an entity and
 operation the macros generated. It cannot choose that admission's
-authentication mode, scopes or coordinate, obtain an authority before the
-admission is complete, or present one under another request, operation or
-`Database`.
+authentication mode, scope declarations, coordinate or backend, obtain an
+authority before the admission is complete, or present one under another
+request, invocation, operation, `Database`, transaction or row.
 
 Do not treat these functions as an authorization API. A custom resolver
 declares its own [authorization](resolver-operation-metadata.md) and writes
@@ -785,7 +802,7 @@ The authority belongs to the hook's transaction, and to nothing else:
   surface, before each hook invocation that attaches it. The hook dispatch of the
   [write pipeline](#the-generated-write-pipeline) takes the request only together with the
   `GeneratedWriteAuthority` of that dispatch, which only the pipeline's admission issues, bound
-  to the request, operation and `Database` it was earned under. A generated GraphQL mutation
+  to the request, invocation, operation, `Database`, transaction and rows it was earned for. A generated GraphQL mutation
   runs that admission with the entity's declared authentication, scopes and assurance.
   `MutationContext::run_mutation_hook`, the dispatcher for host code, runs the hook without
   request authority.

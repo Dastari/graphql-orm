@@ -1469,6 +1469,8 @@ struct HoldEventsUntilCommit;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
+    /// Identifies this transaction; never reused.
+    identity: u64,
     db: &'tx crate::db::Database<B>,
     pub(crate) tx: B::Transaction<'tx>,
     mode: TransactionMode,
@@ -2542,6 +2544,7 @@ where
         mode: TransactionMode,
     ) -> Self {
         Self {
+            identity: crate::db::fresh_identity(),
             db,
             tx,
             mode,
@@ -3083,6 +3086,11 @@ where
         self.db
     }
 
+    /// This transaction's identity.
+    pub(super) fn __identity(&self) -> u64 {
+        self.identity
+    }
+
     /// Keep every queued event in the transaction until commit, including
     /// events queued by a hook that explicitly drains the queue.
     #[doc(hidden)]
@@ -3165,6 +3173,7 @@ where
             ));
         }
         let Self {
+            identity: _,
             db,
             tx,
             mode: _,
@@ -3227,10 +3236,11 @@ where
     /// `request` is the originating GraphQL request and the authority its
     /// admission issued; a repository write passes `None`.
     ///
-    /// A request is refused, before the hook runs, unless its authority is
-    /// issued and was earned for `entity` and an operation that reports
-    /// `action`, under this request and field, on this transaction's
-    /// `Database`; a single-row authority dispatches each phase once.
+    /// A request is refused, before the hook runs, unless its authority was
+    /// earned for `entity` under this request and field, on this
+    /// transaction's `Database`, and is issued in this transaction for the
+    /// row `id` and an event that reports `action`; each row dispatches each
+    /// phase once.
     ///
     /// On a database that propagates request authority to hooks, the hook's
     /// operations on this transaction then present that request when it is
@@ -3266,7 +3276,15 @@ where
             after_state,
         };
         if let Some((ctx, admitted)) = request {
-            admitted.__require_dispatch(entity, ctx, self.db, &event.phase, event.action)?;
+            admitted.__require_dispatch(
+                entity,
+                ctx,
+                self.db,
+                self.identity,
+                &event.phase,
+                event.action,
+                &event.id,
+            )?;
         }
         let ctx = request.map(|(ctx, _)| ctx);
         let presented = self

@@ -6,11 +6,13 @@
 //!
 //! 1. **Request admission** ([`__admit_generated_write_request`]): resolver
 //!    authentication, the PostgreSQL RLS request context, the operation's
-//!    declared scopes, then the operation's declared assurance. The
-//!    authentication mode, the scope requirement and the operation's own
+//!    declared scopes, then the assurance declared for the operation's own
+//!    root field. The authentication mode, the scope declarations and that
 //!    coordinate are read from the entity's generated
 //!    [`GeneratedWriteConfig`]; the caller names only the operation
-//!    ([`GeneratedWriteKind`]).
+//!    ([`GeneratedWriteKind`]) and passes the request's values of the scalar
+//!    arguments a scope template names. The admitted request is typed by the
+//!    backend whose RLS context was checked.
 //! 2. **Entity admission** ([`GeneratedWriteRequest::__admit_entity`] and its
 //!    bulk variant): the request's `Database`, the entity write policy on the
 //!    `GraphqlMutation` surface, then the row-policy provider check. It
@@ -39,33 +41,47 @@
 //! obtain one is to run steps 1 and 2. It is **issued** only when the
 //! admission its operation needs is complete: at entity admission for a
 //! create, which has no target, and at target admission (step 3) for an
-//! update, a delete, an upsert and a bulk write. The unlocked read of a
-//! dependent-delete root issues nothing.
+//! update, a delete, an upsert and a bulk write. A target that is absent or
+//! refused, a bulk filter that admits no row, and the unlocked read of a
+//! dependent-delete root issue nothing.
 //!
 //! An authority is bound to what it was earned under:
 //!
-//! - **one request**: the request's query environment and the root field
-//!   (by response key) being resolved. The synthetic child-field contexts of
-//!   a nested create share both with their root;
+//! - **one request and one invocation**: the request's query environment,
+//!   the root field (by response key) and one invocation of that root field.
+//!   Each request admission of a root starts a new invocation. A nested
+//!   child is admitted through its parent's admission and inherits the
+//!   parent's invocation, so the synthetic child-field contexts of a nested
+//!   create share it with their root, and a repeated selection of the same
+//!   root field does not;
 //! - **one operation**: the operation kind, the entity, and the field whose
 //!   context was admitted (the root field, or a nested child's synthetic
-//!   create field). The authority of a single-row operation covers one row:
-//!   one `Before` and one `After` dispatch;
-//! - **one `Database`**: the handle the entity was admitted on, which must be
-//!   the handle of the transaction that dispatches the hook.
+//!   create field);
+//! - **one `Database`**: the handle the entity was admitted on, by an
+//!   identity the handle keeps for its lifetime (a clone is another handle),
+//!   which must be the handle of the transaction that dispatches the hook;
+//! - **one transaction**: the transaction target admission ran in, or for a
+//!   create the transaction its root's admission began;
+//! - **the admitted rows**: the key of the row a single-row target admission
+//!   locked, the branch an upsert decided (a new row, or the key of the row
+//!   its key found), or the keys of the rows a bulk target admission
+//!   selected. Each row dispatches one `Before` and one `After`, and a new
+//!   row its `After` only after its `Before`.
 //!
-//! Target admission, the bulk entry points and hook dispatch **refuse** a
-//! request whose authority does not match: the call fails before any hook
-//! runs. Generated code always presents the authority of its own admission,
-//! so a refusal means the dispatch was not written by the macros.
+//! Entity admission, target admission, the bulk entry points and hook
+//! dispatch **refuse** a request whose admission or authority does not match:
+//! the call fails before any hook runs. Generated code always presents the
+//! authority of its own admission, so a refusal means the dispatch was not
+//! written by the macros.
 //!
 //! Everything here is macro-internal and hidden from the documentation.
 //! These functions are `pub` because generated code compiles in the host's
 //! crate, so this is not a seal against host Rust code, which is trusted:
 //! host code can still run the whole pipeline itself, in order, for an entity
 //! and operation the macros generated. It cannot choose the authentication
-//! mode, scopes or assurance coordinate of that admission, obtain an
-//! authority before the admission is complete, or present one anywhere else.
+//! mode, scope declarations, assurance coordinate or backend of that
+//! admission, obtain an authority before the admission is complete, or
+//! present one anywhere else.
 
 use super::{
     ChangeAction, DatabaseEntity, DatabaseRls, DbAuthContext, Entity, EntityAccessKind,
@@ -75,14 +91,24 @@ use super::{
 use crate::db::Database;
 use crate::graphql::auth::ResolverAuthMode;
 use crate::graphql::errors::{graphql_error_from_callback, graphql_error_from_sqlx};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// The text of every binding refusal.
+const MISMATCH: &str =
+    "generated write admission does not match this request, operation or database";
 
 /// The refusal of a request, admission or authority that does not match the
 /// call it is presented to.
 fn mismatch() -> async_graphql::Error {
-    async_graphql::Error::new(
-        "generated write admission does not match this request, operation or database",
-    )
+    async_graphql::Error::new(MISMATCH)
+}
+
+/// [`mismatch`] on the shared bulk write path, whose errors are repository
+/// errors. Clients see an internal error either way.
+pub(super) fn mismatch_error() -> sqlx::Error {
+    sqlx::Error::Protocol(MISMATCH.to_owned())
 }
 
 /// A generated write operation of an entity.
@@ -103,18 +129,12 @@ impl GeneratedWriteKind {
         matches!(self, Self::UpdateMany | Self::DeleteMany)
     }
 
-    /// Whether the operation admits a target before it may dispatch a hook.
-    fn admits_target(self) -> bool {
-        self != Self::Create
-    }
-
-    /// Whether a hook event of this operation may report `action`.
-    fn reports(self, action: ChangeAction) -> bool {
+    /// The action a hook event of an admitted existing row reports.
+    fn existing_row_action(self) -> Option<ChangeAction> {
         match self {
-            Self::Create => action == ChangeAction::Created,
-            Self::Update | Self::UpdateMany => action == ChangeAction::Updated,
-            Self::Delete | Self::DeleteMany => action == ChangeAction::Deleted,
-            Self::Upsert => action != ChangeAction::Deleted,
+            Self::Create => None,
+            Self::Update | Self::UpdateMany | Self::Upsert => Some(ChangeAction::Updated),
+            Self::Delete | Self::DeleteMany => Some(ChangeAction::Deleted),
         }
     }
 }
@@ -181,12 +201,16 @@ impl GeneratedWriteOperation {
 }
 
 /// The generated write configuration of an entity. `GraphQLOperations`
-/// implements it; request admission reads it instead of taking the
-/// authentication mode, scopes and coordinate from its caller.
+/// implements it; the pipeline reads it instead of taking the authentication
+/// mode, scopes, coordinate or row key from its caller.
 #[doc(hidden)]
 pub trait GeneratedWriteConfig {
     #[doc(hidden)]
     fn __gom_write_operation(kind: GeneratedWriteKind) -> GeneratedWriteOperation;
+
+    /// The id a hook event of this row carries.
+    #[doc(hidden)]
+    fn __gom_write_key(&self) -> String;
 }
 
 /// The entity a generated write names in its policy decisions and hook events.
@@ -248,9 +272,9 @@ impl GeneratedWriteEntity {
         request: Option<__GeneratedWriteRequestAuthority<'_, '_>>,
     ) -> crate::Result<EntityAccessSurface> {
         let surface = if let Some((ctx, authority)) = request {
-            authority
-                .require_bulk(self, ctx, db)
-                .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+            if !authority.is_pending_bulk(self, ctx, db) {
+                return Err(mismatch_error());
+            }
             EntityAccessSurface::GraphqlMutation
         } else {
             EntityAccessSurface::Repository
@@ -302,37 +326,70 @@ impl RequestBinding {
         }
     }
 
-    fn is(&self, ctx: &async_graphql::Context<'_>) -> bool {
+    /// Whether `ctx` belongs to the same request and root field.
+    fn shares_root(&self, ctx: &async_graphql::Context<'_>) -> bool {
         std::ptr::eq::<async_graphql::context::QueryEnvInner>(&*self.env, &**ctx.query_env)
             && self.root.as_deref() == root_key(ctx)
-            && self.field == ctx.field().name()
+    }
+
+    fn is(&self, ctx: &async_graphql::Context<'_>) -> bool {
+        self.shares_root(ctx) && self.field == ctx.field().name()
     }
 }
 
-/// Proof that this pipeline admitted one request to run one generated write
-/// of one entity on one `Database`, on the `GraphqlMutation` surface. It has
-/// no public constructor, and hook dispatch honours it only once it is
-/// issued (see the module documentation).
+/// One invocation of a root field: what a root's request admission starts
+/// and its nested children inherit. Its identity is its allocation, which
+/// every admission and authority of the invocation keeps alive.
+#[derive(Default)]
+struct Invocation {
+    /// The identity of the transaction the root's admission began.
+    transaction: OnceLock<u64>,
+}
+
+/// What an authority has been issued for.
+enum Admitted {
+    /// Target admission has not succeeded.
+    Pending,
+    /// Detached from an admission that never admitted a target: it can no
+    /// longer be issued.
+    Inert,
+    /// A row the write creates: a create, or an upsert whose key found no
+    /// row. `transaction` is the admitting transaction; a create has none
+    /// and is bound to the transaction its invocation's root began.
+    NewRow {
+        transaction: Option<u64>,
+        phases: u8,
+    },
+    /// Existing rows admitted in `transaction`, by hook event id, with the
+    /// phases each has dispatched.
+    Rows {
+        transaction: u64,
+        rows: HashMap<String, u8>,
+    },
+}
+
+const BEFORE: u8 = 1;
+const AFTER: u8 = 2;
+
+/// Proof that this pipeline admitted one invocation of one request to run
+/// one generated write of one entity on one `Database`, on the
+/// `GraphqlMutation` surface. It has no public constructor, and hook
+/// dispatch honours it only once it is issued, in the transaction and for
+/// the rows it was issued for (see the module documentation).
 #[doc(hidden)]
 pub struct GeneratedWriteAuthority {
     entity: GeneratedWriteEntity,
     kind: GeneratedWriteKind,
     request: RequestBinding,
-    /// The address of the `Database` handle the entity was admitted on. It is
-    /// compared, never dereferenced.
-    database: usize,
-    issued: AtomicBool,
-    /// The phases a single-row authority has dispatched.
-    dispatched: AtomicU8,
-}
-
-fn database_address<B: OrmBackend>(db: &Database<B>) -> usize {
-    std::ptr::from_ref(db) as usize
+    invocation: Arc<Invocation>,
+    /// The `Database` handle the entity was admitted on.
+    database: crate::db::HandleIdentity,
+    admitted: Mutex<Admitted>,
 }
 
 impl GeneratedWriteAuthority {
-    fn issue(&self) {
-        self.issued.store(true, Ordering::Release);
+    fn admitted(&self) -> std::sync::MutexGuard<'_, Admitted> {
+        self.admitted.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether this authority was earned for `entity` under the request and
@@ -343,71 +400,103 @@ impl GeneratedWriteAuthority {
         ctx: &async_graphql::Context<'_>,
         db: &Database<B>,
     ) -> bool {
-        self.entity.is(entity) && self.request.is(ctx) && self.database == database_address(db)
+        self.entity.is(entity) && self.request.is(ctx) && self.database == db.handle_identity()
     }
 
-    fn require_bulk<B: OrmBackend>(
+    /// Whether this is the bulk admission of `entity` under the request of
+    /// `ctx`, on `db`, before its target admission.
+    fn is_pending_bulk<B: OrmBackend>(
         &self,
         entity: &GeneratedWriteEntity,
         ctx: &async_graphql::Context<'_>,
         db: &Database<B>,
-    ) -> async_graphql::Result<()> {
-        if self.kind.is_bulk() && self.binds(entity, ctx, db) {
-            Ok(())
-        } else {
-            Err(mismatch())
-        }
+    ) -> bool {
+        self.kind.is_bulk()
+            && self.binds(entity, ctx, db)
+            && matches!(*self.admitted(), Admitted::Pending)
     }
 
     /// Before a bulk write selects its targets: the authority must be the
-    /// bulk admission of `T` under the request of `ctx`, on `db`, which must
-    /// be the transaction's `Database`.
+    /// pending bulk admission of `T` under the request of `ctx`, on `db`,
+    /// which must be the transaction's `Database`.
     pub(super) fn __require_bulk_targets<T: Entity + 'static, B: OrmBackend>(
         &self,
         ctx: &async_graphql::Context<'_>,
         db: &Database<B>,
         transaction_db: &Database<B>,
-    ) -> async_graphql::Result<()> {
-        if database_address(db) != database_address(transaction_db) {
-            return Err(mismatch());
+    ) -> crate::Result<()> {
+        if db.handle_identity() == transaction_db.handle_identity()
+            && self.is_pending_bulk(&GeneratedWriteEntity::of::<T>(), ctx, db)
+        {
+            Ok(())
+        } else {
+            Err(mismatch_error())
         }
-        self.require_bulk(&GeneratedWriteEntity::of::<T>(), ctx, db)
     }
 
-    /// Target admission of a bulk write succeeded: issue the authority
-    /// [`Self::__require_bulk_targets`] accepted.
-    pub(super) fn __issue_bulk_targets(&self) {
-        self.issue();
+    /// Target admission of a bulk write succeeded in `transaction` for the
+    /// rows with these hook event ids: issue the authority
+    /// [`Self::__require_bulk_targets`] accepted for exactly those rows. No
+    /// row issues nothing.
+    pub(super) fn __issue_bulk_targets(
+        &self,
+        transaction: u64,
+        rows: impl Iterator<Item = String>,
+    ) {
+        let rows: HashMap<String, u8> = rows.map(|row| (row, 0)).collect();
+        let mut admitted = self.admitted();
+        if matches!(*admitted, Admitted::Pending) && !rows.is_empty() {
+            *admitted = Admitted::Rows { transaction, rows };
+        }
     }
 
-    /// Admit one hook dispatch: the authority must be issued, and earned for
-    /// `entity` and an operation that reports `action`, under the request and
-    /// field of `ctx`, on the transaction's `Database`. A single-row
-    /// authority dispatches each phase once.
+    /// Admit one hook dispatch of the row `id`: the authority must be earned
+    /// for `entity` under the request and field of `ctx`, on the
+    /// transaction's `Database`, and issued in this transaction for that row
+    /// and an event that reports `action`. Each row dispatches each phase
+    /// once.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn __require_dispatch<B: OrmBackend>(
         &self,
         entity: &GeneratedWriteEntity,
         ctx: &async_graphql::Context<'_>,
         transaction_db: &Database<B>,
+        transaction: u64,
         phase: &MutationPhase,
         action: ChangeAction,
+        id: &str,
     ) -> async_graphql::Result<()> {
-        if !(self.issued.load(Ordering::Acquire)
-            && self.kind.reports(action)
-            && self.binds(entity, ctx, transaction_db))
-        {
+        if !self.binds(entity, ctx, transaction_db) {
             return Err(mismatch());
         }
-        if !self.kind.is_bulk() {
-            let phase = match phase {
-                MutationPhase::Before => 1,
-                MutationPhase::After => 2,
-            };
-            if self.dispatched.fetch_or(phase, Ordering::AcqRel) & phase != 0 {
-                return Err(mismatch());
+        let phase = match phase {
+            MutationPhase::Before => BEFORE,
+            MutationPhase::After => AFTER,
+        };
+        let dispatched = match &mut *self.admitted() {
+            Admitted::Pending | Admitted::Inert => None,
+            Admitted::NewRow {
+                transaction: admitting,
+                phases,
+            } => {
+                let admitting = admitting.or_else(|| self.invocation.transaction.get().copied());
+                // A new row has no key to tell its `After` from another
+                // row's: it follows its own `Before`.
+                (action == ChangeAction::Created
+                    && admitting == Some(transaction)
+                    && (phase == BEFORE || *phases & BEFORE != 0))
+                    .then_some(phases)
             }
+            Admitted::Rows {
+                transaction: admitting,
+                rows,
+            } => (self.kind.existing_row_action() == Some(action) && *admitting == transaction)
+                .then(|| rows.get_mut(id))
+                .flatten(),
         }
-        Ok(())
+        .filter(|phases| **phases & phase == 0)
+        .map(|phases| *phases |= phase);
+        dispatched.ok_or_else(mismatch)
     }
 }
 
@@ -419,42 +508,25 @@ pub type __GeneratedWriteRequestAuthority<'a, 'ctx> = (
     &'a GeneratedWriteAuthority,
 );
 
-/// Which assurance requirement a generated write enforces.
-#[doc(hidden)]
-#[derive(Clone, Copy)]
-pub enum GeneratedWriteAssurance {
-    /// The requirement declared for the root field being resolved.
-    Resolver,
-    /// The requirement declared for the operation's own root field, as a
-    /// nested child row enforces its entity's create root and a
-    /// dependent-delete step its entity's delete or update root.
-    Operation,
-}
-
-/// A request that passed request admission for one operation of one entity.
-/// It has no public constructor.
+/// A request that passed request admission for one operation of one entity
+/// on the backend `B`. It has no public constructor.
 #[doc(hidden)]
 #[must_use]
-pub struct GeneratedWriteRequest {
+pub struct GeneratedWriteRequest<B: OrmBackend> {
     entity: GeneratedWriteEntity,
     kind: GeneratedWriteKind,
     request: RequestBinding,
+    invocation: Arc<Invocation>,
+    /// The backend whose RLS request context was checked.
+    _backend: PhantomData<fn() -> B>,
 }
 
-/// Request admission of the generated write `kind` of `T`, in this order:
-/// resolver authentication, the RLS request context of `T`, the operation's
-/// declared scopes, then its declared assurance.
-///
-/// The authentication mode, the scope requirement and the operation's
-/// coordinate come from `T`'s [`GeneratedWriteConfig`]. `scope_arguments` are
-/// the request's values of the scalar arguments a scope template names.
-#[doc(hidden)]
-pub fn __admit_generated_write_request<T, B>(
+fn admit_request<T, B>(
     ctx: &async_graphql::Context<'_>,
     kind: GeneratedWriteKind,
-    assurance: GeneratedWriteAssurance,
     scope_arguments: &[(&str, &str)],
-) -> async_graphql::Result<GeneratedWriteRequest>
+    invocation: Arc<Invocation>,
+) -> async_graphql::Result<GeneratedWriteRequest<B>>
 where
     T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
     B: OrmBackend,
@@ -463,26 +535,70 @@ where
     let _auth_subject = crate::graphql::auth::enforce_resolver_auth(ctx, operation.auth_mode)?;
     super::ensure_rls_request_context::<T, B>(ctx, <T as Entity>::entity_name())?;
     operation.scopes.enforce(ctx, scope_arguments)?;
-    match assurance {
-        GeneratedWriteAssurance::Resolver => {
-            crate::graphql::assurance::enforce_resolver_assurance(
-                ctx,
-                GraphqlOperationKind::Mutation,
-            )?;
-        }
-        GeneratedWriteAssurance::Operation => {
-            crate::graphql::assurance::enforce_operation_assurance(
-                ctx,
-                GraphqlOperationKind::Mutation,
-                operation.field_name,
-            )?;
-        }
-    }
+    // The operation's own coordinate, whatever field is being resolved: a
+    // nested child row enforces its entity's create root, a dependent-delete
+    // step its entity's delete or update root, and a resolver that is not
+    // the operation's root cannot substitute its own requirement.
+    crate::graphql::assurance::enforce_operation_assurance(
+        ctx,
+        GraphqlOperationKind::Mutation,
+        operation.field_name,
+    )?;
     Ok(GeneratedWriteRequest {
         entity: GeneratedWriteEntity::of::<T>(),
         kind,
         request: RequestBinding::of(ctx),
+        invocation,
+        _backend: PhantomData,
     })
+}
+
+/// Request admission of the generated write `kind` of `T` on the backend
+/// `B`, in this order: resolver authentication, the RLS request context of
+/// `T`, the operation's declared scopes, then the assurance declared for the
+/// operation's own root field. It starts a new invocation.
+///
+/// The authentication mode, the scope declarations and the operation's
+/// coordinate come from `T`'s [`GeneratedWriteConfig`]. `scope_arguments` are
+/// the request's values of the scalar arguments a scope template names: the
+/// caller supplies them, as it holds the resolver's arguments.
+#[doc(hidden)]
+pub fn __admit_generated_write_request<T, B>(
+    ctx: &async_graphql::Context<'_>,
+    kind: GeneratedWriteKind,
+    scope_arguments: &[(&str, &str)],
+) -> async_graphql::Result<GeneratedWriteRequest<B>>
+where
+    T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
+    B: OrmBackend,
+{
+    admit_request::<T, B>(ctx, kind, scope_arguments, Arc::default())
+}
+
+/// [`__admit_generated_write_request`] for a child row of a nested create:
+/// the create of `T` under the child's own synthetic field context `ctx`,
+/// admitted through the admission of its parent's create. The child inherits
+/// the parent's invocation and backend, and must belong to the parent's
+/// request and root field.
+#[doc(hidden)]
+pub fn __admit_generated_nested_create_request<T, B>(
+    ctx: &async_graphql::Context<'_>,
+    parent: &GeneratedWriteAdmission<'_, B>,
+) -> async_graphql::Result<GeneratedWriteRequest<B>>
+where
+    T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
+    B: OrmBackend,
+{
+    let parent = &parent.authority;
+    if parent.kind != GeneratedWriteKind::Create || !parent.request.shares_root(ctx) {
+        return Err(mismatch());
+    }
+    admit_request::<T, B>(
+        ctx,
+        GeneratedWriteKind::Create,
+        &[],
+        parent.invocation.clone(),
+    )
 }
 
 /// Which step of entity admission refused.
@@ -495,8 +611,8 @@ enum EntityRefusal {
     Provider(async_graphql::Error),
 }
 
-impl GeneratedWriteRequest {
-    async fn admit<'a, B: OrmBackend>(
+impl<B: OrmBackend> GeneratedWriteRequest<B> {
+    async fn admit<'a>(
         self,
         ctx: &async_graphql::Context<'_>,
         db: &'a Database<B>,
@@ -505,6 +621,8 @@ impl GeneratedWriteRequest {
             entity,
             kind,
             request,
+            invocation,
+            _backend,
         } = self;
         if !request.is(ctx) {
             return Err(EntityRefusal::Request(mismatch()));
@@ -528,22 +646,29 @@ impl GeneratedWriteRequest {
                 entity,
                 kind,
                 request,
-                database: database_address(db),
-                // A create has no target: its admission is complete here.
-                issued: AtomicBool::new(!kind.admits_target()),
-                dispatched: AtomicU8::new(0),
+                invocation,
+                database: db.handle_identity(),
+                admitted: Mutex::new(if kind == GeneratedWriteKind::Create {
+                    // A create has no target: its admission is complete here.
+                    Admitted::NewRow {
+                        transaction: None,
+                        phases: 0,
+                    }
+                } else {
+                    Admitted::Pending
+                }),
             },
         })
     }
 
     /// Entity admission of a single-row write, on the request's `Database`
-    /// and under the field context request admission ran under. Every
-    /// refusal is the root field's error.
+    /// of the admitted backend and under the field context request admission
+    /// ran under. Every refusal is the root field's error.
     ///
     /// A nested child row is admitted this way under its own synthetic field
     /// context, which carries the `Database` of its parent's request.
     #[doc(hidden)]
-    pub async fn __admit_entity<'a, B: OrmBackend>(
+    pub async fn __admit_entity<'a>(
         self,
         ctx: &async_graphql::Context<'a>,
     ) -> async_graphql::Result<GeneratedWriteAdmission<'a, B>> {
@@ -563,7 +688,7 @@ impl GeneratedWriteRequest {
     /// which the root answers as a `success: false` payload; a request with
     /// no `Database` is the root field's error.
     #[doc(hidden)]
-    pub async fn __admit_entity_bulk<'a, B: OrmBackend>(
+    pub async fn __admit_entity_bulk<'a>(
         self,
         ctx: &async_graphql::Context<'a>,
     ) -> async_graphql::Result<Result<GeneratedWriteAdmission<'a, B>, async_graphql::Error>> {
@@ -609,13 +734,23 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     }
 
     /// The authority alone, for a row that is written after its admission
-    /// goes out of scope (a prepared nested child).
+    /// goes out of scope (a prepared nested child). Target admission needs
+    /// the admission, so an authority detached before it can never be
+    /// issued.
     #[doc(hidden)]
     pub fn into_authority(self) -> GeneratedWriteAuthority {
+        {
+            let mut admitted = self.authority.admitted();
+            if matches!(*admitted, Admitted::Pending) {
+                *admitted = Admitted::Inert;
+            }
+        }
         self.authority
     }
 
-    /// Begin the write transaction under the request's database auth context.
+    /// Begin the write transaction of this admission's invocation under the
+    /// request's database auth context. An invocation begins one: the creates
+    /// of the invocation, its nested children included, dispatch in it.
     #[doc(hidden)]
     pub async fn begin(
         &self,
@@ -624,22 +759,33 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     where
         B: WriteBackend,
     {
-        MutationContext::begin_with_auth(self.db, mode, self.auth_context.as_ref())
-            .await
-            .map_err(graphql_error_from_sqlx)
+        let transaction =
+            MutationContext::begin_with_auth(self.db, mode, self.auth_context.as_ref())
+                .await
+                .map_err(graphql_error_from_sqlx)?;
+        self.authority
+            .invocation
+            .transaction
+            .set(transaction.__identity())
+            .map_err(|_| mismatch())?;
+        Ok(transaction)
     }
 
-    /// The single-row target admission `kind` runs for the entity `T` under
-    /// the request and field of `ctx`, or a refusal.
+    /// A single-row target admission of one of `kinds` for the entity `T`
+    /// under the request and field of `ctx`, in a transaction on the
+    /// admitted `Database`, while no target is admitted yet; or a refusal.
     fn require_target<T: 'static>(
         &self,
         ctx: &async_graphql::Context<'_>,
+        transaction_db: Option<&Database<B>>,
         kinds: &[GeneratedWriteKind],
     ) -> async_graphql::Result<()> {
         let authority = &self.authority;
         if kinds.contains(&authority.kind)
             && authority.entity.is_type::<T>()
             && authority.request.is(ctx)
+            && transaction_db.is_none_or(|db| db.handle_identity() == authority.database)
+            && matches!(*authority.admitted(), Admitted::Pending)
         {
             Ok(())
         } else {
@@ -647,9 +793,19 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
         }
     }
 
+    /// Issue the authority for the existing row `row`, admitted in
+    /// `transaction`.
+    fn issue_row<T: GeneratedWriteConfig>(&self, transaction: u64, row: &T) {
+        *self.authority.admitted() = Admitted::Rows {
+            transaction,
+            rows: HashMap::from([(row.__gom_write_key(), 0)]),
+        };
+    }
+
     /// Target admission of a single-row update or delete: lock the row
     /// `query` selects, narrowed by the write-target prefilter, then classify
-    /// it. An admitted row issues the authority.
+    /// it. An admitted row issues the authority for that row in this
+    /// transaction.
     ///
     /// `None` means the row is absent, filtered out, or neither readable nor
     /// writable by the caller. The three are indistinguishable to the client.
@@ -662,15 +818,20 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     ) -> async_graphql::Result<Option<T>>
     where
         B: WriteBackend,
-        T: Entity + DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+        T: Entity
+            + DatabaseEntity
+            + GeneratedWriteConfig
+            + FromSqlRow<B>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     {
         self.require_target::<T>(
             ctx,
+            Some(hook_ctx.__base_database()),
             &[GeneratedWriteKind::Update, GeneratedWriteKind::Delete],
         )?;
-        if database_address(hook_ctx.__base_database()) != self.authority.database {
-            return Err(mismatch());
-        }
         let row = Box::pin(super::with_write_target_prefilter(
             self.db,
             Some(ctx),
@@ -682,8 +843,8 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
         .await
         .map_err(graphql_error_from_sqlx)?;
         let row = self.classify(ctx, row).await?;
-        if row.is_some() {
-            self.authority.issue();
+        if let Some(row) = &row {
+            self.issue_row(hook_ctx.__identity(), row);
         }
         Ok(row)
     }
@@ -704,6 +865,7 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     {
         self.require_target::<T>(
             ctx,
+            None,
             &[GeneratedWriteKind::Update, GeneratedWriteKind::Delete],
         )?;
         let row = Box::pin(super::with_write_target_prefilter(
@@ -719,9 +881,11 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
         self.classify(ctx, row).await
     }
 
-    /// Target admission of an upsert: the row write decision on the row the
-    /// upsert key found in `hook_ctx`, if any. A key with no row has no
-    /// target. Either way, success issues the authority.
+    /// Target admission of an upsert, once its key was looked up in
+    /// `hook_ctx`: the row write decision on the row the key found, if any.
+    /// Success issues the authority for the branch that was decided, in this
+    /// transaction: an update of that row, or a create when the key found no
+    /// row.
     #[doc(hidden)]
     pub async fn __admit_upsert_target<T>(
         &self,
@@ -731,26 +895,33 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     ) -> async_graphql::Result<()>
     where
         B: WriteBackend,
-        T: Send + Sync + 'static,
+        T: GeneratedWriteConfig + Send + Sync + 'static,
     {
-        self.require_target::<T>(ctx, &[GeneratedWriteKind::Upsert])?;
-        if database_address(hook_ctx.__base_database()) != self.authority.database {
-            return Err(mismatch());
-        }
-        if let Some(existing) = existing {
-            let entity = &self.authority.entity;
-            self.db
-                .ensure_writable_row(
-                    Some(ctx),
-                    entity.entity_name,
-                    entity.write_policy(),
-                    EntityAccessSurface::GraphqlMutation,
-                    existing as &(dyn std::any::Any + Send + Sync),
-                )
-                .await
-                .map_err(graphql_error_from_callback)?;
-        }
-        self.authority.issue();
+        self.require_target::<T>(
+            ctx,
+            Some(hook_ctx.__base_database()),
+            &[GeneratedWriteKind::Upsert],
+        )?;
+        let transaction = hook_ctx.__identity();
+        let Some(existing) = existing else {
+            *self.authority.admitted() = Admitted::NewRow {
+                transaction: Some(transaction),
+                phases: 0,
+            };
+            return Ok(());
+        };
+        let entity = &self.authority.entity;
+        self.db
+            .ensure_writable_row(
+                Some(ctx),
+                entity.entity_name,
+                entity.write_policy(),
+                EntityAccessSurface::GraphqlMutation,
+                existing as &(dyn std::any::Any + Send + Sync),
+            )
+            .await
+            .map_err(graphql_error_from_callback)?;
+        self.issue_row(transaction, existing);
         Ok(())
     }
 

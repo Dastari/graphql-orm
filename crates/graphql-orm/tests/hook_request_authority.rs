@@ -65,8 +65,8 @@ impl HostMutation {
         admitted: Option<String>,
     ) -> graphql_orm::async_graphql::Result<bool> {
         use graphql_orm::graphql::orm::{
-            __admit_generated_write_request, EntityQuery, GeneratedWriteAssurance,
-            GeneratedWriteEntity, GeneratedWriteKind, SqlValue,
+            __admit_generated_write_request, EntityQuery, GeneratedWriteEntity, GeneratedWriteKind,
+            SqlValue,
         };
         type Sqlite = graphql_orm::SqliteBackend;
         let orders = GeneratedWriteEntity::of::<HookOrder>();
@@ -79,10 +79,9 @@ impl HostMutation {
                 let admission = __admit_generated_write_request::<HookOrder, Sqlite>(
                     ctx,
                     GeneratedWriteKind::Delete,
-                    GeneratedWriteAssurance::Resolver,
                     &[],
                 )?
-                .__admit_entity::<Sqlite>(ctx)
+                .__admit_entity(ctx)
                 .await?;
                 let target = admission
                     .__lock_target(
@@ -99,10 +98,9 @@ impl HostMutation {
                 let admission = __admit_generated_write_request::<HookLine, Sqlite>(
                     ctx,
                     GeneratedWriteKind::Delete,
-                    GeneratedWriteAssurance::Resolver,
                     &[],
                 )?
-                .__admit_entity::<Sqlite>(ctx)
+                .__admit_entity(ctx)
                 .await?;
                 let target = admission
                     .__lock_target(

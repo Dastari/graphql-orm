@@ -311,7 +311,7 @@ impl Declaration {
                     );
                 }
                 for (child, values) in #nested.into_iter().zip(values) {
-                    let row = #target::__gom_prepare_nested_create(ctx, db, child, values, &#bind).await?;
+                    let row = #target::__gom_prepare_nested_create(ctx, &__gom_write, db, child, values, &#bind).await?;
                     let (supplied, prepared) = row.__gom_nested_create_keys();
                     let table = #target::__GOM_NESTED_CREATE_TABLE;
                     if supplied.is_some_and(|key| !__gom_supplied_keys.insert((table, key.to_owned())))
@@ -587,6 +587,7 @@ impl Child<'_> {
                 #[allow(unused_imports)]
                 pub async fn __gom_prepare_nested_create(
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    __gom_parent: &::graphql_orm::graphql::orm::GeneratedWriteAdmission<'_, #backend_marker>,
                     db: &::graphql_orm::db::Database<#backend_marker>,
                     input: #nested_input,
                     values: ::graphql_orm::async_graphql::Value,

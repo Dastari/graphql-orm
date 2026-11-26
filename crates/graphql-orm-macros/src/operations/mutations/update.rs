@@ -1,4 +1,4 @@
-use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
+use super::{Hook, admit_request, admitted_request, write_entity};
 use crate::dependent_deletes::Boundary;
 use crate::entity::UpdateAssuranceMetadata;
 
@@ -39,7 +39,7 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) update_assignments_graphql_call: &'a TokenStream,
     pub(in crate::operations) updated_at_assignment: &'a TokenStream,
     pub(in crate::operations) version_assignment: &'a TokenStream,
-    pub(in crate::operations) pk_id_for_id: &'a TokenStream,
+    pub(in crate::operations) pk_id_for_current: &'a TokenStream,
     pub(in crate::operations) sql_table_name: &'a str,
     pub(in crate::operations) graphql_post_image_check: &'a TokenStream,
     pub(in crate::operations) pk_id_for_entity: &'a TokenStream,
@@ -95,7 +95,7 @@ pub(in crate::operations) fn update(
         update_assignments_graphql_call,
         updated_at_assignment,
         version_assignment,
-        pk_id_for_id,
+        pk_id_for_current,
         sql_table_name,
         graphql_post_image_check,
         pk_id_for_entity,
@@ -115,22 +115,15 @@ pub(in crate::operations) fn update(
     } = input;
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = |kind, scope_arguments| {
-        admit_request(
-            struct_name,
-            backend_marker,
-            kind,
-            scope_arguments,
-            Assurance::Resolver,
-        )
-    };
+    let admit =
+        |kind, scope_arguments| admit_request(struct_name, backend_marker, kind, scope_arguments);
     let admit_update = admit("Update", update_scope_arguments);
     let admit_update_many = admit("UpdateMany", update_many_scope_arguments);
     let before_hook = Hook {
         request: &request,
         phase: "Before",
         action: quote! { ::graphql_orm::graphql::orm::ChangeAction::Updated },
-        id: pk_id_for_id.clone(),
+        id: pk_id_for_current.clone(),
         changes: quote! { mutation_changes.clone() },
         before_state: quote! { ::std::option::Option::Some(before_state.clone()) },
         after_state: quote! { ::std::option::Option::None },
@@ -225,7 +218,7 @@ pub(in crate::operations) fn update(
 
                 #entity
                 #admit_update
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx).await?;
+                let __gom_write = __gom_request.__admit_entity(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();
@@ -380,7 +373,7 @@ pub(in crate::operations) fn update(
 
                 #entity
                 #admit_update_many
-                let __gom_write = match __gom_request.__admit_entity_bulk::<#backend_marker>(ctx).await? {
+                let __gom_write = match __gom_request.__admit_entity_bulk(ctx).await? {
                     ::std::result::Result::Ok(admission) => admission,
                     ::std::result::Result::Err(error) => {
                         return ::std::result::Result::Ok(#update_many_result_type::from_graphql_error(error));

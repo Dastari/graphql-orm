@@ -18,15 +18,15 @@ help: you might have meant to use the `of` associated function
 10 +     let _entity = GeneratedWriteEntity::of();
    |
 
-error: cannot construct `graphql_orm::prelude::GeneratedWriteRequest` with struct literal syntax due to private fields
+error: cannot construct `graphql_orm::prelude::GeneratedWriteRequest<SqliteBackend>` with struct literal syntax due to private fields
   --> tests/ui/write_pipeline/forged_authority.rs:14:20
    |
-14 |     let _request = GeneratedWriteRequest {
-   |                    ^^^^^^^^^^^^^^^^^^^^^
+14 |     let _request = GeneratedWriteRequest::<graphql_orm::SqliteBackend> {
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 15 |         kind: GeneratedWriteKind::Delete,
    |         -------------------------------- private field
    |
-   = note: ...and other private fields `entity` and `request` that were not provided
+   = note: ...and other private fields `entity`, `request`, `invocation` and `_backend` that were not provided
 
 error: cannot construct `graphql_orm::prelude::GeneratedWriteAuthority` with struct literal syntax due to private fields
   --> tests/ui/write_pipeline/forged_authority.rs:17:22
@@ -36,4 +36,4 @@ error: cannot construct `graphql_orm::prelude::GeneratedWriteAuthority` with str
 18 |         kind: GeneratedWriteKind::Delete,
    |         -------------------------------- private field
    |
-   = note: ...and other private fields `entity`, `request`, `database`, `issued` and `dispatched` that were not provided
+   = note: ...and other private fields `entity`, `request`, `invocation`, `database` and `admitted` that were not provided

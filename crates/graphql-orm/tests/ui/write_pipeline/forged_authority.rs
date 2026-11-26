@@ -11,7 +11,7 @@ fn main() {
         entity_name: "Order",
         table_name: "orders",
     };
-    let _request = GeneratedWriteRequest {
+    let _request = GeneratedWriteRequest::<graphql_orm::SqliteBackend> {
         kind: GeneratedWriteKind::Delete,
     };
     let _authority = GeneratedWriteAuthority {

@@ -18,32 +18,51 @@ repository API, `Database::transaction` and
 checks of a generated GraphQL write, their order, the refusals, the SDL and
 the catalogues are unchanged (#921).
 
-The hidden write pipeline now derives a generated write's authentication
-mode, scopes and assurance coordinate from the entity's generated
+The hidden write pipeline now reads a generated write's authentication
+mode, scope declarations and assurance coordinate from the entity's generated
 configuration. It issues the `GeneratedWriteAuthority` only when the
 admission the operation needs is complete, which for an update, a delete, an
 upsert and a bulk write means after target admission. It binds the authority
-to one request, one operation and one `Database`.
+to one request and invocation, one operation, one `Database` handle, one
+transaction and the rows that were admitted.
 
-**Action needed** only for host code that calls the hidden, macro-internal
+Two details of generated mutations change in narrow cases:
+
+- **Assurance coordinate.** A generated write always enforces the assurance
+  requirement of its own root field. Before, a generated resolver enforced
+  the requirement of the field being resolved, which is the same field
+  unless a custom resolver calls a generated mutation resolver method under
+  its own root. **Action needed** only for such a custom resolver: the
+  caller must now satisfy the generated operation's requirement as well.
+- **`Before` hook id of a single-row update.** The event's `id` is the stored
+  key of the locked row, as the `After` event's already was. Before, it was
+  the request's `id` argument. The two differ only where the database
+  matches keys that are spelled differently, for example under a
+  case-insensitive collation. **No action** unless a hook compares that id
+  with the request's own spelling.
+
+**Action needed** for host code that calls the hidden, macro-internal
 pipeline functions directly, against their documentation. Their signatures
 changed, so that code no longer compiles:
 
 - `__admit_generated_write_request` takes a `GeneratedWriteKind` and the
   scope template argument values. It no longer takes an authentication mode,
-  a scope closure or an assurance coordinate.
+  a scope closure or an assurance coordinate, and the request it returns is
+  typed by its backend.
 - `GeneratedWriteEntity::new` is replaced by `GeneratedWriteEntity::of::<T>()`.
-- `__admit_entity` and `__admit_entity_bulk` take no entity, and
-  `__admit_entity_on` is removed.
+- `__admit_entity` and `__admit_entity_bulk` take no entity and no backend,
+  and `__admit_entity_on` is removed. A nested child is admitted through its
+  parent's admission with `__admit_generated_nested_create_request`.
 - `__lock_generated_write_target` and `__read_generated_write_target` are
   replaced by methods of the admission.
 - `bulk_write_targets` takes the request with its authority instead of the
   GraphQL context.
 
-A hook dispatch whose authority does not match its request, operation,
-entity or `Database` is now refused with an error. Before, it ran the hook
-without request authority. These functions are still not a supported API.
-Dispatch a hook from host code with `MutationContext::run_mutation_hook`.
+A hook dispatch whose authority does not match its request, invocation,
+operation, entity, `Database`, transaction or row is now refused with an
+error. Before, it ran the hook without request authority. These functions
+are still not a supported API. Dispatch a hook from host code with
+`MutationContext::run_mutation_hook`.
 See
 [what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
 

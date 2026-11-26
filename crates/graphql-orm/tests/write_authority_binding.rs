@@ -1,7 +1,7 @@
 //! A generated write's authority is derived from the entity's generated
 //! configuration, issued only once the admission its operation needs is
-//! complete, and bound to the request, operation and `Database` it was earned
-//! under (#921).
+//! complete, and bound to the request, invocation, operation, `Database`,
+//! transaction and rows it was earned for (#921).
 //!
 //! Host Rust code is trusted and can run the macro-internal write pipeline
 //! itself, as the resolvers below do. Every step that does not match the
@@ -9,13 +9,14 @@
 
 #![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 
-use graphql_orm::async_graphql::{Context, Object, Value};
+use graphql_orm::async_graphql::{Context, ErrorExtensions, Object, Value};
 use graphql_orm::futures::future::BoxFuture;
-use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError, graphql_error_from_sqlx};
+use graphql_orm::graphql::errors::{OrmPublicError, graphql_error_from_sqlx};
 use graphql_orm::graphql::input_validation::__nested_create_field;
 use graphql_orm::graphql::orm::{
-    __admit_generated_write_request, EntityQuery, GeneratedWriteAssurance, GeneratedWriteAuthority,
-    GeneratedWriteEntity, GeneratedWriteKind, GeneratedWriteRequest, SqlValue, bulk_write_targets,
+    __admit_generated_nested_create_request, __admit_generated_write_request, EntityQuery,
+    GeneratedWriteAuthority, GeneratedWriteEntity, GeneratedWriteKind, GeneratedWriteRequest,
+    SqlValue, bulk_write_targets,
 };
 use graphql_orm::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -58,7 +59,7 @@ struct BindLine {
     order_id: String,
 }
 
-/// The message of every binding refusal.
+/// The text of every binding refusal.
 const REFUSED: &str =
     "generated write admission does not match this request, operation or database";
 
@@ -71,14 +72,17 @@ fn outcome<T>(result: graphql_orm::async_graphql::Result<T>) -> String {
 }
 
 /// [`outcome`] of a step on the shared bulk write path, whose refusals are
-/// repository errors. The binding refusal is uncoded, so its text stays
-/// server-side and callers see `INTERNAL_ERROR`; each case also runs the
-/// same step with the matching authority, which succeeds.
+/// repository errors: the binding refusal is the protocol error with that
+/// text, which clients see as an internal error.
 fn bulk_outcome<T>(result: graphql_orm::Result<T>) -> String {
-    match result.map_err(|error| OrmPublicError::from_sqlx(&error).code) {
+    match result {
         Ok(_) => "ok".to_owned(),
-        Err(OrmErrorCode::InternalError) => "refused".to_owned(),
-        Err(code) => format!("error: {code:?}"),
+        Err(graphql_orm::sqlx::Error::Protocol(text)) if text == REFUSED => {
+            let public = OrmPublicError::from_sqlx(&graphql_orm::sqlx::Error::Protocol(text));
+            assert!(!public.message.contains(REFUSED), "{public:?}");
+            "refused".to_owned()
+        }
+        Err(error) => format!("error: {:?}", OrmPublicError::from_sqlx(&error).code),
     }
 }
 
@@ -86,15 +90,15 @@ fn bulk_outcome<T>(result: graphql_orm::Result<T>) -> String {
 fn admit<T>(
     ctx: &Context<'_>,
     kind: GeneratedWriteKind,
-    assurance: GeneratedWriteAssurance,
-) -> graphql_orm::async_graphql::Result<GeneratedWriteRequest>
+) -> graphql_orm::async_graphql::Result<GeneratedWriteRequest<Sqlite>>
 where
     T: DatabaseRls + Entity + graphql_orm::graphql::orm::GeneratedWriteConfig + 'static,
 {
-    __admit_generated_write_request::<T, Sqlite>(ctx, kind, assurance, &[])
+    __admit_generated_write_request::<T, Sqlite>(ctx, kind, &[])
 }
 
-/// One `Before` or `After` dispatch of `entity` presenting `authority`.
+/// One `Before` or `After` dispatch of the row `id` of `entity`, presenting
+/// `authority`.
 async fn dispatch(
     tx: &mut MutationContext<'_>,
     entity: GeneratedWriteEntity,
@@ -102,6 +106,7 @@ async fn dispatch(
     authority: &GeneratedWriteAuthority,
     phase: MutationPhase,
     action: ChangeAction,
+    id: &str,
 ) -> String {
     outcome(
         tx.__run_generated_write_hook(
@@ -109,7 +114,7 @@ async fn dispatch(
             Some((ctx, authority)),
             phase,
             action,
-            "row".to_owned(),
+            id.to_owned(),
             Vec::new(),
             None,
             None,
@@ -125,15 +130,33 @@ where
     EntityQuery::<T, Sqlite>::new().where_clause("id = ?", SqlValue::String(id.to_owned()))
 }
 
+fn lines_of(order: &str) -> EntityQuery<BindLine, Sqlite> {
+    EntityQuery::<BindLine, Sqlite>::new()
+        .where_clause("order_id = ?", SqlValue::String(order.to_owned()))
+}
+
+fn line_key(line: &BindLine) -> SqlValue {
+    SqlValue::String(line.id.clone())
+}
+
+/// A transaction that no admission began.
 async fn begin<'a>(db: &'a Database) -> graphql_orm::async_graphql::Result<MutationContext<'a>> {
     MutationContext::begin(db, TransactionMode::Default)
         .await
         .map_err(graphql_error_from_sqlx)
 }
 
-/// An authority one request leaves for another to present.
+async fn rollback(tx: MutationContext<'_>) -> graphql_orm::async_graphql::Result<()> {
+    tx.rollback().await.map_err(graphql_error_from_sqlx)
+}
+
+/// An authority one invocation leaves for another to present.
 #[derive(Default)]
 struct Stash(Mutex<Option<GeneratedWriteAuthority>>);
+
+/// What the invocations of a repeated selection did, in order.
+#[derive(Clone, Default)]
+struct Repeats(Arc<Mutex<Vec<String>>>);
 
 /// Host code that drives the write pipeline itself, as a custom resolver can.
 #[derive(Default)]
@@ -149,8 +172,7 @@ impl HostMutation {
         case: String,
     ) -> graphql_orm::async_graphql::Result<Vec<String>> {
         use ChangeAction::{Created, Deleted, Updated};
-        use GeneratedWriteAssurance::{Operation, Resolver};
-        use GeneratedWriteKind::{Create, Delete, DeleteMany, Update};
+        use GeneratedWriteKind::{Create, Delete, DeleteMany, Update, Upsert};
         use MutationPhase::{After, Before};
 
         let db = ctx.data::<Database>()?;
@@ -158,113 +180,195 @@ impl HostMutation {
         let lines = GeneratedWriteEntity::of::<BindLine>();
         let mut out = Vec::new();
         match case.as_str() {
-            // Item 1: the scopes and the authentication mode are the entity's.
+            // The scopes and the authentication mode are the entity's.
             "config" => {
-                out.push(outcome(admit::<BindOrder>(ctx, Delete, Resolver)));
+                out.push(outcome(admit::<BindOrder>(ctx, Delete)));
                 for id in ["o1", "o2"] {
                     out.push(outcome(
                         __admit_generated_write_request::<BindOrder, Sqlite>(
                             ctx,
                             Update,
-                            Resolver,
                             &[("id", id)],
                         ),
                     ));
                 }
-                out.push(outcome(admit::<BindOrder>(ctx, Create, Resolver)));
-                out.push(outcome(admit::<BindLine>(ctx, Create, Resolver)));
+                out.push(outcome(admit::<BindOrder>(ctx, Create)));
+                out.push(outcome(admit::<BindLine>(ctx, Create)));
             }
-            // Item 2: nothing is issued before target admission succeeds.
+            // The assurance coordinate is the operation's, not this field's.
+            "assurance" => {
+                out.push(outcome(admit::<BindOrder>(ctx, Delete)));
+                out.push(outcome(admit::<BindLine>(ctx, Create)));
+            }
+            // Nothing is issued before target admission succeeds, and then
+            // only for the admitted row in the admitting transaction.
             "target" => {
-                let admission = admit::<BindOrder>(ctx, Delete, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?;
+                let admission = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
                 let authority = admission.authority();
                 // The unlocked read of a dependent-delete root issues nothing.
                 let read = admission
                     .__read_target(ctx, by_id::<BindOrder>("o1"))
                     .await?;
                 assert!(read.is_some());
-                let mut tx = begin(db).await?;
-                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted).await);
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o1").await);
                 let absent = admission
                     .__lock_target(ctx, &mut tx, by_id::<BindOrder>("absent"))
                     .await?;
                 assert!(absent.is_none());
-                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted).await);
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o1").await);
                 let locked = admission
                     .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1"))
                     .await?;
                 assert!(locked.is_some());
                 // A different operation: a delete admission reports no update.
-                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Updated).await);
-                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted).await);
-                // One row: each phase once.
-                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted).await);
-                out.push(dispatch(&mut tx, orders, ctx, authority, After, Deleted).await);
-                out.push(dispatch(&mut tx, orders, ctx, authority, After, Deleted).await);
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
-            }
-            // Item 4: a different entity.
-            "entity" => {
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Updated, "o1").await);
+                // Another row.
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o2").await);
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o1").await);
+                // Each phase once, and `After` for the admitted row only.
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o1").await);
+                out.push(dispatch(&mut tx, orders, ctx, authority, After, Deleted, "o2").await);
+                out.push(dispatch(&mut tx, orders, ctx, authority, After, Deleted, "o1").await);
+                out.push(dispatch(&mut tx, orders, ctx, authority, After, Deleted, "o1").await);
+                // One target per admission, and one transaction per invocation.
+                out.push(outcome(
+                    admission
+                        .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o2"))
+                        .await,
+                ));
+                rollback(tx).await?;
+                out.push(outcome(
+                    admission.begin(TransactionMode::Default).await.map(drop),
+                ));
+                // A row locked in one transaction, dispatched in a fresh one
+                // on the same handle.
+                let admission = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                let locked = admission
+                    .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1"))
+                    .await?;
+                assert!(locked.is_some());
+                rollback(tx).await?;
                 let mut tx = begin(db).await?;
-                let authority = admit::<BindLine>(ctx, Create, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        orders,
+                        ctx,
+                        admission.authority(),
+                        Before,
+                        Deleted,
+                        "o1",
+                    )
+                    .await,
+                );
+                // An authority detached before target admission stays inert.
+                let detached = admit::<BindOrder>(ctx, Delete)?
+                    .__admit_entity(ctx)
                     .await?
                     .into_authority();
-                out.push(dispatch(&mut tx, orders, ctx, &authority, Before, Created).await);
-                out.push(dispatch(&mut tx, lines, ctx, &authority, Before, Created).await);
+                out.push(dispatch(&mut tx, orders, ctx, &detached, Before, Deleted, "o1").await);
+                rollback(tx).await?;
+            }
+            // An upsert's authority is the branch its target admission decided.
+            "upsert" => {
+                let admission = admit::<BindLine>(ctx, Upsert)?.__admit_entity(ctx).await?;
+                let authority = admission.authority();
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l9").await);
+                // The key found no row: a create, and nothing else.
+                out.push(outcome(
+                    admission
+                        .__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
+                        .await,
+                ));
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l1").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, After, Created, "l9").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l9").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, After, Created, "l9").await);
+                rollback(tx).await?;
+                // The key found a row: an update of that row, and nothing else.
+                let admission = admit::<BindLine>(ctx, Upsert)?.__admit_entity(ctx).await?;
+                let authority = admission.authority();
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                let existing = BindLine {
+                    id: "l1".to_owned(),
+                    order_id: "o1".to_owned(),
+                };
+                out.push(outcome(
+                    admission
+                        .__admit_upsert_target(ctx, &mut tx, Some(&existing))
+                        .await,
+                ));
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l1").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l2").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l1").await);
+                // The branch is decided once.
+                out.push(outcome(
+                    admission
+                        .__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
+                        .await,
+                ));
+                rollback(tx).await?;
+            }
+            // A different entity.
+            "entity" => {
+                let admission = admit::<BindLine>(ctx, Create)?.__admit_entity(ctx).await?;
+                let authority = admission.authority();
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, orders, ctx, authority, Before, Created, "x").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "x").await);
+                rollback(tx).await?;
                 // A delete admission of orders at the target admission of lines.
-                let admission = admit::<BindOrder>(ctx, Delete, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?;
+                let admission = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
                 out.push(outcome(
                     admission
                         .__lock_target(ctx, &mut tx, by_id::<BindLine>("l1"))
                         .await,
                 ));
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                rollback(tx).await?;
             }
-            // Item 4: a different operation.
+            // A different operation, and the rows of a bulk write.
             "operation" => {
-                let mut tx = begin(db).await?;
                 // A single-row authority at the bulk entry points.
-                let single = admit::<BindLine>(ctx, Create, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?
-                    .into_authority();
+                let single = admit::<BindLine>(ctx, Create)?.__admit_entity(ctx).await?;
+                let mut tx = single.begin(TransactionMode::Default).await?;
                 out.push(bulk_outcome(
-                    lines.__admit_bulk(db, Some((ctx, &single))).await,
+                    lines
+                        .__admit_bulk(db, Some((ctx, single.authority())))
+                        .await,
                 ));
                 out.push(bulk_outcome(
-                    bulk_write_targets::<BindLine, Sqlite>(
+                    bulk_write_targets(
                         db,
-                        Some((ctx, &single)),
+                        Some((ctx, single.authority())),
                         &mut tx,
-                        EntityQuery::new(),
-                        |line| SqlValue::String(line.id.clone()),
+                        lines_of("o1"),
+                        line_key,
                     )
                     .await,
                 ));
                 // Each admission at the other's entity admission.
                 out.push(outcome(
-                    admit::<BindLine>(ctx, DeleteMany, Resolver)?
-                        .__admit_entity::<Sqlite>(ctx)
+                    admit::<BindLine>(ctx, DeleteMany)?
+                        .__admit_entity(ctx)
                         .await
                         .map(drop),
                 ));
                 out.push(outcome(
-                    admit::<BindLine>(ctx, Delete, Resolver)?
-                        .__admit_entity_bulk::<Sqlite>(ctx)
+                    admit::<BindLine>(ctx, Delete)?
+                        .__admit_entity_bulk(ctx)
                         .await
                         .map(drop),
                 ));
                 // A bulk admission: unissued, and no single-row target.
-                let bulk = admit::<BindLine>(ctx, DeleteMany, Resolver)?
-                    .__admit_entity_bulk::<Sqlite>(ctx)
+                let bulk = admit::<BindLine>(ctx, DeleteMany)?
+                    .__admit_entity_bulk(ctx)
                     .await??;
                 let authority = bulk.authority();
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted).await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
                 out.push(outcome(
                     bulk.__lock_target(ctx, &mut tx, by_id::<BindLine>("l1"))
                         .await,
@@ -273,55 +377,89 @@ impl HostMutation {
                     bulk.__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
                         .await,
                 ));
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted).await);
-                // Its own bulk admission and target admission, which issues
-                // it for every row.
+                // Its own bulk admission.
                 out.push(bulk_outcome(
                     lines.__admit_bulk(db, Some((ctx, authority))).await,
                 ));
-                let targets = bulk_write_targets::<BindLine, Sqlite>(
+                // A filter that admits no row issues nothing.
+                let targets = bulk_write_targets(
                     db,
                     Some((ctx, authority)),
                     &mut tx,
-                    EntityQuery::new(),
-                    |line| SqlValue::String(line.id.clone()),
+                    lines_of("none"),
+                    line_key,
+                )
+                .await
+                .map_err(graphql_error_from_sqlx)?;
+                assert!(targets.is_empty());
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
+                // Two rows: the authority is theirs alone.
+                let targets = bulk_write_targets(
+                    db,
+                    Some((ctx, authority)),
+                    &mut tx,
+                    lines_of("o1"),
+                    line_key,
                 )
                 .await
                 .map_err(graphql_error_from_sqlx)?;
                 assert_eq!(targets.len(), 2);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated).await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted).await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted).await);
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l1").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l3").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l2").await);
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
+                // Issued once: neither bulk entry point accepts it again.
+                out.push(bulk_outcome(
+                    lines.__admit_bulk(db, Some((ctx, authority))).await,
+                ));
+                out.push(bulk_outcome(
+                    bulk_write_targets(
+                        db,
+                        Some((ctx, authority)),
+                        &mut tx,
+                        lines_of("o3"),
+                        line_key,
+                    )
+                    .await,
+                ));
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l3").await);
+                rollback(tx).await?;
             }
-            // Item 4: a different `Database`.
+            // A different `Database`.
             "database" => {
                 let other = db.clone();
+                let created = admit::<BindLine>(ctx, Create)?.__admit_entity(ctx).await?;
                 let mut tx = begin(&other).await?;
-                let created = admit::<BindLine>(ctx, Create, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?
-                    .into_authority();
-                out.push(dispatch(&mut tx, lines, ctx, &created, Before, Created).await);
-                let delete = admit::<BindOrder>(ctx, Delete, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?;
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        lines,
+                        ctx,
+                        created.authority(),
+                        Before,
+                        Created,
+                        "x",
+                    )
+                    .await,
+                );
+                let delete = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
                 out.push(outcome(
                     delete
                         .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1"))
                         .await,
                 ));
-                let bulk = admit::<BindLine>(ctx, DeleteMany, Resolver)?
-                    .__admit_entity_bulk::<Sqlite>(ctx)
+                let bulk = admit::<BindLine>(ctx, DeleteMany)?
+                    .__admit_entity_bulk(ctx)
                     .await??;
                 for handle in [db, &other] {
                     out.push(bulk_outcome(
-                        bulk_write_targets::<BindLine, Sqlite>(
+                        bulk_write_targets(
                             handle,
                             Some((ctx, bulk.authority())),
                             &mut tx,
-                            EntityQuery::new(),
-                            |line| SqlValue::String(line.id.clone()),
+                            lines_of("o1"),
+                            line_key,
                         )
                         .await,
                     ));
@@ -331,73 +469,147 @@ impl HostMutation {
                         .__admit_bulk(&other, Some((ctx, bulk.authority())))
                         .await,
                 ));
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                rollback(tx).await?;
                 // The same authority on the request's own handle.
-                let mut tx = begin(db).await?;
-                out.push(dispatch(&mut tx, lines, ctx, &created, Before, Created).await);
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                let mut tx = created.begin(TransactionMode::Default).await?;
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        lines,
+                        ctx,
+                        created.authority(),
+                        Before,
+                        Created,
+                        "x",
+                    )
+                    .await,
+                );
+                rollback(tx).await?;
             }
-            // Item 4: a different request, or another root field of this one.
+            // A different request, or another root field of this one.
             "stash" => {
-                let authority = admit::<BindLine>(ctx, Create, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
+                let authority = admit::<BindLine>(ctx, Create)?
+                    .__admit_entity(ctx)
                     .await?
                     .into_authority();
                 *ctx.data::<Stash>()?.0.lock().unwrap() = Some(authority);
                 out.push("stashed".to_owned());
             }
             "stashed" => {
-                let authority = ctx.data::<Stash>()?.0.lock().unwrap().take().unwrap();
-                let mut tx = begin(db).await?;
-                out.push(dispatch(&mut tx, lines, ctx, &authority, Before, Created).await);
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                let stashed = ctx.data::<Stash>()?.0.lock().unwrap().take().unwrap();
+                let own = admit::<BindLine>(ctx, Create)?.__admit_entity(ctx).await?;
+                let mut tx = own.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, lines, ctx, &stashed, Before, Created, "x").await);
+                rollback(tx).await?;
             }
-            // Items 3 and 4: the synthetic child contexts of a nested create.
+            // The same selection, repeated: each invocation is its own.
+            "repeat" => {
+                let own = admit::<BindLine>(ctx, Create)?.__admit_entity(ctx).await?;
+                let stashed = ctx.data::<Stash>()?.0.lock().unwrap().take();
+                let step = match stashed {
+                    None => {
+                        *ctx.data::<Stash>()?.0.lock().unwrap() = Some(own.into_authority());
+                        "stashed".to_owned()
+                    }
+                    Some(stashed) => {
+                        let mut tx = own.begin(TransactionMode::Default).await?;
+                        let presented =
+                            dispatch(&mut tx, lines, ctx, &stashed, Before, Created, "x").await;
+                        let control =
+                            dispatch(&mut tx, lines, ctx, own.authority(), Before, Created, "x")
+                                .await;
+                        rollback(tx).await?;
+                        format!("first invocation's: {presented}; own: {control}")
+                    }
+                };
+                ctx.data::<Repeats>()?.0.lock().unwrap().push(step);
+            }
+            // The synthetic child contexts of a nested create.
             "nested" => {
-                let mut tx = begin(db).await?;
                 let child_field = |name| {
                     __nested_create_field(ctx, name, "input", Value::Object(Default::default()))
                 };
+                let nested = |child: &Context<'_>, parent| {
+                    __admit_generated_nested_create_request::<BindLine, Sqlite>(child, parent)
+                };
+                let parent = admit::<BindOrder>(ctx, Create)?.__admit_entity(ctx).await?;
                 let field = child_field("createBindLine");
                 let child = ctx.with_field(&field);
                 // Request admission under the child, entity admission under
                 // the root.
                 out.push(outcome(
-                    admit::<BindLine>(&child, Create, Operation)?
-                        .__admit_entity::<Sqlite>(ctx)
-                        .await
-                        .map(drop),
+                    nested(&child, &parent)?.__admit_entity(ctx).await.map(drop),
                 ));
-                let authority = admit::<BindLine>(&child, Create, Operation)?
-                    .__admit_entity::<Sqlite>(&child)
+                // A parent that is not a create.
+                let delete = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
+                out.push(outcome(nested(&child, &delete).map(drop)));
+                let authority = nested(&child, &parent)?
+                    .__admit_entity(&child)
                     .await?
                     .into_authority();
+                // A child row admitted on its own, outside the invocation.
+                let orphan = admit::<BindLine>(&child, Create)?
+                    .__admit_entity(&child)
+                    .await?
+                    .into_authority();
+                let mut tx = parent.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, lines, &child, &orphan, Before, Created, "c0").await);
                 // The child's authority under its parent's field context.
-                out.push(dispatch(&mut tx, lines, ctx, &authority, Before, Created).await);
+                out.push(dispatch(&mut tx, lines, ctx, &authority, Before, Created, "c1").await);
                 // The parent's authority under the child's.
-                let parent = admit::<BindOrder>(ctx, Create, Resolver)?
-                    .__admit_entity::<Sqlite>(ctx)
-                    .await?
-                    .into_authority();
-                out.push(dispatch(&mut tx, orders, &child, &parent, Before, Created).await);
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        orders,
+                        &child,
+                        parent.authority(),
+                        Before,
+                        Created,
+                        "p",
+                    )
+                    .await,
+                );
                 // A sibling child of another entity, under its own field.
                 let sibling_field = child_field("createBindOrder");
                 let sibling = ctx.with_field(&sibling_field);
-                out.push(dispatch(&mut tx, orders, &sibling, &authority, Before, Created).await);
-                out.push(dispatch(&mut tx, lines, &sibling, &authority, Before, Created).await);
+                out.push(
+                    dispatch(&mut tx, orders, &sibling, &authority, Before, Created, "c1").await,
+                );
+                out.push(
+                    dispatch(&mut tx, lines, &sibling, &authority, Before, Created, "c1").await,
+                );
                 // The write step rebuilds the child's context around the
                 // field the prepared row carries: the binding is the
-                // request's, not one context value's.
+                // invocation's, not one context value's.
                 let moved = field.clone();
                 let rebuilt = ctx.with_field(&moved);
-                out.push(dispatch(&mut tx, lines, &rebuilt, &authority, Before, Created).await);
-                out.push(dispatch(&mut tx, lines, &rebuilt, &authority, After, Created).await);
+                out.push(
+                    dispatch(&mut tx, lines, &rebuilt, &authority, Before, Created, "c1").await,
+                );
+                out.push(
+                    dispatch(&mut tx, lines, &rebuilt, &authority, After, Created, "c1").await,
+                );
                 // A second child row needs its own admission.
-                out.push(dispatch(&mut tx, lines, &rebuilt, &authority, Before, Created).await);
-                out.push(dispatch(&mut tx, lines, &rebuilt, &authority, After, Created).await);
+                out.push(
+                    dispatch(&mut tx, lines, &rebuilt, &authority, Before, Created, "c2").await,
+                );
+                out.push(
+                    dispatch(&mut tx, lines, &rebuilt, &authority, After, Created, "c2").await,
+                );
                 // The parent's own row, under its own field.
-                out.push(dispatch(&mut tx, orders, ctx, &parent, Before, Created).await);
-                tx.rollback().await.map_err(graphql_error_from_sqlx)?;
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        orders,
+                        ctx,
+                        parent.authority(),
+                        Before,
+                        Created,
+                        "p",
+                    )
+                    .await,
+                );
+                rollback(tx).await?;
             }
             other => panic!("unknown case {other}"),
         }
@@ -486,8 +698,8 @@ async fn fixture() -> Fixture {
     for sql in [
         "CREATE TABLE bind_orders (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE bind_lines (id TEXT PRIMARY KEY, order_id TEXT NOT NULL)",
-        "INSERT INTO bind_orders VALUES ('o1', 'first')",
-        "INSERT INTO bind_lines VALUES ('l1', 'o1'), ('l2', 'o1')",
+        "INSERT INTO bind_orders VALUES ('o1', 'first'), ('o2', 'second')",
+        "INSERT INTO bind_lines VALUES ('l1', 'o1'), ('l2', 'o1'), ('l3', 'o3')",
     ] {
         graphql_orm::sqlx::query(sql)
             .execute(db.pool())
@@ -513,6 +725,7 @@ impl Fixture {
     fn schema(&self) -> AppSchema {
         schema_builder(self.db.clone())
             .data(Stash::default())
+            .data(Repeats::default())
             .finish()
     }
 
@@ -597,8 +810,61 @@ async fn admission_inputs_come_from_the_entity_configuration() {
     assert!(fixture.hooks().is_empty());
 }
 
+/// Refuses every requirement it is asked to enforce and records its field.
+#[derive(Debug, Default)]
+struct RefusingAssurance(Mutex<Vec<String>>);
+impl AssuranceRequirementEvaluator for RefusingAssurance {
+    fn enforce(
+        &self,
+        check: &AssuranceCheck<'_>,
+        _: AssuranceActorClass,
+        _: &str,
+    ) -> async_graphql::Result<()> {
+        self.0.lock().unwrap().push(check.field_name().to_owned());
+        Err(async_graphql::Error::new("step up")
+            .extend_with(|_, extensions| extensions.set("code", "STEP_UP_REQUIRED")))
+    }
+}
+
 #[tokio::test]
-async fn authority_is_issued_only_after_target_admission() {
+async fn admission_enforces_the_operations_own_assurance_coordinate() {
+    // The delete root of orders requires assurance; the host's `probe` field
+    // and the create root of lines require none. A host resolver that asks
+    // for the delete's admission is held to the delete's requirement, not to
+    // its own field's.
+    let fixture = fixture().await;
+    let mut registry = OperationAssuranceRegistry::builder(
+        graphql_orm_operation_catalog(),
+        AssuranceSchemaConfig::legacy(),
+    );
+    registry
+        .require(
+            GraphqlOperationKind::Mutation,
+            "deleteBindOrder",
+            "order.assured",
+        )
+        .unwrap();
+    let evaluator = Arc::new(RefusingAssurance::default());
+    let schema = schema_builder(fixture.db.clone())
+        .data(AssuranceEnforcement::new(
+            Arc::new(registry.build().unwrap()),
+            evaluator.clone(),
+        ))
+        .finish();
+    let steps = fixture
+        .run(
+            &schema,
+            "mutation { probe(case: \"assurance\") }",
+            Some(operator(&ALL_SCOPES)),
+        )
+        .await
+        .remove(0);
+    assert_eq!(steps, ["error: step up", "ok"]);
+    assert_eq!(*evaluator.0.lock().unwrap(), ["deleteBindOrder"]);
+}
+
+#[tokio::test]
+async fn authority_is_issued_only_for_the_admitted_row_and_transaction() {
     let fixture = fixture().await;
     let steps = fixture.probe("target").await;
     assert_hooks(
@@ -607,11 +873,38 @@ async fn authority_is_issued_only_after_target_admission() {
         &[
             // After the unlocked read alone, and after a missing target.
             "refused", "refused",
-            // Locked and admitted: not an update; the delete's `Before`,
-            // once; its `After`, once.
-            "refused", "ok", "refused", "ok", "refused",
+            // Locked and admitted: not an update; not another row; the
+            // row's `Before`, once.
+            "refused", "refused", "ok", "refused",
+            // `After`: not another row; the row's, once.
+            "refused", "ok", "refused",
+            // A second target; a second transaction of the invocation.
+            "refused", "refused",
+            // A fresh transaction on the same handle; a detached authority.
+            "refused", "refused",
         ],
         2,
+    );
+}
+
+#[tokio::test]
+async fn an_upsert_authority_is_the_branch_its_target_admission_decided() {
+    let fixture = fixture().await;
+    let steps = fixture.probe("upsert").await;
+    assert_hooks(
+        &fixture,
+        &steps,
+        &[
+            // Before target admission.
+            "refused",
+            // No row: admitted; not an update; no `After` before `Before`;
+            // the create's two phases.
+            "ok", "refused", "refused", "ok", "ok",
+            // A row: admitted; not a create; not another row; its update.
+            "ok", "refused", "refused", "ok", // Decided once.
+            "refused",
+        ],
+        3,
     );
 }
 
@@ -623,7 +916,7 @@ async fn an_authority_is_refused_for_a_different_entity() {
 }
 
 #[tokio::test]
-async fn an_authority_is_refused_for_a_different_operation() {
+async fn an_authority_is_refused_for_a_different_operation_or_bulk_row() {
     let fixture = fixture().await;
     let steps = fixture.probe("operation").await;
     assert_hooks(
@@ -634,12 +927,15 @@ async fn an_authority_is_refused_for_a_different_operation() {
             "refused", "refused",
             // A bulk request at single-row entity admission, and the reverse.
             "refused", "refused",
-            // A bulk authority: unissued; no single-row or upsert target;
-            // still unissued.
-            "refused", "refused", "refused", "refused",
-            // Its own bulk admission. Issued by its own targets: not an
-            // update; every row's `Before`.
-            "ok", "refused", "ok", "ok",
+            // A bulk authority: unissued; no single-row or upsert target.
+            "refused", "refused", "refused",
+            // Its own bulk admission; still unissued after an empty result.
+            "ok", "refused",
+            // Issued for two rows: not an update; not a row outside them;
+            // each row's `Before`, once.
+            "refused", "refused", "ok", "ok", "refused",
+            // Issued once; the set does not grow.
+            "refused", "refused", "refused",
         ],
         2,
     );
@@ -653,11 +949,11 @@ async fn an_authority_is_refused_on_a_different_database() {
         &fixture,
         &steps,
         &[
-            // Dispatch and single-row target admission on another handle's
+            // Dispatch and single-row target admission on a clone's
             // transaction.
             "refused", "refused",
-            // Bulk targets on the request's handle with another handle's
-            // transaction, and on the other handle; bulk admission there.
+            // Bulk targets on the request's handle with the clone's
+            // transaction, and on the clone; bulk admission there.
             "refused", "refused", "refused", // The request's own handle.
             "ok",
         ],
@@ -666,9 +962,13 @@ async fn an_authority_is_refused_on_a_different_database() {
 }
 
 #[tokio::test]
-async fn an_authority_is_refused_in_a_different_request() {
+async fn an_authority_is_refused_in_a_different_request_or_invocation() {
     let fixture = fixture().await;
-    let schema = fixture.schema();
+    let repeats = Repeats::default();
+    let schema = schema_builder(fixture.db.clone())
+        .data(Stash::default())
+        .data(repeats.clone())
+        .finish();
     let subject = || Some(operator(&ALL_SCOPES));
     // Another request on the same schema, by the same subject.
     fixture
@@ -689,10 +989,25 @@ async fn an_authority_is_refused_in_a_different_request() {
         .await
         .remove(1);
     assert_hooks(&fixture, &steps, &["refused"], 0);
+    // The same selection twice: one response key, two invocations.
+    let response = schema
+        .execute(
+            async_graphql::Request::new(
+                "mutation { probe(case: \"repeat\") probe(case: \"repeat\") }",
+            )
+            .data(operator(&ALL_SCOPES)),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        *repeats.0.lock().unwrap(),
+        ["stashed", "first invocation's: refused; own: ok"]
+    );
+    assert_eq!(fixture.hooks().len(), 2);
 }
 
 #[tokio::test]
-async fn nested_child_contexts_share_one_binding_and_nothing_more() {
+async fn nested_child_contexts_share_one_invocation_and_nothing_more() {
     let fixture = fixture().await;
     let steps = fixture.probe("nested").await;
     assert_hooks(
@@ -700,7 +1015,8 @@ async fn nested_child_contexts_share_one_binding_and_nothing_more() {
         &steps,
         &[
             // Request admission under the child, entity admission under the
-            // root.
+            // root; a parent that is not a create.
+            "refused", "refused", // A child admitted outside the invocation.
             "refused",
             // The child's authority under the parent's field; the parent's
             // under the child's.

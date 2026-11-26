@@ -233,39 +233,9 @@ pub(crate) fn generate(
             .ok_or_else(|| error("missing generated outcome boundary"))?
             .clone();
         // The GraphQL Context deliberately retains the caller's root selection.
-        // Internal writes must classify their own generated operation instead.
-        // The runtime's request admission enforces the assurance it is told
-        // to: name this write's own operation instead of the resolved field.
-        struct ExplicitAssurance(bool);
-        impl VisitMut for ExplicitAssurance {
-            fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
-                if let syn::Expr::Path(path) = expr
-                    && path.path.segments.iter().map(|s| s.ident.to_string()).eq([
-                        "graphql_orm",
-                        "graphql",
-                        "orm",
-                        "GeneratedWriteAssurance",
-                        "Resolver",
-                    ])
-                {
-                    // The runtime reads the operation's coordinate from
-                    // the entity's generated write configuration.
-                    *expr = syn::parse_quote! {
-                        ::graphql_orm::graphql::orm::GeneratedWriteAssurance::Operation
-                    };
-                    self.0 = true;
-                    return;
-                }
-                syn::visit_mut::visit_expr_mut(self, expr);
-            }
-        }
-        let mut explicit_assurance = ExplicitAssurance(false);
-        explicit_assurance.visit_block_mut(&mut body);
-        // A body without the request admission would keep the caller's
-        // requirement: refuse to emit it.
-        if !explicit_assurance.0 {
-            return Err(error("missing generated write admission"));
-        }
+        // The runtime's request admission classifies this write by its own
+        // generated operation, which it reads from the entity's write
+        // configuration, never by the resolved field.
         // Both paths share the same generated checks, transforms and hooks. Only
         // transaction ownership and postcommit dispatch belong to the caller.
         let transaction = transaction_range(&body, input.span())?;

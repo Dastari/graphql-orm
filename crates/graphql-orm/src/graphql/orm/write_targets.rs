@@ -155,8 +155,9 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 /// This is the target admission of a generated bulk write (`write_pipeline`).
 /// A GraphQL write presents its request with the authority of its bulk
 /// admission: one that was not earned for `T` under that request on `db`, the
-/// transaction's `Database`, is refused, and the authority is issued once the
-/// targets are admitted.
+/// transaction's `Database`, is refused, and the authority is issued for
+/// exactly the admitted targets in this transaction. No target issues
+/// nothing.
 #[doc(hidden)]
 pub async fn bulk_write_targets<T, B>(
     db: &Database<B>,
@@ -167,17 +168,27 @@ pub async fn bulk_write_targets<T, B>(
 ) -> crate::Result<Vec<T>>
 where
     B: WriteBackend,
-    T: Entity + DatabaseEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    T: Entity
+        + DatabaseEntity
+        + super::GeneratedWriteConfig
+        + FromSqlRow<B>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     if let Some((ctx, authority)) = request {
-        authority
-            .__require_bulk_targets::<T, B>(ctx, db, tx.__base_database())
-            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        authority.__require_bulk_targets::<T, B>(ctx, db, tx.__base_database())?;
     }
     let targets =
         admit_bulk_write_targets(db, request.map(|(ctx, _)| ctx), tx, query, key_value).await?;
     if let Some((_, authority)) = request {
-        authority.__issue_bulk_targets();
+        authority.__issue_bulk_targets(
+            tx.__identity(),
+            targets
+                .iter()
+                .map(super::GeneratedWriteConfig::__gom_write_key),
+        );
     }
     Ok(targets)
 }

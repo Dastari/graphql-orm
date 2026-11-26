@@ -2751,11 +2751,6 @@ fn generate_graphql_operations_unfiltered(
     } else {
         quote! { current_entity.#pk_field.to_string() }
     };
-    let pk_id_for_id = if pk_is_bytes {
-        quote! { ::graphql_orm::graphql::orm::binary_key_id(&id) }
-    } else {
-        quote! { id.to_string() }
-    };
 
     let mut propagated_relations: Vec<PropagatedRelation> = Vec::new();
     for field in fields {
@@ -3163,6 +3158,11 @@ fn generate_graphql_operations_unfiltered(
                     match kind {
                         #(#operations)*
                     }
+                }
+
+                fn __gom_write_key(&self) -> ::std::string::String {
+                    let entity = self;
+                    #pk_id_for_entity
                 }
             }
         }
@@ -9069,7 +9069,8 @@ fn generate_graphql_operations_unfiltered(
             update_assignments_graphql_call: &update_assignments_graphql_call,
             updated_at_assignment: &graphql_updated_at,
             version_assignment: &graphql_version_assignment,
-            pk_id_for_id: &pk_id_for_id,
+            // The `Before` event names the locked row, as `After` does.
+            pk_id_for_current: &pk_id_for_current,
             sql_table_name: &sql_table_name,
             graphql_post_image_check: &graphql_post_image_check,
             pk_id_for_entity: &pk_id_for_entity,
