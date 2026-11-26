@@ -1074,6 +1074,16 @@ fn resolve_upsert_config(
     }
 }
 
+fn is_unsigned_integer_type(field_type: &syn::Type) -> bool {
+    let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
+    type_path_last_ident(scalar_type).is_some_and(|ident| {
+        matches!(
+            ident.to_string().as_str(),
+            "u8" | "u16" | "u32" | "u64" | "usize"
+        )
+    })
+}
+
 /// Where an entity takes part in a generated nested create (#893): its own
 /// `nested_create_keys`, or a relation declaring `nested_create`. Read from
 /// the raw attribute tokens, so the combination with a principal-bound key is
@@ -1291,20 +1301,25 @@ fn resolve_upsert_bound_keys(
     Ok(resolved)
 }
 
+fn graphql_unsigned_checks(checks: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+    if checks.is_empty() {
+        return quote! {};
+    }
+    quote! {
+        (|| -> ::graphql_orm::Result<()> {
+            #(#checks)*
+            ::std::result::Result::Ok(())
+        })().map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+    }
+}
+
 fn integer_bind_tokens(
     backend: BackendKind,
     field_type: &syn::Type,
     meta: &FieldMetadata,
     value: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let scalar_type = option_inner_type(field_type).unwrap_or(field_type);
-    let unsigned = type_path_last_ident(scalar_type).is_some_and(|ident| {
-        matches!(
-            ident.to_string().as_str(),
-            "u8" | "u16" | "u32" | "u64" | "usize"
-        )
-    });
-    if backend == BackendKind::Mssql && unsigned {
+    if backend == BackendKind::Mssql && is_unsigned_integer_type(field_type) {
         let sql_type = meta.mssql_type.as_deref().unwrap_or("");
         quote! { ::graphql_orm::graphql::orm::SqlValue::mssql_unsigned((#value) as u64, #sql_type) }
     } else {
@@ -3391,6 +3406,8 @@ fn generate_graphql_operations_unfiltered(
     // Field write decisions of the repository insert and update paths. A
     // `RepositoryEntity` asks them through its `Entity` hook instead.
     let mut repository_create_field_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut update_unsigned_checks = Vec::new();
+    let mut upsert_unsigned_checks = Vec::new();
     let mut repository_update_field_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     // Which key-less optional fields the GraphQL client supplied, recorded
     // before an input transform or hook can change the input. A GraphQL write
@@ -3468,9 +3485,32 @@ fn generate_graphql_operations_unfiltered(
             && !is_timestamp
             && !meta.write
             && meta.default.is_some();
+        let validate_unsigned = (backend == BackendKind::Mssql
+            && !is_json_like_field
+            && meta.decimal.is_none()
+            && is_unsigned_integer_type(field_type))
+        .then(|| {
+            let sql_type = meta.mssql_type.as_deref().unwrap_or("");
+            quote! { ::graphql_orm::graphql::orm::SqlValue::validate_mssql_unsigned(value as u64, #sql_type)?; }
+        });
         let input_field_start = graphql_create_input_fields.len();
         let conversion_start = create_input_from_graphql_fields.len();
         if include_in_create {
+            if let Some(validate) = &validate_unsigned {
+                let check = if is_option_type(field_type) {
+                    quote! {
+                        if let ::std::option::Option::Some(value) = input.#field_name {
+                            #validate
+                        }
+                    }
+                } else {
+                    quote! {
+                        let value = input.#field_name;
+                        #validate
+                    }
+                };
+                upsert_unsigned_checks.push(check);
+            }
             let graphql_include_in_create = !meta.skip_input || meta.input_only;
             if supports_nested_create
                 && graphql_include_in_create
@@ -4013,6 +4053,18 @@ fn generate_graphql_operations_unfiltered(
             let graphql_check_index = update_field_checks_graphql.len();
             let repo_check_index = update_field_checks_repo.len();
             let is_already_optional = is_option_type(field_type);
+            if let Some(validate) = &validate_unsigned {
+                let supplied = if is_already_optional {
+                    quote! { ::std::option::Option::Some(::std::option::Option::Some(value)) }
+                } else {
+                    quote! { ::std::option::Option::Some(value) }
+                };
+                update_unsigned_checks.push(quote! {
+                    if let #supplied = input.#field_name {
+                        #validate
+                    }
+                });
+            }
             let update_type = quote! { ::std::option::Option<#field_type> };
             let graphql_update_type = if let Some(inner_type) = option_inner_type(field_type) {
                 if is_json_like_field {
@@ -5524,6 +5576,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx.require_state_machine("upsert")?;
                 let db = hook_ctx.__policy();
                 #composite_upsert_policy_guard
+                #(#upsert_unsigned_checks)*
                 let current_entity = Self::__gom_fetch_by_upsert_on(hook_ctx, &input).await?;
                 if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
                     db.ensure_writable_row(
@@ -5788,6 +5841,7 @@ fn generate_graphql_operations_unfiltered(
         struct_name,
         create_input: &create_input,
         create_client_supplied: &create_client_supplied,
+        unsigned_checks: &graphql_unsigned_checks(&upsert_unsigned_checks),
         upsert_policy_checks_graphql: &upsert_policy_checks_graphql,
         created_pk_init: &created_pk_init,
         pk_id_for_entity: &pk_id_for_entity,
@@ -6036,6 +6090,7 @@ fn generate_graphql_operations_unfiltered(
                     hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, OrmBackend, SqlDialect, SqlValue};
 
+                    #(#update_unsigned_checks)*
                     #cas_begin_savepoint
                     // Any failure after the savepoint opens undoes the swap and closes it.
                     let __gom_cas: ::graphql_orm::Result<::graphql_orm::graphql::orm::ConditionalUpdateOutcome<Self>> = async {
@@ -7301,6 +7356,7 @@ fn generate_graphql_operations_unfiltered(
                     use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
                     let db = hook_ctx.__policy();
                     Self::__gom_require_repository_write_policy(&db)?;
+                    #(#update_unsigned_checks)*
                     let ::std::option::Option::Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
                         return ::std::result::Result::Ok(::std::option::Option::None);
                     };
@@ -7462,6 +7518,7 @@ fn generate_graphql_operations_unfiltered(
                     if where_input.is_empty() {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                     }
+                    #(#update_unsigned_checks)*
                     let query = EntityQuery::<Self, #backend_marker>::new()
                         .filter_with_entity_matching(&where_input);
                     let rows = hook_ctx
@@ -7573,6 +7630,7 @@ fn generate_graphql_operations_unfiltered(
                     if expected.requires_in_memory_filtering(<#backend_marker as OrmBackend>::DIALECT) {
                         return ::std::result::Result::Err(Self::__gom_runtime_error("conditional update predicate must be fully database-renderable"));
                     }
+                    #(#update_unsigned_checks)*
                     let ::std::option::Option::Some(current_entity) = Self::__gom_fetch_by_key_on(hook_ctx, key).await? else {
                         return ::std::result::Result::Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::NotFound);
                     };
@@ -7935,6 +7993,7 @@ fn generate_graphql_operations_unfiltered(
                 if where_input.is_empty() {
                     return ::std::result::Result::Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
                 }
+                #(#update_unsigned_checks)*
                 let query = EntityQuery::<Self, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input);
                 let rows = hook_ctx
@@ -8871,6 +8930,7 @@ fn generate_graphql_operations_unfiltered(
             entity_name_lit: &entity_name_lit,
             struct_name,
             update_client_supplied: &update_client_supplied,
+            unsigned_checks: &graphql_unsigned_checks(&update_unsigned_checks),
             sql_dialect: &sql_dialect,
             pk_bind_value: &pk_bind_value,
             update_policy_checks: &update_policy_checks,
@@ -9446,6 +9506,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx.database().ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
+                #(#update_unsigned_checks)*
                 let current_entity = Self::__gom_fetch_by_id_on(hook_ctx, id).await?;
                 let ::std::option::Option::Some(current_entity) = current_entity else {
                     return ::std::result::Result::Ok(::std::option::Option::None);
@@ -9573,6 +9634,8 @@ fn generate_graphql_operations_unfiltered(
                 if where_input.is_empty() {
                     return ::std::result::Result::Err(Self::__gom_runtime_error("Where filter is required for bulk update and must not be empty"));
                 }
+
+                #(#update_unsigned_checks)*
 
                 let matched_entities = EntityQuery::<Self, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input)
@@ -10011,6 +10074,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                #(#update_unsigned_checks)*
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
@@ -10170,6 +10234,8 @@ fn generate_graphql_operations_unfiltered(
                     access_surface,
                 ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
+                #(#update_unsigned_checks)*
+
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,

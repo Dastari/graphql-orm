@@ -14,6 +14,21 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.227.0
+
+- **Fixed (#860).** Removed the 0.215.0 ASCII VARCHAR conversion because it
+  could match different rows under legacy `SQL_` collations. String filters
+  bind as NVARCHAR. Windows CP1252 and UTF-8 VARCHAR indexes sought at 2
+  logical reads in the fixture. With conversion proof they used 10 reads.
+  The `SQL_` fixture index scanned at 31 reads with NVARCHAR, compared with
+  the 2-read VARCHAR seek in 0.215.0. **Action needed** for hosts that relied
+  on the `SQL_` seek. Move the column to a Windows collation or index a
+  persisted computed Unicode column for the affected comparison.
+  [Migration](MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
+- **Fixed (#860).** Generated SQL Server updates and upserts validate unsigned
+  inputs before selecting targets, including updates that would affect zero
+  rows. Opt-in native integer widths and BIGINT fallback remain.
+
 ## Unreleased - ORM/macros 0.226.0
 
 - **Added (#353).** Generated creates can opt into typed child lists on

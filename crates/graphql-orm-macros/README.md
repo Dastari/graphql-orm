@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.227.0 validates SQL Server unsigned inputs before selecting targets
+for updates and upserts, including updates that would affect zero rows.
+See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation).
+
 Version 0.225.0 aligns with the ORM's
 [partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
 
