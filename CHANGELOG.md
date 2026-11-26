@@ -14,10 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.229.0
+## Unreleased - ORM/macros 0.230.0
 
 - Generated list and aggregate execution moved to shared runtime helpers; no
   measurable compile-cost change (groundwork for #677/#358).
+
+## Unreleased - ORM/macros 0.229.0
+
+- **No action** — Sortable portable Decimal fields are available in generated
+  keyset order inputs. Continuation compares their exact stored values on
+  SQLite, PostgreSQL, and SQL Server (#920).
+  [Migration](MIGRATION.md#02280-to-02290-decimal-keyset-ordering)
 
 ## Unreleased - ORM/macros 0.228.0
 

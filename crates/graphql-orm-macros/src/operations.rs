@@ -21,12 +21,24 @@ use crate::naming::{
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
-pub(crate) fn runtime_keyset_value(ty: &syn::Type) -> Option<proc_macro2::TokenStream> {
+pub(crate) fn runtime_keyset_value(
+    ty: &syn::Type,
+    meta: &FieldMetadata,
+) -> Option<proc_macro2::TokenStream> {
     let (inner, optional) = option_inner_type(ty)
         .map(|inner| (inner, true))
         .unwrap_or((ty, false));
     let type_name = quote! { #inner }.to_string().replace(' ', "");
-    let value = if is_string_type(inner) {
+    let value = if meta.decimal.is_some() && !meta.mssql_money {
+        let definition = decimal_definition_tokens(meta);
+        quote! {
+            ::graphql_orm::graphql::pagination::KeysetValue::String(
+                ::graphql_orm::graphql::orm::canonical_runtime_decimal(
+                    ::graphql_orm::graphql::orm::DecimalValue::new(*value, #definition).ok()?
+                )
+            )
+        }
+    } else if is_string_type(inner) {
         quote! { ::graphql_orm::graphql::pagination::KeysetValue::String(value.clone()) }
     } else if is_byte_vec_type(inner) {
         quote! { ::graphql_orm::graphql::pagination::KeysetValue::Bytes(value.clone()) }

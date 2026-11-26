@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|all) ;;
+  unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -56,6 +56,7 @@ run_nested_create() {
 
 run_sqlite() {
   run_bounded_set_delete sqlite
+  run_keyset_decimals sqlite
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test read_snapshot_transaction --test computed_field_invalidation -- --include-ignored --test-threads=1
   run_identifier_quoting sqlite
@@ -84,11 +85,17 @@ run_sqlite() {
     --no-default-features --features sqlite --locked
 }
 
+run_keyset_decimals() {
+  cargo test -p graphql-orm --locked --no-default-features --features "$1" \
+    --test keyset_decimals -- --include-ignored --test-threads=1
+}
+
 run_postgres() {
   run_nested_create postgres
   run_bounded_set_delete postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test search_filter_binding -- --test-threads=1
+  run_keyset_decimals postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --lib postgres_rls_search_planner_chooses_the_join -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
@@ -207,6 +214,7 @@ run_mssql() {
   run_bounded_set_delete mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test search_filter_binding -- --test-threads=1
+  run_keyset_decimals mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
     --test read_snapshot_transaction -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
@@ -328,6 +336,11 @@ case "${lane}" in
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
         --test authorized_page_context_binding -- --include-ignored --test-threads=1
+    done
+    ;;
+  keyset-decimals)
+    for backend in sqlite postgres mssql; do
+      run_keyset_decimals "$backend"
     done
     ;;
   callback-errors)

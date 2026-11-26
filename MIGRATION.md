@@ -10,11 +10,25 @@ supersedes: []
 
 # Migration Guide
 
-## 0.228.0 to 0.229.0: Shared generated read execution
+## 0.229.0 to 0.230.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate
 resolvers use shared execution helpers. Their schema, catalogue and
 authorization contracts are unchanged.
+
+## 0.228.0 to 0.229.0: Decimal keyset ordering
+
+**No action.** Generated keyset `OrderBy` inputs now include sortable,
+readable portable Decimal fields (#920). The SDL diff consists of those
+additional input members. The corresponding input shapes and catalogue
+fingerprints that include them change. Existing cursor order and filter
+bindings carry through the upgrade.
+Hand-written `AuthorizedKeysetEntity` implementations whose configured keyset
+order contains a non-MONEY Decimal column must encode that value as canonical
+Decimal text at the declared scale; the former scaled-integer encoding now
+returns `CURSOR_INVALID`. `KeysetOrderByInput::ordered` now accepts sortable
+Decimal fields instead of refusing them.
+[Decimal keyset ordering](docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering)
 
 ## 0.227.0 to 0.228.0: Transient input validation errors
 

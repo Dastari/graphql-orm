@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.229.0 splits query emission by operation family and delegates offset
+Version 0.230.0 splits query emission by operation family and delegates offset
 list and aggregate execution to the ORM runtime.
-See the [migration guide](../../MIGRATION.md#02280-to-02290-shared-generated-read-execution).
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
 
 Version 0.228.0 aligns with the ORM's
 [transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
@@ -777,6 +777,9 @@ See the [migration guide](../../MIGRATION.md#0641-to-0650-scalar-policies-with-g
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).
+
+Derived keyset order inputs include sortable portable Decimal fields. See
+[Decimal keyset ordering](../../docs/reference/graphql-orm/pagination-migration.md#decimal-keyset-ordering).
 
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current
