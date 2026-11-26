@@ -30,6 +30,7 @@ mod node_lookup;
 mod outcome;
 mod persisted;
 mod server;
+mod subgraph_errors;
 mod subscription_continuity;
 mod subscriptions;
 
@@ -40,6 +41,7 @@ pub use config::{
 };
 pub use file_config::RouterFileConfig;
 pub use server::{ActiveGraphIdentity, PreparedRouter, run, run_with_listener};
+pub use subgraph_errors::{SubgraphErrorLogConfig, SubgraphErrorLogMessage, SubgraphErrorMasking};
 
 use thiserror::Error;
 

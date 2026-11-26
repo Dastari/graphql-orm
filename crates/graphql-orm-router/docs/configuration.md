@@ -71,6 +71,9 @@ an unbounded value.
 | `anonymousDevelopment` | `false`; mutually exclusive with authentication and unsuitable for production. |
 | `introspection` | `false`. `true` enables `__schema` and `__type`; with authentication configured they also need a valid bearer. The depth limit applies either way. |
 | `refusalOutcome` | `false`. `true` adds `extensions.outcome: "refused"` to each error of an operation refused before any subgraph request. See [Refusal outcome](#refusal-outcome). |
+| `maskSubgraphErrors` | `all`. See [Subgraph errors](#subgraph-errors). |
+| `subgraphErrorCodeAllowlist` | Empty. Used with `maskSubgraphErrors: "allowlist-by-code"`. |
+| `subgraphErrorLogging` | Truncated messages and 20 warning events per second per router instance. |
 | `authentication` | Required unless anonymous development is explicitly enabled. |
 | `scopeMatcher` | Omitted means exact-string matching. `kind: "hierarchical"` requires the `auth-agql` feature. |
 | `subgraphs` | At least one static source is required. |
@@ -141,9 +144,59 @@ Never marked:
   after a subscription started;
 - byte-route responses, which are not GraphQL operations.
 
-The router never replaces an `outcome` that a subgraph sent, so a service's
-`failed`, `committed` or `unknown` reaches the client unchanged. Read an
-absent `outcome` as unknown.
+With default [subgraph error masking](#subgraph-errors), an `outcome` that a
+subgraph sent reaches the client unchanged. The opt-in masking policies retain
+only `code` in downstream error extensions. Read an absent `outcome` as unknown.
+
+## Subgraph errors
+
+The client-facing policy applies to GraphQL errors returned by downstream
+fetches for queries and mutations over HTTP or the WebSocket gateway.
+Streaming subscription events use Hive's existing behavior because the
+pinned engine omits the subgraph execution hooks for those streams.
+
+| `maskSubgraphErrors` | Client response |
+| --- | --- |
+| `all` | Default. Uses the existing response format and masks downstream messages as `Unexpected error`. |
+| `allowlist-by-code` | Passes through original messages only for exact, case-sensitive codes in `subgraphErrorCodeAllowlist`. Missing or unmatched codes stay masked. |
+| `none` | Passes through all original downstream GraphQL error messages. Use only in trusted deployments. |
+
+Both opt-in modes retain the existing response `path` and `extensions.code`
+and drop other error extensions. A downstream message can disclose internal
+details or sensitive data even for a familiar error code. Review every code
+before adding it to the allowlist.
+
+```json
+{
+  "maskSubgraphErrors": "allowlist-by-code",
+  "subgraphErrorCodeAllowlist": ["INVALID_INPUT", "FORBIDDEN"],
+  "subgraphErrorLogging": {
+    "message": "redacted",
+    "maxEventsPerSecond": 20
+  }
+}
+```
+
+Logging is independent of what the client sees. The
+`graphql_orm_router::subgraph_errors` target emits a warning per downstream
+GraphQL error, subject to the shared cap. Each event includes the router's
+correlation ID, the supplied `operationName` up to 128 characters when
+present, the subgraph name, the JSON-encoded downstream response path before
+federated path rewriting, the supplied `extensions.code` when present, and
+the message under `subgraph_error_message`. The router does not include
+request variables, other request headers, bearer tokens, or response data
+as event fields. A subgraph can embed sensitive information in its error
+message.
+
+Set `subgraphErrorLogging.message` to `full`, `truncated` (default, the first
+256 Unicode characters), or `redacted` (the fixed string `[redacted]`). Use
+`redacted` where downstream messages may contain sensitive details.
+`maxEventsPerSecond` is a positive integer, defaults to 20, and applies
+across all downstream fetches on one router instance. Periodic summary
+events report the number of error events dropped by the limiter.
+
+Library hosts can use `RouterConfig::with_subgraph_error_masking` and
+`RouterConfig::with_subgraph_error_logging`.
 
 ## Outbound transport
 

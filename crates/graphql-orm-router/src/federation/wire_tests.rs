@@ -73,6 +73,7 @@ const REFUSAL_OUTCOME_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REFUSAL_OUTCOME";
 const AUTHORITY_CONTROL_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_AUTHORITY_CONTROL";
 /// Each fresh `role-events` expansion stays valid this long.
 const ROLE_AUTHORITY_LIFETIME: Duration = Duration::from_millis(300);
+const SUBGRAPH_ERROR_SETTINGS_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_SUBGRAPH_ERROR_SETTINGS";
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -314,6 +315,25 @@ fn router_child_entrypoint() {
                     config = config
                         .with_refusal_outcome(true)
                         .with_request_limits(RequestLimits::new().with_max_fields(6));
+                }
+                if let Ok(settings) = env::var(SUBGRAPH_ERROR_SETTINGS_ENV) {
+                    // Only import the error settings. The fixture owns its listener,
+                    // authentication, and subgraph endpoints.
+                    let mut settings: Value = serde_json::from_str(&settings).unwrap();
+                    settings["listener"] = json!("127.0.0.1:0");
+                    settings["anonymousDevelopment"] = json!(true);
+                    settings["subgraphs"] = json!([{
+                        "name": "products",
+                        "graphqlUrl": env::var(PRODUCTS_ENDPOINT_ENV).unwrap(),
+                        "sdlUrl": env::var(PRODUCTS_SDL_ENDPOINT_ENV).unwrap()
+                    }]);
+                    let parsed = crate::RouterFileConfig::from_json(&settings.to_string())
+                        .unwrap()
+                        .into_router_config()
+                        .unwrap();
+                    config = config
+                        .with_subgraph_error_masking(parsed.subgraph_error_masking)
+                        .with_subgraph_error_logging(parsed.subgraph_error_logging);
                 }
                 if let Ok(listener) = env::var(PROMETHEUS_LISTENER_ENV) {
                     config = config.with_telemetry(
@@ -1665,6 +1685,193 @@ fn hive_http_app_preserves_federation_and_replacement_invariants() {
     );
 
     router.stop();
+}
+
+fn with_subgraph_error_router(
+    settings: Option<&str>,
+    test: impl FnOnce(&TestRouter, &std::sync::mpsc::Receiver<Value>),
+) {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(
+        r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Query { items(filter: String): ItemConnection!, product(id: ID!): Product }
+        type ItemConnection { total: Int! }
+        type Product @key(fields: "id") { id: ID! }
+    "#,
+    );
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let env: Vec<_> = settings
+        .map(|settings| (SUBGRAPH_ERROR_SETTINGS_ENV, settings))
+        .into_iter()
+        .collect();
+    let (mut router, logs) = TestRouter::spawn_static_with_logs(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        &env,
+    );
+    router.wait_until_ready();
+    test(&router, &logs);
+    router.stop();
+}
+
+fn two_alias_response(router: &TestRouter, operation_name: &str, bad_filter: &str) -> HttpResponse {
+    let body = serde_json::to_vec(&json!({
+        "query": format!(
+            r#"query {operation_name}($filter: String) {{ a: items(filter: $filter) {{ total }} b: items(filter: "{bad_filter}") {{ total }} }}"#,
+        ),
+        "operationName": operation_name,
+        "variables": {"filter": "private-variable"}
+    }))
+    .unwrap();
+    let response = raw_http(
+        router.address,
+        "POST",
+        "/api/graphql",
+        &[
+            ("x-request-id", "test-request-id"),
+            ("x-approved", "private-header"),
+            ("x-debug-unmask", "true"),
+        ],
+        Some(&body),
+    )
+    .unwrap();
+    assert_eq!(response.status, 200);
+    response
+}
+
+fn original_items_error() -> String {
+    format!("Invalid item filter {}", "é".repeat(300))
+}
+
+fn assert_subgraph_error_log(
+    event: &Value,
+    operation_name: &str,
+    code: Option<&str>,
+    message: &str,
+) {
+    assert_eq!(event["message"], "downstream GraphQL error");
+    assert_eq!(event["graphql_request_id"], "test-request-id");
+    assert_eq!(event["operation_name"], operation_name);
+    assert_eq!(event["subgraph"], "products");
+    assert_eq!(event["response_path"], r#"["b"]"#);
+    assert_eq!(event["extensions.code"].as_str(), code);
+    assert_eq!(event["subgraph_error_message"], message);
+    let serialized = event.to_string();
+    for private in [
+        "private-variable",
+        "private-header",
+        "123456789",
+        "private-extension",
+    ] {
+        assert!(!serialized.contains(private), "{event}");
+    }
+}
+
+#[test]
+fn subgraph_errors_two_alias_default() {
+    with_subgraph_error_router(None, |router, logs| {
+        let response = two_alias_response(router, "ListItems", "bad");
+        assert_eq!(
+            std::str::from_utf8(&response.body).unwrap(),
+            r#"{"data":null,"errors":[{"message":"Unexpected error","path":["b"],"extensions":{"code":"INVALID_INPUT","service":"products"}}]}"#,
+        );
+        let event = logs
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("downstream error event");
+        let truncated: String = original_items_error().chars().take(256).collect();
+        assert_subgraph_error_log(&event, "ListItems", Some("INVALID_INPUT"), &truncated);
+        assert!(logs.try_recv().is_err());
+    });
+}
+
+#[test]
+fn subgraph_errors_unmask_messages_and_log_full_text() {
+    with_subgraph_error_router(
+        Some(r#"{"maskSubgraphErrors":"none","subgraphErrorLogging":{"message":"full"}}"#),
+        |router, logs| {
+            let name = "ListItems".repeat(20);
+            let response = two_alias_response(router, &name, "internal");
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            let message = original_items_error();
+            assert_eq!(
+                response,
+                json!({
+                    "data": null,
+                    "errors": [{
+                        "message": message,
+                        "path": ["b"],
+                        "extensions": {"code": "INTERNAL_ERROR"}
+                    }]
+                })
+            );
+            let event = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_subgraph_error_log(&event, &name[..128], Some("INTERNAL_ERROR"), &message);
+        },
+    );
+}
+
+#[test]
+fn subgraph_errors_allowlist_matches_only_original_codes_and_redacts_logs() {
+    with_subgraph_error_router(
+        Some(
+            r#"{
+            "maskSubgraphErrors":"allowlist-by-code",
+            "subgraphErrorCodeAllowlist":["INVALID_INPUT","FORBIDDEN","DOWNSTREAM_SERVICE_ERROR"],
+            "subgraphErrorLogging":{"message":"redacted"}
+        }"#,
+        ),
+        |router, logs| {
+            let original = original_items_error();
+            for (filter, code, shown) in [
+                ("bad", Some("INVALID_INPUT"), original.as_str()),
+                ("forbidden", Some("FORBIDDEN"), original.as_str()),
+                ("internal", Some("INTERNAL_ERROR"), "Unexpected error"),
+                ("lowercase", Some("invalid_input"), "Unexpected error"),
+                ("no-code", None, "Unexpected error"),
+            ] {
+                let response = two_alias_response(router, "ListItems", filter);
+                let response: Value = serde_json::from_slice(&response.body).unwrap();
+                assert_eq!(
+                    response,
+                    json!({
+                        "data": null,
+                        "errors": [{
+                            "message": shown,
+                            "path": ["b"],
+                            "extensions": {"code": code.unwrap_or("DOWNSTREAM_SERVICE_ERROR")}
+                        }]
+                    })
+                );
+                let event = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+                assert_subgraph_error_log(&event, "ListItems", code, "[redacted]");
+            }
+        },
+    );
+}
+
+#[test]
+fn subgraph_errors_report_drops_without_a_follow_up_request() {
+    with_subgraph_error_router(
+        Some(r#"{"subgraphErrorLogging":{"maxEventsPerSecond":1}}"#),
+        |router, logs| {
+            let response = two_alias_response(router, "ListItems", "burst");
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(response["errors"].as_array().unwrap().len(), 3);
+            let first = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_eq!(first["message"], "downstream GraphQL error");
+            let summary = logs.recv_timeout(TEST_TIMEOUT).unwrap();
+            assert_eq!(
+                summary["message"],
+                "downstream GraphQL error logs rate limited"
+            );
+            assert_eq!(summary["dropped"], 2);
+            assert!(logs.try_recv().is_err());
+        },
+    );
 }
 
 #[test]
@@ -3547,13 +3754,18 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let mut router = TestRouter::spawn_authenticated_subscriptions(
+    let mut router = TestRouter::spawn_authenticated_mode_with_env(
+        "auth-subscriptions",
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
         reviews_sdl.endpoint(),
         products_protocol.endpoint(),
         reviews_protocol.endpoint(),
+        &[(
+            SUBGRAPH_ERROR_SETTINGS_ENV,
+            r#"{"maskSubgraphErrors":"none"}"#,
+        )],
     );
     router.wait_until_ready();
 
@@ -3705,6 +3917,20 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         "rename-once",
         "a one-shot mutation must complete without closing or retiring its sibling subscription"
     );
+    failing.subscribe(
+        "downstream-graphql-error",
+        r#"query ErrorExample { product(id: "failure") { id } }"#,
+    );
+    let error = failing.wait_for_operation_message("downstream-graphql-error", "next");
+    assert_eq!(
+        error["payload"]["errors"][0],
+        json!({
+            "message": "test-owned downstream failure",
+            "path": ["product"],
+            "extensions": {"code": "SUBGRAPH_FAILURE"}
+        })
+    );
+    failing.wait_for_operation_message("downstream-graphql-error", "complete");
     failing.subscribe(
         "failing-events",
         "subscription { productChanged(id: \"failure\") { id } }",
@@ -5103,7 +5329,15 @@ struct TestRouter {
 }
 
 impl TestRouter {
-    fn from_child(mut child: Child, has_admin: bool) -> (Self, Option<SocketAddr>) {
+    fn from_child(child: Child, has_admin: bool) -> (Self, Option<SocketAddr>) {
+        Self::from_child_with_logs(child, has_admin, None)
+    }
+
+    fn from_child_with_logs(
+        mut child: Child,
+        has_admin: bool,
+        logs: Option<std::sync::mpsc::Sender<Value>>,
+    ) -> (Self, Option<SocketAddr>) {
         let stdout = child.stdout.take().expect("piped child stdout");
         let (sender, receiver) = std::sync::mpsc::channel();
         thread::spawn(move || {
@@ -5112,6 +5346,11 @@ impl TestRouter {
                 if let Some(bound) = line.strip_prefix("WIRE_BOUND ") {
                     // Once startup returns there is no readiness receiver.
                     let _ = sender.send(bound.to_owned());
+                } else if let Some(logs) = &logs
+                    && let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && value["target"] == "graphql_orm_router::subgraph_errors"
+                {
+                    let _ = logs.send(value);
                 }
             }
         });
@@ -5196,10 +5435,30 @@ impl TestRouter {
         products_sdl_endpoint: String,
         reviews_sdl_endpoint: String,
     ) -> Self {
-        let child = Command::new(env::current_exe().expect("test executable path"))
+        let child = Self::spawn_static_child(
+            mode,
+            products_endpoint,
+            reviews_endpoint,
+            products_sdl_endpoint,
+            reviews_sdl_endpoint,
+            &[],
+        );
+        Self::from_child(child, false).0
+    }
+
+    fn spawn_static_child(
+        mode: &str,
+        products_endpoint: String,
+        reviews_endpoint: String,
+        products_sdl_endpoint: String,
+        reviews_sdl_endpoint: String,
+        extra_env: &[(&str, &str)],
+    ) -> Child {
+        Command::new(env::current_exe().expect("test executable path"))
             .arg("--exact")
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
+            .envs(extra_env.iter().copied())
             .env(CHILD_ENV, mode)
             .env(PRODUCTS_ENDPOINT_ENV, products_endpoint)
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
@@ -5210,8 +5469,29 @@ impl TestRouter {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("static router child should start");
-        Self::from_child(child, false).0
+            .expect("static router child should start")
+    }
+
+    fn spawn_static_with_logs(
+        products_endpoint: String,
+        reviews_endpoint: String,
+        products_sdl_endpoint: String,
+        reviews_sdl_endpoint: String,
+        extra_env: &[(&str, &str)],
+    ) -> (Self, std::sync::mpsc::Receiver<Value>) {
+        let (logs, receiver) = std::sync::mpsc::channel();
+        let router = Self::spawn_static_child(
+            "static",
+            products_endpoint,
+            reviews_endpoint,
+            products_sdl_endpoint,
+            reviews_sdl_endpoint,
+            extra_env,
+        );
+        (
+            Self::from_child_with_logs(router, false, Some(logs)).0,
+            receiver,
+        )
     }
 
     fn spawn_authenticated(
@@ -6195,6 +6475,28 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
     }
 
     let response = match kind {
+        SubgraphKind::Products if query.contains("items") => {
+            let extensions = if query.contains("internal") {
+                json!({"code": "INTERNAL_ERROR", "private": "private-extension"})
+            } else if query.contains("forbidden") {
+                json!({"code": "FORBIDDEN", "private": "private-extension"})
+            } else if query.contains("lowercase") {
+                json!({"code": "invalid_input"})
+            } else if query.contains("no-code") {
+                json!({})
+            } else {
+                json!({"code": "INVALID_INPUT"})
+            };
+            let error = json!({
+                "message": original_items_error(),
+                "path": ["b"],
+                "extensions": extensions
+            });
+            json!({
+                "data": {"a": {"total": 123456789}, "b": null},
+                "errors": vec![error; if query.contains("burst") { 3 } else { 1 }]
+            })
+        }
         SubgraphKind::Products if query.contains("_entities") => {
             json!({"data": {"_entities": [{"id": "p1", "name": "desk"}]}})
         }

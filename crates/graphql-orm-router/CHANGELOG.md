@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.20.0
+
+- **No action (#923).** Downstream GraphQL errors from queries and mutations
+  produce structured, rate-limited logs. The response keeps its existing
+  masking by default. Hosts can opt into disclosing messages by code or for
+  every error from a downstream fetch.
+
 ## Unreleased - 0.19.0
 
 - **Test coverage (#668).** The WebSocket gateway smoke test exercises

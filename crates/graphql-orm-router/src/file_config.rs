@@ -1,5 +1,10 @@
 use std::{
-    collections::BTreeMap, fs::File, io::Read, net::SocketAddr, path::Path, sync::Arc,
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::Read,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -14,7 +19,8 @@ use crate::{
     AdminConfig, AuthenticationProvider, ByteRoute, ExactScopeMatcher, JwksAuthenticationConfig,
     JwksAuthenticationProvider, LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig,
     RequestLimits, RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind,
-    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
+    RouterLogLevel, RouterTelemetryConfig, StaticSubgraph, SubgraphErrorLogConfig,
+    SubgraphErrorMasking, SubscriptionConfig, TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -37,6 +43,12 @@ pub struct RouterFileConfig {
     introspection: bool,
     #[serde(default)]
     refusal_outcome: bool,
+    #[serde(default)]
+    mask_subgraph_errors: FileSubgraphErrorMasking,
+    #[serde(default)]
+    subgraph_error_code_allowlist: BTreeSet<String>,
+    #[serde(default)]
+    subgraph_error_logging: SubgraphErrorLogConfig,
     #[serde(default)]
     allow_plaintext_http: bool,
     #[serde(default)]
@@ -63,6 +75,15 @@ pub struct RouterFileConfig {
     persisted_documents: Option<FilePersistedDocuments>,
     #[serde(default)]
     byte_routes: Vec<FileByteRoute>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum FileSubgraphErrorMasking {
+    #[default]
+    All,
+    None,
+    AllowlistByCode,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -117,6 +138,16 @@ impl RouterFileConfig {
             .allow_anonymous_development(self.anonymous_development)
             .with_introspection(self.introspection)
             .with_refusal_outcome(self.refusal_outcome)
+            .with_subgraph_error_masking(match self.mask_subgraph_errors {
+                FileSubgraphErrorMasking::All => SubgraphErrorMasking::All,
+                FileSubgraphErrorMasking::None => SubgraphErrorMasking::None,
+                FileSubgraphErrorMasking::AllowlistByCode => {
+                    SubgraphErrorMasking::AllowlistByCode {
+                        codes: self.subgraph_error_code_allowlist,
+                    }
+                }
+            })
+            .with_subgraph_error_logging(self.subgraph_error_logging)
             .allow_plaintext_http(self.allow_plaintext_http)
             .use_environment_proxy(self.use_environment_proxy);
         if let Some(documents) = self.persisted_documents {

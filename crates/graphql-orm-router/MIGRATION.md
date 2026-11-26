@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.19.0 to 0.20.0
+
+**No action.** The existing downstream error response is unchanged by
+default. Queries and mutations now emit bounded warning events for downstream
+GraphQL errors with messages truncated to 256 characters. See the
+[subgraph error settings](docs/configuration.md#subgraph-errors) for log
+redaction and optional client message disclosure.
+
 ## 0.18.0 to 0.19.0: Changed replay gateway coverage
 
 **No action.** The router forwards the optional resume argument and
