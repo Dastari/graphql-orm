@@ -72,6 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.231.0**; **`graphql-orm-macros` 0.231.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
 
+- **No action** — router 0.21.0 replaces sleep-based waits in its tests with explicit signals; runtime behaviour is unchanged (#545). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0200-to-0210-deterministic-test-waits)
 - **No action** for supported callers — ORM/macros 0.231.0 move the authorization sequence of generated GraphQL writes into shared runtime functions (#724). Checks, order, SDL and catalogues are unchanged. **Action needed** only for host code that called the hidden macro-internal `MutationContext::__run_generated_mutation_hook`: it is removed; use `run_mutation_hook`. [Migration](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
 - **No action** — router 0.20.0 adds rate-limited downstream GraphQL error logs and opt-in message disclosure for queries and mutations (#923). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0190-to-0200)
 - **No action** — ORM/macros 0.230.0 shares generated list and aggregate execution (#677, #723, #358). [Migration](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution)

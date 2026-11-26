@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-router
 
+Version 0.21.0 makes the router's timing tests wait on explicit signals
+instead of fixed sleeps. Runtime behaviour is unchanged.
+
 Version 0.20.0 logs downstream GraphQL errors with a shared rate limit and
 offers opt-in client message disclosure by error code. See
 [subgraph errors](docs/configuration.md#subgraph-errors).

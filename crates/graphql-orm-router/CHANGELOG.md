@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.21.0
+
+- **Test reliability (#545).** Router tests wait on explicit signals instead
+  of fixed sleeps: loopback fixtures use a blocking accept, slow upstream
+  responses are held and released explicitly, and background refreshes and
+  poll rounds are awaited through observable state. Runtime behaviour is
+  unchanged.
+
 ## Unreleased - 0.20.0
 
 - **No action (#923).** Downstream GraphQL errors from queries and mutations
