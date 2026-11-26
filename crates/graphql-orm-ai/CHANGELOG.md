@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.168.0
+
+- **Fixed (#937).** Direct subscription waits check
+  `allowed_tool_fingerprints` against the registered subscription capability
+  at registration, event processing and adoption.
+  [Migration](MIGRATION.md#01670-to-01680-subscription-wait-allowlists)
+
 ## Unreleased - 0.167.0
 
 - **Fixed.** Approval-required generated mutations now execute after approval.
