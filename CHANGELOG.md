@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.237.0
+
+- Group ORM integration tests that share a CI lane into small test harnesses.
+  The prior test target names identify the modules within those harnesses.
+  **No action.** [Migration](MIGRATION.md#02340-to-02370-orm-integration-test-harnesses)
+
 ## Unreleased - ORM/macros 0.234.0
 
 - **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time

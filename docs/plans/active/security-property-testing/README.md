@@ -54,7 +54,7 @@ Every acceptance-gate surface has a seeded, bounded suite in ordinary CI:
 - Storage keys: validators against an independent contract model, plus a
   local-provider containment round trip (`crates/graphql-orm-storage/tests/storage_core/key_properties.rs`).
 - Canonical JSON: write/read, canonical identity, one spelling, fixed points
-  and limits (`crates/graphql-orm/tests/canonical_json_properties.rs`).
+  and limits (`crates/graphql-orm/tests/core_contracts/canonical_json_properties.rs`).
 - JWT and claims: cargo-fuzz targets with an independent oracle, a retained
   corpus and regressions replayed by `cargo test -p graphql-orm-router`, and
   a weekly 20-minute run per target (`crates/graphql-orm-router/fuzz/`).

@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.234.0 to 0.237.0: ORM integration test harnesses
+
+**No action.** Upgrade ORM and macros together. For workspace test commands
+that target a moved test binary, use its new harness and filter by the original
+module name. See the [integration test harnesses](docs/development/testing.md#orm-integration-test-harnesses).
+
 ## 0.233.0 to 0.234.0: internal date-time engine
 
 **No action.** Upgrade ORM and macros together. The internal engine uses

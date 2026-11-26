@@ -1001,7 +1001,7 @@ cargo test -p graphql-orm --no-default-features --features mssql --locked --test
 Pure SQL rendering tests run with the default test suite:
 
 ```bash
-cargo test -p graphql-orm --test query_ir
+cargo test -p graphql-orm --test runtime_record_contracts -- query_ir::
 ```
 
 MSSQL compile-time policy checks run with the MSSQL feature:
