@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.167.0 to 0.168.0 subscription wait allowlists
+
+**No action** for hosts that already use registered capability fingerprints
+to allow direct subscription waits, or have no fingerprint allowlist.
+No schema or data migration is needed.
+
+**Action needed** if you relied on the old refusal to block a direct
+subscription. Remove its capability fingerprint from the applicable
+allowlists before upgrading. If you used a compiled descriptor fingerprint
+to allow a wait, review the intended access before replacing it with the
+registered capability fingerprint, which applies across plans.
+
 ## 0.166.0 to 0.167.0 approved generated mutations
 
 **No action** for hosts using `OrmAiConsequentialToolCallService`. Existing
