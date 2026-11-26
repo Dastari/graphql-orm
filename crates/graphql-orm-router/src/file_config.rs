@@ -1243,6 +1243,15 @@ mod tests {
                 codes: BTreeSet::from(["INVALID_INPUT".to_owned()])
             }
         );
+        for fields in [
+            r#""maskSubgraphErrors":"all""#,
+            r#""maskSubgraphErrors":"all","subgraphErrorCodeAllowlist":[]"#,
+        ] {
+            assert_eq!(
+                parse(fields).unwrap().subgraph_error_masking,
+                SubgraphErrorMasking::All
+            );
+        }
         assert_eq!(
             parse(r#""maskSubgraphErrors":"none""#)
                 .unwrap()

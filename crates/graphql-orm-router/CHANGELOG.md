@@ -15,8 +15,8 @@ supersedes: []
 - **No action (#923).** Downstream GraphQL errors from queries and mutations
   produce structured, rate-limited logs. The response keeps its existing
   masking by default. Hosts can opt into disclosing messages by code or for
-  every error from a downstream fetch. The router refuses an error-code
-  allowlist without `allowlist-by-code`, and `allowlist-by-code` without any
+  every error from a downstream fetch. The router refuses a non-empty
+  error-code allowlist without `allowlist-by-code`, and `allowlist-by-code` without any
   code.
 
 ## Unreleased - 0.19.0

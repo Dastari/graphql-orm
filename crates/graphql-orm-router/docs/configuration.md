@@ -172,8 +172,9 @@ error that a subgraph forwards verbatim with an allowlisted code, discloses its
 message. Use the allowlist only when every configured subgraph is trusted to
 assign codes.
 
-The router refuses to start when `subgraphErrorCodeAllowlist` is set without
-`allowlist-by-code`, or when `allowlist-by-code` has an empty allowlist.
+The router refuses to start when `subgraphErrorCodeAllowlist` lists any code
+without `allowlist-by-code`, or when `allowlist-by-code` has an empty
+allowlist.
 
 ```json
 {
@@ -200,9 +201,11 @@ message.
 Set `subgraphErrorLogging.message` to `full` (the whole message, with no
 length bound), `truncated` (default, the first 256 Unicode characters), or
 `redacted` (the fixed string `[redacted]`). Use `redacted` where downstream
-messages may contain sensitive details. While warnings are enabled, every router
-log line for a request with a valid operation name (ASCII letters, digits and
-`_`, at most 128 characters) also carries `client_operation_name`.
+messages may contain sensitive details. While warnings are enabled for the
+`graphql_orm_router::subgraph_errors` target, router log events emitted after
+the request is parsed also carry `client_operation_name`. The router keeps the
+first 128 characters of the operation name and records it only if they are
+ASCII letters, digits and `_`.
 `maxEventsPerSecond` is a positive integer, defaults to 20, and applies
 across all downstream fetches on one router instance. Periodic summary
 events report the number of error events dropped by the limiter.

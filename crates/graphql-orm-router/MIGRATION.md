@@ -20,10 +20,10 @@ redaction and optional client message disclosure.
 
 When you opt into `allowlist-by-code` or `none`, downstream error extensions
 other than `code` are dropped, so clients read `outcome` as unknown. While
-warnings are enabled, every router log line for a request with a valid
-operation name also carries `client_operation_name`. The
-router rejects `subgraphErrorCodeAllowlist` without `allowlist-by-code`, and
-`allowlist-by-code` without any code.
+warnings are enabled for the subgraph error target, router log events emitted
+after the request is parsed also carry `client_operation_name`. The router
+rejects a non-empty `subgraphErrorCodeAllowlist` without `allowlist-by-code`,
+and `allowlist-by-code` without any code.
 
 ## 0.18.0 to 0.19.0: Changed replay gateway coverage
 
