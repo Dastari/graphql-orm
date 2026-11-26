@@ -10,12 +10,44 @@ supersedes: []
 
 # Migration Guide
 
-## 0.225.0 to 0.227.0: Transient input validation errors
+## 0.227.0 to 0.228.0: Transient input validation errors
 
 **No action.** Generated schema builders now return a fixed message when
 async-graphql rejects a transient argument, its variable default, or another
 argument that shares the variable.
 [Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
+
+## 0.226.0 to 0.227.0: SQL Server VARCHAR and bulk update validation
+
+**Action needed** for hosts that relied on the 0.215.0 VARCHAR seek on
+columns using a legacy `SQL_` collation. Move the column to a Windows
+collation after reviewing its comparison rules, or add a persisted computed
+Unicode column and index it for the affected comparison.
+
+Upgrade ORM and macros together. The 0.215.0 ASCII VARCHAR conversion could
+match different rows under `SQL_` collations, including
+`SQL_Latin1_General_CP1_CI_AS`. String filters now bind as NVARCHAR with
+either pool setting. In the SQL Server fixture, a `SQL_` index scanned at
+31 logical reads with NVARCHAR, compared with a 2-read VARCHAR seek in
+0.215.0. The Windows CP1252 and UTF-8 VARCHAR indexes already sought with
+NVARCHAR at 2 reads each. A tested VARCHAR rewrite with per-statement
+collation and conversion checks used 10 reads on each Windows index.
+
+Opt-in integer narrowing to INT, SMALLINT and TINYINT still uses BIGINT when
+a signed comparison operand exceeds the declared width. Generated updates
+and upserts, including transactional writes, return `INVALID_INPUT` for
+out-of-range unsigned inputs before selecting targets. Updates validate the
+input even when no rows match.
+See [typed SQL Server parameters](docs/reference/graphql-orm/mssql.md#typed-column-parameters).
+
+## 0.225.0 to 0.226.0: Generated nested create
+
+**No action** unless opting in (#353). Add `nested_create` to the parent
+collection relation and declare the child's `nested_create_keys`. For an
+opted-in parent, regenerate the SDL and catalogues and update clients using
+GraphQL variables to name the new `Create<Entity>WithChildrenInput` type.
+The standalone child create keeps its shape. See
+[creating a parent with child rows](docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows).
 
 ## 0.224.0 to 0.225.0: Opaque partial-index predicates
 

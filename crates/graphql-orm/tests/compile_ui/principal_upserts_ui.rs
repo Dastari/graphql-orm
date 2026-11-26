@@ -24,6 +24,7 @@ fn principal_bound_upserts_refuse_unsafe_declarations() {
     cases.compile_fail("tests/ui/principal_upserts/bound_upsert_not_selected.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_with_create.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_with_create_selected.rs");
+    cases.compile_fail("tests/ui/principal_upserts/bound_with_nested_create.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_without_upsert.rs");
     cases.compile_fail("tests/ui/principal_upserts/bound_wrong_key_type.rs");
     cases.compile_fail("tests/ui/principal_upserts/transient_duplicate.rs");

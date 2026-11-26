@@ -1,0 +1,5 @@
+error: nested_create bindings must include the declared INSERT RLS scope column `tenant_id`
+ --> tests/ui/nested_create_missing_insert_tenant.rs:9:5
+  |
+9 |     id: String,
+  |     ^^

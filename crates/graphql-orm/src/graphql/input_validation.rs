@@ -29,6 +29,68 @@ use std::sync::{Arc, Mutex};
 
 mod transient;
 
+/// Resolve the already validated parent input argument for nested policy
+/// callbacks, preserving omission, supplied nulls and resolved variables.
+#[doc(hidden)]
+pub fn __nested_create_arguments(
+    ctx: &async_graphql::Context<'_>,
+    argument: &str,
+) -> async_graphql::Result<Value> {
+    ctx.field()
+        .arguments()
+        .ok()
+        .and_then(|arguments| {
+            arguments
+                .into_iter()
+                .find_map(|(name, value)| (name == argument).then_some(value))
+        })
+        .ok_or_else(|| {
+            crate::graphql::errors::OrmPublicError::new(
+                crate::graphql::errors::OrmErrorCode::InvalidInput,
+            )
+            .into_graphql_error()
+        })
+}
+
+/// Return the child input objects in their coerced list order.
+#[doc(hidden)]
+pub fn __nested_create_list(value: Option<Value>) -> Vec<Value> {
+    match value {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::List(values)) => values,
+        // GraphQL coerces a non-list input to a singleton list.
+        Some(value) => vec![value],
+    }
+}
+
+/// Construct the child create field seen by policy callbacks. The resolver
+/// supplies validated input and server-bound relation values. The caller
+/// derives its context from the actual request to retain the request principal.
+#[doc(hidden)]
+pub fn __nested_create_field(
+    ctx: &async_graphql::Context<'_>,
+    name: &str,
+    argument: &str,
+    value: Value,
+) -> async_graphql::Positioned<async_graphql::parser::types::Field> {
+    use async_graphql::{Name, Positioned, parser::types::Field};
+
+    let pos = ctx.item.pos;
+    Positioned::new(
+        Field {
+            alias: None,
+            name: Positioned::new(Name::new(name), pos),
+            arguments: vec![(
+                Positioned::new(Name::new(argument), pos),
+                Positioned::new(value.into_value(), pos),
+            )],
+            directives: Vec::new(),
+            selection_set: Positioned::new(SelectionSet::default(), pos),
+        },
+        pos,
+    )
+}
+
 /// The stable code of an argument value refused by these checks.
 pub(crate) const INVALID_GRAPHQL_INPUT: &str = "invalid_graphql_input";
 

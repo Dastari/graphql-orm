@@ -2424,8 +2424,9 @@ where
 /// Record a rollback that failed after the transaction's outcome was already
 /// decided. The work is never committed: dropping the transaction rolls it
 /// back, or closes its connection so the server does.
+#[doc(hidden)]
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
-fn log_failed_rollback(result: crate::Result<()>) {
+pub fn log_failed_rollback(result: crate::Result<()>) {
     if let Err(error) = result {
         tracing::warn!(%error, "transaction rollback failed after an earlier failure");
     }

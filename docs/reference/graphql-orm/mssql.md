@@ -852,16 +852,28 @@ the value fits. Wider comparison operands use BIGINT. Generated unsigned
 operands that exceed their declared integer range are refused with
 `INVALID_INPUT`, including with the option off.
 
-Printable ASCII values in ordinary generated VARCHAR equality, inequality
-and membership filters can use a parameter-side VARCHAR conversion. The
-conversion allows enough bytes for the full operand even when it exceeds
-the column's declared length. All other text uses Unicode parameters,
-including non-ASCII text, NVARCHAR columns, undeclared types, pattern
-operands (`contains`, `starts_with`, `ends_with`, `LIKE` and similarity),
-write values, transactional reads, key and cursor lookups, and
-authorization predicates.
-That keeps the database's existing Unicode comparison and pattern rules
-on those paths and avoids lossy code-page conversion.
+String filters, including filters on declared VARCHAR columns, bind as
+NVARCHAR. The ASCII VARCHAR conversion introduced in 0.215.0 could match
+different rows under legacy `SQL_` collations and was removed.
+
+In the disposable SQL Server fixture, equality filters on Windows CP1252
+and UTF-8 VARCHAR indexes used an index seek with the NVARCHAR parameter.
+The fixture recorded these plans and logical reads.
+
+| Column collation | Unicode bind | VARCHAR conversion |
+| --- | --- | --- |
+| Windows CP1252 | Seek, 2 reads | Seek, 10 reads with conversion checks |
+| Windows UTF-8 | Seek, 2 reads | Seek, 10 reads with conversion checks |
+| `SQL_Latin1_General_CP1_CI_AS` | Scan, 31 reads | Seek, 2 reads with the 0.215.0 conversion |
+
+**Action needed** for hosts that relied on the 0.215.0 seek on a `SQL_`
+column. After reviewing comparison rules, move the column to a Windows
+collation or direct the affected comparison to an indexed persisted
+computed Unicode column.
+
+Generated updates and upserts validate unsigned inputs before selecting
+targets, including in transactions. Updates validate the input even when
+zero rows match.
 
 ### Native temporal parameters
 

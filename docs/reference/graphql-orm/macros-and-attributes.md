@@ -62,6 +62,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `mutation_error_codes` | flag | absent; generated single-row results gain a nullable `errorCode` and the bulk filter refusals a code; see [mutation result error codes](error-codes.md#mutation-result-error-codes) |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
+| `nested_create_keys` | a Rust field name or an ordered array of Rust field names | absent; opts a child into [generated nested create](runtime-and-writes.md#creating-a-parent-with-child-rows) with those fields supplied by the parent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `upsert_bound_key` | `(field = "conflict_key_field", binding = "path::Type")` | absent; repeatable, once per field. The generated GraphQL upsert takes that private conflict-key member from `PrincipalKeyBinding::bind`, never from the client. Requires `mutation_shapes` without `create` and a column no other field or implicit writer shares; rejected on `repository_entity` and with nested creates. See [principal-bound conflict keys](runtime-and-writes.md#principal-bound-conflict-keys) |
 | `transient_input` | `(type = "path::InputType", on = "upsert", name = "argument", required = bool, max_bytes = n, max_nodes = n)` | absent; `on` is required and accepts `upsert`; `name` defaults to `transient`, `required` to `true`, `max_bytes` to 65536 and `max_nodes` to 1024. Adds a typed, size-bounded, `secret` argument that the input transform and hooks read and nothing stores. See [transient mutation input](runtime-and-writes.md#transient-mutation-input) |
@@ -330,6 +331,11 @@ relations take their keys from the relation, and every generated entity is a `Re
 `BatchLoadEntity` is no longer used: `RelationLoader`'s single-column `Loader<String>` form,
 which read rows without entity, row or field policy, was removed in the breaking release.
 Existing implementations still compile and can be deleted.
+
+An unconditional collection relation can opt into
+[generated nested create](runtime-and-writes.md#creating-a-parent-with-child-rows)
+with the `nested_create` flag and a matching `nested_create_keys` declaration
+on the child.
 
 `GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
 `RecordVersion` (for an exported managed version) to its complex object.

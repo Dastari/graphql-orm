@@ -10,8 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.227.0 aligns with the ORM's
-[transient input validation redaction](../../MIGRATION.md#02250-to-02270-transient-input-validation-errors).
+Version 0.228.0 aligns with the ORM's
+[transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
+
+Version 0.227.0 validates SQL Server unsigned inputs before selecting targets
+for updates and upserts, including updates that would affect zero rows.
+See the [migration guide](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation).
 
 Version 0.225.0 aligns with the ORM's
 [partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
@@ -1028,6 +1032,10 @@ reads and DML onto one driver-neutral mutation transaction. Existing-row
 decisions use backend write locks, predicate mutations materialize typed
 primary keys before exact-key DML, and absent-key upserts require the runtime's
 state-machine isolation mode. Consumers do not provide SQL or lock clauses.
+
+Collection relations can opt into
+[generated nested create](../../docs/reference/graphql-orm/runtime-and-writes.md#creating-a-parent-with-child-rows)
+with `nested_create` and a matching child `nested_create_keys` declaration.
 
 Generated to-many relation resolvers accept one nullable `OrderByInput`
 object, while generated root list resolvers retain their nullable list of

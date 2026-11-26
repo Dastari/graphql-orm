@@ -18,6 +18,7 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) create_input: &'a syn::Ident,
     pub(in crate::operations) create_client_supplied: &'a TokenStream,
+    pub(in crate::operations) unsigned_checks: &'a TokenStream,
     pub(in crate::operations) upsert_policy_checks_graphql: &'a [TokenStream],
     pub(in crate::operations) created_pk_init: &'a TokenStream,
     pub(in crate::operations) pk_id_for_entity: &'a TokenStream,
@@ -74,6 +75,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         struct_name,
         create_input,
         create_client_supplied,
+        unsigned_checks,
         upsert_policy_checks_graphql,
         created_pk_init,
         pk_id_for_entity,
@@ -192,6 +194,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 // The input transform cannot replace a principal-bound key.
                 #principal_key_assignment
 
+                #unsigned_checks
                 let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;

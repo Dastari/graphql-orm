@@ -33,6 +33,7 @@ pub(in crate::operations) struct UpdateInput<'a> {
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) update_client_supplied: &'a TokenStream,
+    pub(in crate::operations) unsigned_checks: &'a TokenStream,
     pub(in crate::operations) sql_dialect: &'a TokenStream,
     pub(in crate::operations) pk_bind_value: &'a TokenStream,
     pub(in crate::operations) update_policy_checks: &'a [TokenStream],
@@ -91,6 +92,7 @@ pub(in crate::operations) fn update(
         entity_name_lit,
         struct_name,
         update_client_supplied,
+        unsigned_checks,
         sql_dialect,
         pk_bind_value,
         update_policy_checks,
@@ -213,6 +215,7 @@ pub(in crate::operations) fn update(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                 let mut input: #update_input = input.into();
+                #unsigned_checks
                 #update_client_supplied
                 #transaction_start
                 let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
