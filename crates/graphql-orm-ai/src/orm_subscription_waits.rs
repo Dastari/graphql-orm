@@ -1999,6 +1999,19 @@ impl OrmAiSubscriptionWaitService {
             opened.budget_reservation_id,
             &protected_checkpoint,
         )?;
+        // The last checks before the durable write, after every audit,
+        // protection and hashing step above: a broker or catalogue change
+        // committed while those awaited still wins.
+        self.current_subscription_capability(
+            &opened.descriptor.id,
+            &opened.waiter.capability_fingerprint,
+        )?;
+        self.readmit_stored_broker_call(
+            opened.resolved_call.as_ref(),
+            &opened.principal_reference,
+            &opened.waiter,
+        )
+        .await?;
         self.persist_adoption(
             claim,
             PreparedWaitAdoption {
@@ -2666,11 +2679,95 @@ impl OrmAiSubscriptionWaitService {
         .map_err(map_transaction)
     }
 
+    /// Re-proves, immediately before consumption hands the adopted result to
+    /// the provider, that the wait's subscription is still the registered
+    /// capability and, for a broker-routed wait, that the broker still admits
+    /// it for the registering run.
+    ///
+    /// Broker admission is the last step, after the protected request has
+    /// been reopened, so a revocation committed while adoption or reopening
+    /// awaited still refuses the delivery. The check cannot be atomic with
+    /// the provider transport that follows; what is guaranteed is ordering.
+    async fn readmit_before_consume(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<(), AiError> {
+        let adoption =
+            AiSubscriptionWaitAdoptionRecord::find_by_id(self.custody_database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(self.custody_database(), &adoption.waiter_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let call = AiToolCallRecord::find_by_id(self.custody_database(), &waiter.tool_call_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        if waiter.run_id != lease.run_id().0
+            || waiter.session_id != lease.session_id().0
+            || adoption.run_id != waiter.run_id
+            || call.id != waiter.tool_call_id
+        {
+            return Err(AiError::Conflict);
+        }
+        let principal_reference = lease.principal_reference();
+        let principal = self
+            .runtime
+            .resolve_current_principal(principal_reference)
+            .await?;
+        self.ensure_fresh(&principal, principal_reference)?;
+        let scope = record_scope(&session);
+        let policy = self.current_protection_policy(&principal, &scope).await?;
+        let request_value = self
+            .open(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_subscription_waiters",
+                    waiter.id,
+                    "protected_request",
+                    &scope,
+                ),
+                waiter
+                    .protected_request
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?,
+            )
+            .await?;
+        let payload: ProtectedWaitRequest =
+            serde_json::from_value(request_value).map_err(|_| AiError::PersistenceFailed)?;
+        let provider: ProtectedProviderResult =
+            serde_json::from_value(payload.provider_result.clone())
+                .map_err(|_| AiError::PersistenceFailed)?;
+        let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
+        let (subscription_id, _) = Self::stored_subscription_call(&payload, provider_tool)?;
+        if payload.resolved_call.is_some() != call.provider_tool_id.is_some()
+            || call.tool_id != subscription_id.as_str()
+        {
+            return Err(AiError::Conflict);
+        }
+        self.current_subscription_capability(&subscription_id, &payload.capability_fingerprint)?;
+        self.readmit_stored_broker_call(
+            payload.resolved_call.as_ref(),
+            principal_reference,
+            &waiter,
+        )
+        .await
+    }
+
     async fn consume_wait_adoption(
         &self,
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError> {
+        Box::pin(self.readmit_before_consume(lease, checkpoint_id)).await?;
         let lease = lease.clone();
         let now = canonical_second(self.clock.now());
         let ttl = self.run_service.lease_ttl();

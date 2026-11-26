@@ -47,7 +47,10 @@ supersedes: []
   and at every claim, delivery and resumption: an entry removed from the
   broker's current index or replaced closes it as `capability_stale`, and a
   host capability policy denial as `subscription_authority_revoked`, so
-  revoking broker access stops waits already parked. Per-turn, per-run and
+  revoking broker access stops waits already parked. The last re-admission
+  of a delivery runs immediately before its durable write, and resumption
+  re-admits again when the adoption is consumed, immediately before the
+  result reaches the provider. Per-turn, per-run and
   rule-usage limits are those of a direct wait. No schema module change. The discover
   and execute broker definitions change in the same release as broker
   version 3. [Migration](MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
@@ -58,8 +61,9 @@ supersedes: []
   `Failed`, tool call and step `capability_stale`) before anything is
   observed or delivered, instead of `subscription_authority_revoked`, and
   resumption refuses it with `AI_CAPABILITY_STALE`. Both coordinators record
-  that refusal at resumption as `capability_stale`, not as a generic
-  checkpoint-adoption code, so alerts keyed on it fire.
+  that refusal at adoption or consumption as `capability_stale`, not as a
+  generic checkpoint-adoption or consumption code, so alerts keyed on it
+  fire.
 - **Breaking (#551).** Broker execute of a loaded reference the session does
   not reach returns `selection_stale`, the same as an unknown reference,
   instead of `Forbidden`, with or without a continuation. That covers a
@@ -68,8 +72,11 @@ supersedes: []
   the loaded binding's reviewed approval before any index lookup), and an
   entry the current index no longer lets it reach. A clone sharing loaded
   state, or a run whose rules refuse the mutation, therefore cannot tell a
-  hidden capability from an unknown one. Host policy denial and
-  substitution stay `Forbidden`.
+  hidden capability from an unknown one. `describe_type` answers the same
+  way, decided before any principal or index resolution, and a
+  continuation of a capability that is never continued is checked against
+  the current index first. Host policy denial and substitution stay
+  `Forbidden`.
 - **Fixed (#551).** The wait service checked hierarchical rules against the
   per-plan compiled descriptor fingerprint instead of the subscription's
   capability fingerprint, so a rule allowlist could never admit a direct

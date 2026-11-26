@@ -1586,11 +1586,11 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
-            lease = match self
+            let consumed = self
                 .checkpoint_adopter
                 .consume_before_provider(&lease, adopted.checkpoint_id)
-                .await
-            {
+                .await;
+            lease = match consumed {
                 Ok(renewed) => renewed,
                 Err(_) => {
                     return self
@@ -1598,7 +1598,7 @@ impl AiReadOnlyAgentCoordinator {
                             &lease,
                             &guard,
                             AiAgentRecoveryPhase::ApplicationTool,
-                            "checkpoint_consumption_failed",
+                            adoption_failure_code(&consumed, "checkpoint_consumption_failed"),
                             None,
                         )
                         .await;

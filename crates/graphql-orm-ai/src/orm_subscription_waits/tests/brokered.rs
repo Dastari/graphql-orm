@@ -304,6 +304,17 @@ impl WaitFixture {
         catalog: Option<&crate::AiGraphqlSubscriptionCapabilityCatalog>,
         rules: crate::AiResolvedRuleSet,
     ) -> Arc<OrmAiSubscriptionWaitService> {
+        self.service_with_audit(catalog, rules, Arc::new(TestEgressAudit))
+            .await
+    }
+
+    /// [`Self::service_with`] with an explicit egress-decision audit.
+    async fn service_with_audit(
+        &self,
+        catalog: Option<&crate::AiGraphqlSubscriptionCapabilityCatalog>,
+        rules: crate::AiResolvedRuleSet,
+        audit: Arc<dyn AiEgressDecisionAudit>,
+    ) -> Arc<OrmAiSubscriptionWaitService> {
         let runtime = subscription_runtime(
             &self.database,
             &self.principal,
@@ -321,7 +332,7 @@ impl WaitFixture {
                 Arc::new(runtime),
                 self.sources.clone(),
                 Arc::new(TestRules(rules)),
-                Arc::new(TestEgressAudit),
+                audit,
                 self.clock.clone(),
                 AiSubscriptionWaitLimits::default(),
             )
@@ -1315,4 +1326,151 @@ async fn sqlite_a_service_without_the_broker_refuses_and_closes_brokered_waits()
             if waiter_id == registered.waiter_id()
     ));
     assert_eq!(adoption_count(&fixture).await, 0);
+}
+
+/// An egress-decision audit that applies `revoke` while its record awaits:
+/// the host's change lands after every earlier delivery check passed.
+struct RevokingEgressAudit {
+    revoke: Box<dyn Fn() + Send + Sync>,
+}
+
+#[async_trait]
+impl AiEgressDecisionAudit for RevokingEgressAudit {
+    async fn record(
+        &self,
+        _manifest: &AiEgressManifest,
+        _decision: &crate::AiEgressDecision,
+    ) -> Result<(), AiError> {
+        (self.revoke)();
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn sqlite_a_broker_change_while_delivery_awaits_queues_nothing() {
+    let fixture = wait_fixture().await;
+    let policy = {
+        let allowed = fixture.broker_allowed.clone();
+        fixture
+            .service_with_audit(
+                Some(&fixture.capability_catalog),
+                fixture.rules.clone(),
+                Arc::new(RevokingEgressAudit {
+                    revoke: Box::new(move || allowed.store(false, Ordering::SeqCst)),
+                }),
+            )
+            .await
+    };
+    let registered = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "delivery-revoked-call")
+        .await
+        .expect("brokered wait registers");
+    // The claim, the open and the first delivery check pass; the policy is
+    // revoked while the egress decision is audited, before the durable
+    // write.
+    fixture.source.push(fixture.event(1, "wanted"));
+    assert!(matches!(
+        policy.process_next("delivery-revoked-worker").await,
+        Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+            if waiter_id == registered.waiter_id()
+    ));
+    assert_eq!(
+        closed_codes(&fixture, &registered).await.1.as_deref(),
+        Some("subscription_authority_revoked")
+    );
+    assert_eq!(adoption_count(&fixture).await, 0, "nothing was queued");
+}
+
+#[tokio::test]
+async fn sqlite_a_broker_entry_removed_while_delivery_awaits_queues_nothing() {
+    let fixture = wait_fixture().await;
+    let index = fixture.broker_index.clone();
+    let without = Arc::new(WaitCurrentIndex::index(
+        &fixture.target_id,
+        &fixture.semantics,
+        &fixture.capability_catalog,
+        false,
+    ));
+    let removing = fixture
+        .service_with_audit(
+            Some(&fixture.capability_catalog),
+            fixture.rules.clone(),
+            Arc::new(RevokingEgressAudit {
+                revoke: Box::new(move || {
+                    *index.0.write().expect("index lock") = Arc::clone(&without);
+                }),
+            }),
+        )
+        .await;
+    let registered = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "delivery-removed-call")
+        .await
+        .expect("brokered wait registers");
+    fixture.source.push(fixture.event(1, "wanted"));
+    assert!(matches!(
+        removing.process_next("delivery-removed-worker").await,
+        Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+            if waiter_id == registered.waiter_id()
+    ));
+    assert_eq!(
+        closed_codes(&fixture, &registered).await.1.as_deref(),
+        Some("capability_stale")
+    );
+    assert_eq!(adoption_count(&fixture).await, 0, "nothing was queued");
+}
+
+#[tokio::test]
+async fn sqlite_a_broker_change_between_adoption_and_consumption_delivers_nothing() {
+    for revoke_policy in [true, false] {
+        let fixture = wait_fixture().await;
+        let registered = fixture
+            .register_brokered(&fixture.service, &fixture.rules, "consume-revoked-call")
+            .await
+            .expect("brokered wait registers");
+        fixture.source.push(fixture.event(1, "wanted"));
+        assert!(matches!(
+            fixture.service.process_next("consume-revoked-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+        ));
+        let lease = fixture.resume().await;
+        let control = AiSupervisedSubscriptionCheckpointControl::new(
+            fixture.service.clone(),
+            Arc::new(EmptySupervisedCheckpointControl),
+        );
+        let Some(crate::AiAdoptedClassifiedMutationBatch::Subscription(adopted)) =
+            crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &lease)
+                .await
+                .expect("adoption validates while the broker admits it")
+        else {
+            panic!("subscription checkpoint classifies");
+        };
+        // The host's change lands after adoption returned and before the
+        // result is handed to the provider.
+        if revoke_policy {
+            fixture.broker_allowed.store(false, Ordering::SeqCst);
+        } else {
+            fixture.broker_index.remove_subscriptions(&fixture);
+        }
+        let error = crate::AiAgentSupervisedCheckpointControl::consume_subscription(
+            &control, &lease, &adopted,
+        )
+        .await
+        .expect_err("nothing is consumed or delivered");
+        if revoke_policy {
+            assert!(matches!(error, AiError::Forbidden), "{error:?}");
+        } else {
+            assert_stale(&error);
+        }
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &registered.tool_call_id().0)
+            .await
+            .expect("tool call loads")
+            .expect("tool call exists");
+        assert_eq!(call.state, "waiting_subscription");
+        let adoptions = AiSubscriptionWaitAdoptionRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .expect("adoptions load");
+        assert!(adoptions[0].consumed_at.is_none());
+    }
 }

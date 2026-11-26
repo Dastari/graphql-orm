@@ -34,10 +34,12 @@ subscription fingerprints. This completes the #551 broker scope.
    fingerprint, now closes as `capability_stale` (run `Failed`) at its next
    claim or delivery, instead of `subscription_authority_revoked`, and its
    resumption is refused with `AI_CAPABILITY_STALE`. When that refusal
-   happens at resumption, both coordinators now record `capability_stale` as
-   the run's `RecoveryRequired` code (and error code) instead of
-   `checkpoint_adoption_failed` or
-   `classified_mutation_checkpoint_adoption_failed`. Every other adoption
+   happens at resumption (adoption or consumption), both coordinators now
+   record `capability_stale` as the run's `RecoveryRequired` code (and error
+   code) instead of `checkpoint_adoption_failed`,
+   `classified_mutation_checkpoint_adoption_failed`,
+   `checkpoint_consumption_failed` or
+   `subscription_checkpoint_consumption_failed`. Every other adoption
    failure keeps its old code. Update alerting or reporting that matches the
    old codes for these cases.
 4. **Opt in (optional).** Call
@@ -61,7 +63,12 @@ subscription fingerprints. This completes the #551 broker scope.
    host capability policy decide brokered capabilities). Every service
    instance that claims or resumes waits needs it. A broker-routed wait is
    re-admitted by that broker for its registering run at registration and
-   again at every claim, delivery and resumption: an entry removed from the
+   again at every claim, delivery and resumption. At delivery the last
+   re-admission runs immediately before the durable write, after egress
+   auditing and content protection; at resumption it runs again when the
+   adoption is consumed, immediately before the result is handed to the
+   provider. The check cannot be atomic with provider transport; a change
+   committed before that last check always wins. An entry removed from the
    current index, replaced, or without the in-process proof closes the wait
    as `capability_stale`, and a host policy denial closes it as
    `subscription_authority_revoked` (resumption refuses with
@@ -103,8 +110,14 @@ subscription fingerprints. This completes the #551 broker scope.
      mutation whose reviewed approval changed or an index that lost its
      in-process proof.
 
-   The rule decision is made from the loaded binding before any index
-   lookup, so it does not depend on catalogue state. Host capability policy
+   The rule decision is made from the loaded binding before any principal
+   or index resolution, so it does not depend on catalogue state.
+   `describe_type` applies the same check and answers the same way. A
+   continuation of a capability that is never continued (a mutation,
+   subscription or static tool) is first checked against the current index
+   and policy like an ordinary execute, so it too is `selection_stale` when
+   the session no longer reaches it; only a reachable one is refused as not
+   continuable. Host capability policy
    denial and identity substitution are still `Forbidden`. Tests that
    expected `Forbidden` for the cases above must expect
    `AI_CAPABILITY_SELECTION_STALE`.

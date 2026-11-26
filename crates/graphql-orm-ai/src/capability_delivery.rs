@@ -4545,12 +4545,11 @@ impl AiCapabilityDiscoveryBroker {
         if self.clock.now() > loaded.expires_at {
             return Err(stale_selection());
         }
-        if loaded.capability_kind == AiCapabilityKind::ReviewedStatic
-            && !session
-                .brokered_static_tools
-                .contains(&loaded.capability_fingerprint)
-        {
-            return Err(AiError::Forbidden);
+        // As at execute: a reference this session does not reach is an
+        // unknown reference to it, decided before any principal or index
+        // resolution.
+        if !session.reaches_loaded_kind(&loaded) {
+            return Err(stale_selection());
         }
         let target = self
             .authorize_loaded_operation(
@@ -4932,6 +4931,19 @@ impl AiCapabilityDiscoveryBroker {
             loaded.capability_kind,
             AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedEntity
         ) {
+            // A capability that is never continued is first checked against
+            // the current index and policy exactly as an ordinary execute,
+            // so a reference this session no longer reaches answers as it
+            // would there (an unknown reference). Only a capability it does
+            // reach learns that it cannot be continued.
+            Box::pin(self.authorize_loaded_operation(
+                principal_reference,
+                run,
+                session,
+                loaded,
+                parsed.operation.as_deref(),
+            ))
+            .await?;
             return Err(AiError::Forbidden);
         }
         // A handle of another loaded reference or session is the same stale
@@ -8182,6 +8194,43 @@ mod tests {
                 .await,
             Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
         ));
+        describe_type_matches_unknown(
+            &broker,
+            &principal,
+            &run,
+            &revoked,
+            &loaded_reference,
+            "excluded static tool",
+        )
+        .await;
+    }
+
+    /// Asserts that `describe_type` of a held reference answers exactly as
+    /// for an unknown reference, with `selection_stale`.
+    async fn describe_type_matches_unknown(
+        broker: &AiCapabilityDiscoveryBroker,
+        principal: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        held: &str,
+        label: &str,
+    ) {
+        let unknown = "f".repeat(64);
+        assert_ne!(held, unknown);
+        let call = |reference: &str| json!({"loadedReference": reference, "type": "select"});
+        let held = broker
+            .dispatch_describe_type(principal, run, session, &call(held))
+            .await
+            .err();
+        let unknown = broker
+            .dispatch_describe_type(principal, run, session, &call(&unknown))
+            .await
+            .err();
+        assert!(
+            matches!(&held, Some(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+            "{label}: {held:?}"
+        );
+        assert_eq!(format!("{held:?}"), format!("{unknown:?}"), "{label}");
     }
 
     /// One automatic `CreateRecord` and one approval-required
@@ -8658,6 +8707,15 @@ mod tests {
             ("default session", &default_shared),
         ] {
             assert!(refusing.loaded(&loaded_reference).is_some(), "{label}");
+            describe_type_matches_unknown(
+                &broker,
+                &principal_reference,
+                &run,
+                refusing,
+                &loaded_reference,
+                label,
+            )
+            .await;
             for (held, unknown_call) in calls(&loaded_reference).into_iter().zip(calls(&unknown)) {
                 let held = broker
                     .authorize_broker_execution(&principal_reference, &run, refusing, &held)
@@ -9047,6 +9105,15 @@ mod tests {
                 "{reference}: {refused:?}"
             );
         }
+        describe_type_matches_unknown(
+            &broker,
+            &principal_reference,
+            &run,
+            &closed,
+            &loaded_reference,
+            "subscription in a closed clone",
+        )
+        .await;
         // Host policy revoked between describe and execute refuses.
         authority.allowed.store(false, Ordering::SeqCst);
         assert!(matches!(
@@ -9088,6 +9155,40 @@ mod tests {
             "{held:?}"
         );
         assert_eq!(format!("{:?}", held.err()), format!("{:?}", unknown.err()));
+        // A continuation of that reference consults the current index first
+        // and answers the same, never a distinguishable refusal.
+        let continued =
+            |reference: &str| json!({"loadedReference": reference, "continuation": "a".repeat(64)});
+        let held = broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &continued(&loaded_reference),
+            )
+            .await;
+        let unknown = broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &continued(&"f".repeat(64)),
+            )
+            .await;
+        assert!(
+            matches!(&held, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+            "{held:?}"
+        );
+        assert_eq!(format!("{:?}", held.err()), format!("{:?}", unknown.err()));
+        describe_type_matches_unknown(
+            &broker,
+            &principal_reference,
+            &run,
+            &session,
+            &loaded_reference,
+            "subscription whose index lost its proof",
+        )
+        .await;
     }
 
     #[test]

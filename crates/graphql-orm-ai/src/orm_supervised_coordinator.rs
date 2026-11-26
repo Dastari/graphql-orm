@@ -1285,11 +1285,11 @@ impl AiSupervisedAgentCoordinator {
                     .map(SupervisedTurnStep::Finished);
             }
         } else if let Some(adopted) = adopted_subscription {
-            lease = match self
+            let consumed = self
                 .checkpoint_control
                 .consume_subscription(&lease, adopted)
-                .await
-            {
+                .await;
+            lease = match consumed {
                 Ok(renewed) => renewed,
                 Err(_) => {
                     return (self
@@ -1297,7 +1297,10 @@ impl AiSupervisedAgentCoordinator {
                             &lease,
                             &guard,
                             AiAgentRecoveryPhase::ApplicationTool,
-                            "subscription_checkpoint_consumption_failed",
+                            crate::orm_coordinator::adoption_failure_code(
+                                &consumed,
+                                "subscription_checkpoint_consumption_failed",
+                            ),
                             None,
                         )
                         .await)
