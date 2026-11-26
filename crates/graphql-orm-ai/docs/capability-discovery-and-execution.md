@@ -922,6 +922,8 @@ service. For a provider turn whose one call is
 the wait with the delivery attached:
 
 ```rust,ignore
+let waits = OrmAiSubscriptionWaitService::new(/* ... */)
+    .with_capability_broker(broker.clone());
 let context = AiSubscriptionWaitRegistrationContext::new(/* as for a direct wait */)?
     .with_capability_delivery(delivery.clone());
 waits.register_wait(&lease, &provider_result, context).await?;
@@ -944,7 +946,26 @@ content protection are checked as for a direct call, and every claim,
 delivery and resumption rechecks them. A subscription that has since been
 removed or replaced (a different capability fingerprint) is stale: the wait
 closes as `capability_stale` before anything is observed or delivered, and
-resumption refuses it with `AI_CAPABILITY_STALE`.
+resumption refuses it with `AI_CAPABILITY_STALE`; both coordinators record
+that resumption as `capability_stale`.
+
+**Broker admission is re-run.** The wait service's broker
+(`OrmAiSubscriptionWaitService::with_capability_broker`) re-admits a
+broker-routed wait for the run that registered it, at registration and at
+every claim, delivery and resumption: its current index must still hold the
+exact subscription entry from an in-process typed catalogue, and host
+capability policy must still admit it for that run. A removed or replaced
+entry closes the wait as `capability_stale`; a policy denial closes it as
+`subscription_authority_revoked`. Revoking broker access, for a principal,
+run or provider, therefore stops a wait that is already parked. A service
+without the broker refuses broker-routed registration and closes an existing
+broker-routed wait at its next claim.
+
+**Unreachable references are stale.** Session clones share loaded state. A
+reference a session does not reach (a subscription or mutation family it
+does not broker, or a static tool outside its list) is `selection_stale` at
+execute, exactly as an unknown reference, so one clone cannot learn what
+another loaded.
 
 **Two identities.** The wait's tool-call row uses the dual identity of a
 brokered mutation (AI schema module 0.86.0): `tool_id` and

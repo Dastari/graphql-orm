@@ -780,7 +780,8 @@ impl AiSupervisedAgentCoordinator {
             });
         }
         if lease.latest_checkpoint_id().is_some() {
-            match self.checkpoint_control.adopt_classified(&lease).await {
+            let adopted = self.checkpoint_control.adopt_classified(&lease).await;
+            match adopted {
                 Ok(Some(AiAdoptedClassifiedMutationBatch::Supervised(adopted))) => {
                     self.continue_from_adopted(lease, adopted).await
                 }
@@ -796,7 +797,10 @@ impl AiSupervisedAgentCoordinator {
                         &lease,
                         &guard,
                         AiAgentRecoveryPhase::ApplicationTool,
-                        "classified_mutation_checkpoint_adoption_failed",
+                        crate::orm_coordinator::adoption_failure_code(
+                            &adopted,
+                            "classified_mutation_checkpoint_adoption_failed",
+                        ),
                         None,
                     )
                     .await
@@ -4265,6 +4269,102 @@ mod tests {
             )]
         );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    /// Checkpoint control whose subscription adoption fails with one fixed
+    /// error, as a wait service does for a removed or replaced capability.
+    struct RefusingSubscriptionCheckpointControl {
+        stale: bool,
+    }
+
+    #[async_trait]
+    impl AiAgentSupervisedCheckpointControl for RefusingSubscriptionCheckpointControl {
+        async fn adopt(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedSupervisedToolBatch>, AiError> {
+            Ok(None)
+        }
+
+        async fn consume(
+            &self,
+            _lease: &AiRunLease,
+            _adopted: &AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn adopt_subscription(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
+            Err(if self.stale {
+                AiError::InvalidInput(crate::AI_CAPABILITY_STALE.to_owned())
+            } else {
+                AiError::Conflict
+            })
+        }
+    }
+
+    /// A resumed subscription whose capability became stale records
+    /// `capability_stale` as its durable recovery code; every other adoption
+    /// failure keeps the generic code.
+    #[tokio::test]
+    async fn a_stale_subscription_at_adoption_records_capability_stale() {
+        for (stale, expected) in [
+            (true, "capability_stale"),
+            (false, "classified_mutation_checkpoint_adoption_failed"),
+        ] {
+            let base = AiRunLease::test_running(principal_reference());
+            let claimed = base.test_with_checkpoint(Uuid::new_v4());
+            let provider = Arc::new(TestProviderExecutor {
+                responses: Mutex::new(VecDeque::new()),
+                require_checkpoint_cleared: true,
+                calls: AtomicUsize::new(0),
+                closed: Mutex::new(Vec::new()),
+            });
+            let run = Arc::new(TestRunControl::new());
+            let coordinator = AiSupervisedAgentCoordinator::new(
+                run.clone(),
+                provider.clone(),
+                Arc::new(TestOutputWriter),
+                Arc::new(TestCheckpointWriter {
+                    provider_checkpoints: AtomicUsize::new(0),
+                }),
+                Arc::new(RefusingSubscriptionCheckpointControl { stale }),
+                Arc::new(TestApprovalStager {
+                    calls: AtomicUsize::new(0),
+                    saw_checkpoint: AtomicBool::new(false),
+                }),
+                unused_automatic(),
+                unused_resume(),
+                Arc::new(TestRuleResolver),
+                Arc::new(TestPlanner {
+                    scope: test_scope(),
+                    route: test_route(),
+                    continuation_count: AtomicUsize::new(0),
+                }),
+                Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+                limits(),
+            );
+            let outcome = coordinator
+                .execute_claimed(&claimed)
+                .await
+                .expect("a refused adoption closes the run");
+            assert!(
+                matches!(
+                    outcome,
+                    AiSupervisedAgentRunOutcome::RecoveryRequired { .. }
+                ),
+                "{outcome:?}"
+            );
+            assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+            assert_eq!(
+                run.final_codes(),
+                vec![(expected.to_owned(), Some(expected.to_owned()))]
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]

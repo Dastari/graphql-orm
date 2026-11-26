@@ -41,8 +41,14 @@ supersedes: []
   protected arguments are the `graphql-orm-ai/brokered-call/v1` evidence
   envelope. The protected wait request records the resolved call
   (`formatVersion` 2). Results and wait completions answer the provider's
-  original broker call ID and tool ID. Per-turn, per-run and rule-usage
-  limits are those of a direct wait. No schema module change. The discover
+  original broker call ID and tool ID. The wait service re-admits a
+  broker-routed wait through the host's broker
+  (`OrmAiSubscriptionWaitService::with_capability_broker`) at registration
+  and at every claim, delivery and resumption: an entry removed from the
+  broker's current index or replaced closes it as `capability_stale`, and a
+  host capability policy denial as `subscription_authority_revoked`, so
+  revoking broker access stops waits already parked. Per-turn, per-run and
+  rule-usage limits are those of a direct wait. No schema module change. The discover
   and execute broker definitions change in the same release as broker
   version 3. [Migration](MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
 - **Breaking (#551).** Every claim, delivery and resumption of a durable wait,
@@ -51,7 +57,14 @@ supersedes: []
   or replaced subscription closes the wait as `capability_stale` (run
   `Failed`, tool call and step `capability_stale`) before anything is
   observed or delivered, instead of `subscription_authority_revoked`, and
-  resumption refuses it with `AI_CAPABILITY_STALE`.
+  resumption refuses it with `AI_CAPABILITY_STALE`. Both coordinators record
+  that refusal at resumption as `capability_stale`, not as a generic
+  checkpoint-adoption code, so alerts keyed on it fire.
+- **Breaking (#551).** Broker execute of a loaded reference the session does
+  not reach (a subscription or mutation it does not broker, or a static tool
+  outside its list, loaded through another clone sharing its state) returns
+  `selection_stale`, the same as an unknown reference, instead of
+  `Forbidden`, so a clone cannot tell that another clone loaded it.
 - **Fixed (#551).** The wait service checked hierarchical rules against the
   per-plan compiled descriptor fingerprint instead of the subscription's
   capability fingerprint, so a rule allowlist could never admit a direct
@@ -63,6 +76,7 @@ supersedes: []
   `AiCapabilityExecution::is_subscription_wait`,
   `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`,
   `AiSubscriptionWaitRegistrationContext::with_capability_delivery`,
+  `OrmAiSubscriptionWaitService::with_capability_broker`,
   `AiToolCatalog::subscription_capability` and
   `subscription_capability_signature`.
 

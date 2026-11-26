@@ -347,6 +347,57 @@ struct ProtectedResolvedCall {
     provider_argument_hash: String,
     rule_fingerprint: String,
     plan: Value,
+    broker_run: ProtectedBrokerRun,
+}
+
+/// The broker run binding a broker-routed wait was admitted for. Every
+/// claim, delivery and resumption re-runs broker admission for this exact
+/// run, which must be the waiter's own registering run and attempt.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProtectedBrokerRun {
+    session_id: Uuid,
+    run_id: Uuid,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    provider_kind: crate::ProviderKind,
+    provider_session_fingerprint: String,
+}
+
+impl ProtectedBrokerRun {
+    fn from_binding(run: &crate::AiCapabilityRunBinding) -> Self {
+        Self {
+            session_id: run.session_id.0,
+            run_id: run.run_id.0,
+            attempt_id: run.attempt_id,
+            lease_generation: run.lease_generation,
+            provider_kind: run.provider_kind.clone(),
+            provider_session_fingerprint: run.provider_session_fingerprint.clone(),
+        }
+    }
+
+    /// The stored binding, proven to be the waiter's registering run.
+    fn binding(
+        &self,
+        waiter: &AiSubscriptionWaiterRecord,
+    ) -> Result<crate::AiCapabilityRunBinding, AiError> {
+        if self.session_id != waiter.session_id
+            || self.run_id != waiter.run_id
+            || self.attempt_id != waiter.source_attempt_id
+            || self.lease_generation != waiter.source_lease_generation
+            || !valid_fingerprint(&self.provider_session_fingerprint)
+        {
+            return Err(AiError::Conflict);
+        }
+        Ok(crate::AiCapabilityRunBinding {
+            session_id: AiSessionId(self.session_id),
+            run_id: crate::AiRunId(self.run_id),
+            attempt_id: self.attempt_id,
+            lease_generation: self.lease_generation,
+            provider_kind: self.provider_kind.clone(),
+            provider_session_fingerprint: self.provider_session_fingerprint.clone(),
+        })
+    }
 }
 
 struct OpenedWait {
@@ -369,6 +420,7 @@ struct OpenedWait {
     provider_turns: u32,
     total_tool_calls: u32,
     position: AiSubscriptionReplayPosition,
+    resolved_call: Option<ProtectedResolvedCall>,
 }
 
 #[derive(Clone)]
@@ -488,6 +540,7 @@ pub struct OrmAiSubscriptionWaitService {
     rule_service: Arc<dyn AiRulePolicyService>,
     egress_audit: Arc<dyn AiEgressDecisionAudit>,
     provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
+    capability_broker: Option<Arc<crate::AiCapabilityDiscoveryBroker>>,
     clock: Arc<dyn Clock>,
     limits: AiSubscriptionWaitLimits,
 }
@@ -510,9 +563,33 @@ impl OrmAiSubscriptionWaitService {
             rule_service,
             egress_audit,
             provider_session_service: None,
+            capability_broker: None,
             clock,
             limits,
         }
+    }
+
+    /// Enables durable waits registered through the fixed capability broker.
+    ///
+    /// Pass the host's [`crate::AiCapabilityDiscoveryBroker`]: the one whose
+    /// current index and host capability policy decide brokered capabilities.
+    /// A broker-routed wait is re-admitted by this broker at registration and
+    /// again at every claim, delivery and resumption, for the run that
+    /// registered it
+    /// ([`crate::AiCapabilityDiscoveryBroker`]'s current index must still
+    /// hold the exact subscription entry, and its host policy must still
+    /// admit it). A removed or replaced entry closes the wait as
+    /// `capability_stale`; a policy denial closes it as
+    /// `subscription_authority_revoked`. Without this, every broker-routed
+    /// registration is refused and every existing broker-routed wait closes
+    /// at its next claim. Direct waits do not use it.
+    #[must_use]
+    pub fn with_capability_broker(
+        mut self,
+        broker: Arc<crate::AiCapabilityDiscoveryBroker>,
+    ) -> Self {
+        self.capability_broker = Some(broker);
+        self
     }
 
     /// Enables exact parking and resumption for provider-retained turns.
@@ -577,7 +654,7 @@ impl OrmAiSubscriptionWaitService {
         // a direct call they are the same; a broker execute is resolved
         // through the attached delivery and is classified, rule-checked,
         // compiled and authorized as the resolved subscription only.
-        let resolved =
+        let (resolved, broker_run) =
             Box::pin(self.resolve_registration_call(lease, provider_result, &context)).await?;
         let compiled = self
             .runtime
@@ -731,6 +808,10 @@ impl OrmAiSubscriptionWaitService {
                     provider_argument_hash: resolved.provider_argument_hash.clone(),
                     rule_fingerprint: resolved.rule_fingerprint.clone().ok_or(AiError::Conflict)?,
                     plan: resolved.arguments.clone(),
+                    broker_run: broker_run
+                        .as_ref()
+                        .map(ProtectedBrokerRun::from_binding)
+                        .ok_or(AiError::Conflict)?,
                 })
                 .map_err(|_| AiError::PersistenceFailed)?,
             );
@@ -1782,6 +1863,12 @@ impl OrmAiSubscriptionWaitService {
             &opened.descriptor.id,
             &opened.waiter.capability_fingerprint,
         )?;
+        self.readmit_stored_broker_call(
+            opened.resolved_call.as_ref(),
+            &opened.principal_reference,
+            &opened.waiter,
+        )
+        .await?;
         let principal = self
             .runtime
             .resolve_current_principal(&opened.principal_reference)
@@ -2346,6 +2433,12 @@ impl OrmAiSubscriptionWaitService {
             &subscription_id,
             &request_payload.capability_fingerprint,
         )?;
+        self.readmit_stored_broker_call(
+            request_payload.resolved_call.as_ref(),
+            &principal_reference,
+            &waiter,
+        )
+        .await?;
         let direct_definition_matches = if request_payload.resolved_call.is_none() {
             let provider_definition = self
                 .runtime
@@ -2871,8 +2964,15 @@ impl OrmAiSubscriptionWaitService {
             return Err(AiError::Conflict);
         }
         // A removed or replaced subscription is stale before anything else
-        // is compared against it.
+        // is compared against it; a broker-routed one must also still be
+        // admitted by the broker it was registered through.
         self.current_subscription_capability(&subscription_id, &payload.capability_fingerprint)?;
+        self.readmit_stored_broker_call(
+            payload.resolved_call.as_ref(),
+            &principal_reference,
+            &waiter,
+        )
+        .await?;
         if payload.resolved_call.is_none() {
             let provider_definition = self
                 .runtime
@@ -2987,6 +3087,7 @@ impl OrmAiSubscriptionWaitService {
             provider_turns: payload.provider_turns,
             total_tool_calls: payload.total_tool_calls,
             position,
+            resolved_call: payload.resolved_call,
         })
     }
 
@@ -3006,16 +3107,23 @@ impl OrmAiSubscriptionWaitService {
         lease: &AiRunLease,
         provider_result: &AiProviderCallResult,
         context: &AiSubscriptionWaitRegistrationContext,
-    ) -> Result<ResolvedApplicationCall, AiError> {
+    ) -> Result<
+        (
+            ResolvedApplicationCall,
+            Option<crate::AiCapabilityRunBinding>,
+        ),
+        AiError,
+    > {
         let call = provider_result
             .tool_calls()
             .first()
             .ok_or(AiError::Conflict)?;
         let Some(operation) = crate::AiCapabilityBrokerOperation::from_tool_id(call.tool_id())
         else {
-            return Ok(ResolvedApplicationCall::direct(call));
+            return Ok((ResolvedApplicationCall::direct(call), None));
         };
         let delivery = context.delivery.as_ref().ok_or(AiError::Forbidden)?;
+        let broker = self.capability_broker.as_ref().ok_or(AiError::Forbidden)?;
         let session = delivery.session();
         if operation != crate::AiCapabilityBrokerOperation::Execute
             || !session.brokers_subscriptions()
@@ -3042,7 +3150,16 @@ impl OrmAiSubscriptionWaitService {
             execution.capability_id(),
             execution.capability_fingerprint(),
         )?;
-        ResolvedApplicationCall {
+        // The service's own broker, which later claims re-admit through,
+        // must admit the resolution now.
+        Box::pin(broker.readmit_brokered_subscription(
+            lease.principal_reference(),
+            &run,
+            execution.capability_id(),
+            execution.capability_fingerprint(),
+        ))
+        .await?;
+        let resolved = ResolvedApplicationCall {
             provider_call_id: call.call_id().to_owned(),
             provider_tool_id: call.tool_id().clone(),
             provider_tool_fingerprint: call.tool_fingerprint().to_owned(),
@@ -3052,7 +3169,31 @@ impl OrmAiSubscriptionWaitService {
             arguments: execution.into_plan(),
             rule_fingerprint: Some(context.rules.rules().fingerprint().to_owned()),
         }
-        .bind_provider_call(call)
+        .bind_provider_call(call)?;
+        Ok((resolved, Some(run)))
+    }
+
+    /// Re-runs broker admission for one broker-routed wait: the service's
+    /// broker must still hold and admit the exact resolved subscription for
+    /// the registering run. A direct wait has nothing to re-admit.
+    async fn readmit_stored_broker_call(
+        &self,
+        resolved: Option<&ProtectedResolvedCall>,
+        principal_reference: &PrincipalReference,
+        waiter: &AiSubscriptionWaiterRecord,
+    ) -> Result<(), AiError> {
+        let Some(resolved) = resolved else {
+            return Ok(());
+        };
+        let broker = self.capability_broker.as_ref().ok_or(AiError::Forbidden)?;
+        let run = resolved.broker_run.binding(waiter)?;
+        Box::pin(broker.readmit_brokered_subscription(
+            principal_reference,
+            &run,
+            &AiToolId::parse(resolved.tool_id.clone())?,
+            &resolved.tool_fingerprint,
+        ))
+        .await
     }
 
     /// Proves the registered subscription capability `id` still carries the
@@ -4529,6 +4670,9 @@ mod tests {
         capability_catalog: crate::AiGraphqlSubscriptionCapabilityCatalog,
         target_id: crate::GraphqlExecutionTargetId,
         sources: Arc<crate::AiReplayableSubscriptionSourceRegistry>,
+        broker: Arc<crate::AiCapabilityDiscoveryBroker>,
+        broker_index: Arc<brokered::WaitCurrentIndex>,
+        broker_allowed: Arc<AtomicBool>,
     }
 
     /// The finished SDL of the fixture's one replayable subscription.
@@ -4725,6 +4869,26 @@ mod tests {
             invalidate_registration_after_park: AtomicBool::new(false),
         });
         let sources = Arc::new(sources);
+        let broker_index = Arc::new(brokered::WaitCurrentIndex::compiled(
+            &target_id,
+            &semantics,
+            &capability_catalog,
+        ));
+        let broker_allowed = Arc::new(AtomicBool::new(true));
+        let broker = Arc::new(
+            crate::AiCapabilityDiscoveryBroker::new(
+                Arc::new(TestPrincipalResolver {
+                    principal: principal.clone(),
+                    active: principal_active.clone(),
+                    clock: clock.clone(),
+                }),
+                broker_index.clone(),
+                Arc::new(brokered::WaitBrokerAuthority(broker_allowed.clone())),
+                clock.clone(),
+                Duration::seconds(30),
+            )
+            .expect("broker"),
+        );
         let service = Arc::new(
             OrmAiSubscriptionWaitService::new(
                 run_service.clone(),
@@ -4735,7 +4899,8 @@ mod tests {
                 clock.clone(),
                 AiSubscriptionWaitLimits::default(),
             )
-            .with_provider_session_service(provider_sessions.clone()),
+            .with_provider_session_service(provider_sessions.clone())
+            .with_capability_broker(broker.clone()),
         );
         WaitFixture {
             database,
@@ -4756,6 +4921,9 @@ mod tests {
             capability_catalog,
             target_id,
             sources,
+            broker,
+            broker_index,
+            broker_allowed,
         }
     }
 

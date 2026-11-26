@@ -1943,6 +1943,61 @@ impl AiCapabilityDiscoveryBroker {
         .await
         .map_err(|_| AiError::ReauthorizationFailed)
     }
+
+    /// Re-runs this broker's own admission of one generated subscription a
+    /// durable wait was registered through, for the run that registered it.
+    ///
+    /// The wait service calls this at every claim, delivery and resumption
+    /// of a broker-routed wait, after the run's broker session is gone. It
+    /// rehydrates the principal, requires the current index for `run` to
+    /// still hold the exact subscription entry (same identity, kind and
+    /// capability fingerprint, from an index compiled in process from a
+    /// typed subscription catalogue), and requires current host capability
+    /// policy to still admit that entry for `run`. It authorizes nothing by
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AI_CAPABILITY_STALE`] when the entry was removed, replaced
+    /// or lost its in-process proof, [`AiError::Forbidden`] when host policy
+    /// no longer admits it, [`AiError::ReauthorizationFailed`] when the
+    /// principal cannot be rehydrated, and propagates an index failure.
+    pub(crate) async fn readmit_brokered_subscription(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+    ) -> Result<(), AiError> {
+        let principal = self.rehydrate(principal_reference).await?;
+        let indexes = self.current_indexes.current_index_set(run)?;
+        let (index, entry) = indexes.entry(capability_id).ok_or_else(stale_capability)?;
+        if entry.kind != AiCapabilityKind::GeneratedSubscription
+            || entry.capability_fingerprint != capability_fingerprint
+            || !index.subscriptions_checked_against_finished_schema()
+        {
+            return Err(stale_capability());
+        }
+        let decision = self
+            .authority
+            .authorize(&principal, index, entry, run)
+            .await?;
+        if !decision.allowed || !valid_binding_value(&decision.policy_fingerprint) {
+            return Err(AiError::Forbidden);
+        }
+        // A subscription an entity groups would be admitted only with its
+        // entity, as at discovery.
+        if let Some(entity) = index.entity_entry_of(&entry.id) {
+            let decision = self
+                .authority
+                .authorize(&principal, index, entity, run)
+                .await?;
+            if !decision.allowed || !valid_binding_value(&decision.policy_fingerprint) {
+                return Err(AiError::Forbidden);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn verify_search_binding(
@@ -2467,6 +2522,23 @@ impl AiCapabilityBrokerSession {
             .and_then(serde_json::Value::as_str)
             .and_then(|reference| self.loaded(reference))
             .is_some_and(|loaded| loaded.capability_kind == AiCapabilityKind::GeneratedMutation)
+    }
+
+    /// Whether this session's own configuration reaches a loaded binding's
+    /// capability family: a generated read, a brokered static tool of this
+    /// exact fingerprint, or a mutation or subscription when the session
+    /// brokers that family. Rules and policy are applied later; this only
+    /// keeps a binding loaded through another clone indistinguishable from
+    /// an unknown reference.
+    fn reaches_loaded_kind(&self, loaded: &AiLoadedCapabilityBinding) -> bool {
+        match loaded.capability_kind {
+            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery => true,
+            AiCapabilityKind::ReviewedStatic => self
+                .brokered_static_tools
+                .contains(&loaded.capability_fingerprint),
+            AiCapabilityKind::GeneratedMutation => self.brokered_mutations,
+            AiCapabilityKind::GeneratedSubscription => self.brokered_subscriptions,
+        }
     }
 
     /// Whether this run's broker reaches the entry at all: a generated read,
@@ -4622,6 +4694,14 @@ impl AiCapabilityDiscoveryBroker {
             .loaded(&parsed.loaded_reference)
             .ok_or_else(stale_selection)?;
         if self.clock.now() > loaded.expires_at {
+            return Err(stale_selection());
+        }
+        // Session clones share loaded state. A reference this session's own
+        // configuration does not reach (a subscription, mutation or static
+        // tool it does not broker) is the same stale selection as an unknown
+        // reference, whatever the call carries, so a clone cannot learn that
+        // another clone loaded a capability hidden from it.
+        if !session.reaches_loaded_kind(&loaded) {
             return Err(stale_selection());
         }
         if let Some(handle) = parsed.continuation.clone() {
@@ -8063,7 +8143,8 @@ mod tests {
         }
 
         // The same loaded binding in run state that no longer brokers the
-        // tool does not execute.
+        // tool does not execute, and is indistinguishable from an unknown
+        // reference.
         let revoked = AiCapabilityBrokerSession {
             inner: Arc::clone(&session.inner),
             limits: session.limits,
@@ -8082,7 +8163,7 @@ mod tests {
                     &json!({"loadedReference": loaded_reference, "selections": []}),
                 )
                 .await,
-            Err(AiError::Forbidden)
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
         ));
     }
 
@@ -8874,16 +8955,38 @@ mod tests {
         }
         // The loaded reference does not resolve for a session that did not
         // opt in, even when it shares this run's broker state.
+        // A clone that did not opt in shares this run's loaded state, but a
+        // subscription reference it holds is exactly an unknown reference to
+        // it, with or without a continuation or an observation.
         let closed = AiCapabilityBrokerSession {
             brokered_subscriptions: false,
             ..session.clone()
         };
-        assert!(matches!(
-            broker
-                .authorize_broker_execution(&principal_reference, &run, &closed, &execute)
-                .await,
-            Err(AiError::Forbidden)
-        ));
+        let unknown = "f".repeat(64);
+        assert_ne!(unknown, loaded_reference);
+        for (reference, arguments) in [
+            (&loaded_reference, execute.clone()),
+            (
+                &loaded_reference,
+                json!({"loadedReference": loaded_reference, "continuation": "a".repeat(64)}),
+            ),
+            (
+                &loaded_reference,
+                json!({"loadedReference": loaded_reference, "selections": ["id"]}),
+            ),
+            (
+                &unknown,
+                json!({"loadedReference": unknown, "selections": ["id"], "observation": observation}),
+            ),
+        ] {
+            let refused = broker
+                .authorize_broker_execution(&principal_reference, &run, &closed, &arguments)
+                .await;
+            assert!(
+                matches!(&refused, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+                "{reference}: {refused:?}"
+            );
+        }
         // Host policy revoked between describe and execute refuses.
         authority.allowed.store(false, Ordering::SeqCst);
         assert!(matches!(

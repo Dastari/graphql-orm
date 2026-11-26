@@ -37,7 +37,12 @@ to a generated subscription
 (`AiSubscriptionWaitRegistrationContext::with_capability_delivery`; see
 [Generated subscriptions through the fixed broker](capability-discovery-and-execution.md#generated-subscriptions-through-the-fixed-broker)).
 Its tool-call row records both the provider-facing broker call and the
-resolved subscription, and its result answers the broker call.
+resolved subscription, and its result answers the broker call. Construct
+the service with `OrmAiSubscriptionWaitService::with_capability_broker`: the
+host's broker re-admits such a wait for its registering run at registration
+and at every claim, delivery and resumption, so a removed broker entry
+closes it as `capability_stale` and a revoked broker policy as
+`subscription_authority_revoked`.
 
 Hierarchical rules admit a subscription by its capability fingerprint, the
 fingerprint of its offered definition, never the broker's or a per-plan one.

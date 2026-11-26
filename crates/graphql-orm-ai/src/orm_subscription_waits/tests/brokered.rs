@@ -9,24 +9,77 @@ use super::*;
 use crate::{
     AI_CAPABILITY_EXECUTE_TOOL_ID, AiCapabilityBrokerOperation, AiCapabilityBrokerSession,
     AiCapabilityDeliveryLimits, AiCapabilityDeliveryMode, AiCapabilityDeliveryTurn,
-    AiCapabilityDiscoveryBroker, AiCapabilityIndex, AiCapabilityIndexLimits, AiCapabilityIndexSet,
-    AiCapabilityRunBinding, AiProviderCapabilitySessionBinding, ModelInputBlock,
-    ModelReasoningEffort, ProviderCapabilities, ProviderKind,
+    AiCapabilityIndex, AiCapabilityIndexLimits, AiCapabilityIndexSet, AiCapabilityRunBinding,
+    AiProviderCapabilitySessionBinding, ModelInputBlock, ModelReasoningEffort,
+    ProviderCapabilities, ProviderKind,
 };
 
-struct WaitCurrentIndex(Arc<AiCapabilityIndex>);
+/// The broker's current index: the fixture's in-process subscription index,
+/// replaceable so a test can remove the entry under a parked wait.
+pub(super) struct WaitCurrentIndex(std::sync::RwLock<Arc<AiCapabilityIndex>>);
+
+impl WaitCurrentIndex {
+    pub(super) fn compiled(
+        target_id: &crate::GraphqlExecutionTargetId,
+        semantics: &GraphqlSemanticCatalog,
+        catalog: &crate::AiGraphqlSubscriptionCapabilityCatalog,
+    ) -> Self {
+        Self(std::sync::RwLock::new(Arc::new(Self::index(
+            target_id, semantics, catalog, true,
+        ))))
+    }
+
+    fn index(
+        target_id: &crate::GraphqlExecutionTargetId,
+        semantics: &GraphqlSemanticCatalog,
+        catalog: &crate::AiGraphqlSubscriptionCapabilityCatalog,
+        with_subscriptions: bool,
+    ) -> AiCapabilityIndex {
+        let index = AiCapabilityIndex::compile(
+            target_id.clone(),
+            catalog.finished_schema_fingerprint(),
+            semantics,
+            None,
+            None,
+            with_subscriptions.then_some(catalog),
+            [],
+            "target-policy-v1",
+            AiCapabilityIndexLimits::default(),
+        )
+        .expect("subscription capability index");
+        assert_eq!(
+            index.subscriptions_checked_against_finished_schema(),
+            with_subscriptions
+        );
+        index
+    }
+
+    fn current(&self) -> Arc<AiCapabilityIndex> {
+        Arc::clone(&self.0.read().expect("index lock"))
+    }
+
+    /// Replaces the current index with one that holds no subscription.
+    fn remove_subscriptions(&self, fixture: &WaitFixture) {
+        *self.0.write().expect("index lock") = Arc::new(Self::index(
+            &fixture.target_id,
+            &fixture.semantics,
+            &fixture.capability_catalog,
+            false,
+        ));
+    }
+}
 
 impl crate::AiCurrentCapabilityIndex for WaitCurrentIndex {
     fn current_index(
         &self,
         _run: &AiCapabilityRunBinding,
     ) -> Result<Arc<AiCapabilityIndex>, AiError> {
-        Ok(Arc::clone(&self.0))
+        Ok(self.current())
     }
 }
 
 /// Host capability policy that admits every entry while `allowed` holds.
-struct WaitBrokerAuthority(Arc<AtomicBool>);
+pub(super) struct WaitBrokerAuthority(pub(super) Arc<AtomicBool>);
 
 #[async_trait]
 impl crate::AiCapabilityAuthorityPolicy for WaitBrokerAuthority {
@@ -84,40 +137,15 @@ impl WaitFixture {
     /// A fixed-broker delivery over the fixture's subscription catalogue,
     /// compiled in process, with subscriptions brokered when `opted_in`.
     fn brokered_delivery(&self, opted_in: bool) -> AiCapabilityDeliveryTurn {
-        self.delivery_over(opted_in, Arc::new(AtomicBool::new(true)))
+        self.delivery_over(opted_in)
     }
 
-    fn delivery_over(&self, opted_in: bool, allowed: Arc<AtomicBool>) -> AiCapabilityDeliveryTurn {
-        let index = Arc::new(
-            AiCapabilityIndex::compile(
-                self.target_id.clone(),
-                self.capability_catalog.finished_schema_fingerprint(),
-                &self.semantics,
-                None,
-                None,
-                Some(&self.capability_catalog),
-                [],
-                "target-policy-v1",
-                AiCapabilityIndexLimits::default(),
-            )
-            .expect("subscription capability index"),
-        );
-        assert!(index.subscriptions_checked_against_finished_schema());
-        let index_set = AiCapabilityIndexSet::compile([index.clone()]).expect("index set");
-        let broker = Arc::new(
-            AiCapabilityDiscoveryBroker::new(
-                Arc::new(TestPrincipalResolver {
-                    principal: self.principal.clone(),
-                    active: self.principal_active.clone(),
-                    clock: self.clock.clone(),
-                }),
-                Arc::new(WaitCurrentIndex(index)),
-                Arc::new(WaitBrokerAuthority(allowed)),
-                self.clock.clone(),
-                Duration::seconds(30),
-            )
-            .expect("broker"),
-        );
+    /// A delivery over the fixture's shared broker, the one its wait
+    /// services re-admit through.
+    fn delivery_over(&self, opted_in: bool) -> AiCapabilityDeliveryTurn {
+        let index_set =
+            AiCapabilityIndexSet::compile([self.broker_index.current()]).expect("index set");
+        let broker = self.broker.clone();
         let binding = AiProviderCapabilitySessionBinding::new(
             AiCapabilityDeliveryMode::FixedBroker,
             index_set.fingerprint(),
@@ -287,15 +315,18 @@ impl WaitFixture {
             catalog,
         )
         .await;
-        Arc::new(OrmAiSubscriptionWaitService::new(
-            self.run_service.clone(),
-            Arc::new(runtime),
-            self.sources.clone(),
-            Arc::new(TestRules(rules)),
-            Arc::new(TestEgressAudit),
-            self.clock.clone(),
-            AiSubscriptionWaitLimits::default(),
-        ))
+        Arc::new(
+            OrmAiSubscriptionWaitService::new(
+                self.run_service.clone(),
+                Arc::new(runtime),
+                self.sources.clone(),
+                Arc::new(TestRules(rules)),
+                Arc::new(TestEgressAudit),
+                self.clock.clone(),
+                AiSubscriptionWaitLimits::default(),
+            )
+            .with_capability_broker(self.broker.clone()),
+        )
     }
 
     /// The fixture's subscription recompiled under a lower event ceiling: the
@@ -1066,4 +1097,222 @@ async fn sqlite_the_read_broker_path_describes_a_subscription_and_never_runs_one
             .len(),
         0
     );
+}
+
+/// The run state, run error code and tool-call authorization code of one wait.
+async fn closed_codes(
+    fixture: &WaitFixture,
+    registered: &AiRegisteredSubscriptionWait,
+) -> (String, Option<String>, Option<String>) {
+    let run = AiRunRecord::find_by_id(&fixture.database, &registered.run_id().0)
+        .await
+        .expect("run loads")
+        .expect("run exists");
+    let call = AiToolCallRecord::find_by_id(&fixture.database, &registered.tool_call_id().0)
+        .await
+        .expect("tool call loads")
+        .expect("tool call exists");
+    (run.state, run.error_code, call.authorization_code)
+}
+
+async fn adoption_count(fixture: &WaitFixture) -> usize {
+    AiSubscriptionWaitAdoptionRecord::query(fixture.database.pool())
+        .fetch_all()
+        .await
+        .expect("adoptions load")
+        .len()
+}
+
+#[tokio::test]
+async fn sqlite_revoked_broker_policy_closes_a_parked_brokered_wait_but_not_a_direct_one() {
+    let fixture = wait_fixture().await;
+    let brokered = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "policy-revoked-call")
+        .await
+        .expect("brokered wait registers");
+    let lease = fixture.start_lease().await;
+    let direct = fixture.direct_result(&lease, &["direct-unaffected-call"]);
+    let direct = fixture
+        .register_result(
+            &fixture.service,
+            &fixture.rules,
+            &lease,
+            direct,
+            None,
+            test_rule_usage(),
+        )
+        .await
+        .expect("direct wait registers");
+
+    // The host revokes the broker's capability policy after both parked.
+    // The runtime catalogue and every direct-wait policy still admit the
+    // subscription; only broker admission changed.
+    fixture.broker_allowed.store(false, Ordering::SeqCst);
+    let mut closed = false;
+    let mut queued = false;
+    for worker in ["revoked-worker-a", "revoked-worker-b"] {
+        fixture.source.push(fixture.event(1, "wanted"));
+        match fixture.service.process_next(worker).await {
+            Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. }) => {
+                assert_eq!(waiter_id, brokered.waiter_id());
+                closed = true;
+            }
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { waiter_id, .. }) => {
+                assert_eq!(waiter_id, direct.waiter_id());
+                queued = true;
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+    assert!(closed && queued);
+    assert_eq!(
+        closed_codes(&fixture, &brokered).await,
+        (
+            AiRunState::Failed.as_str().to_owned(),
+            Some("subscription_authority_revoked".to_owned()),
+            Some("subscription_authority_revoked".to_owned()),
+        )
+    );
+    assert_eq!(
+        adoption_count(&fixture).await,
+        1,
+        "only the direct wait delivered"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_revoked_broker_policy_refuses_resuming_a_queued_brokered_wait() {
+    let fixture = wait_fixture().await;
+    fixture
+        .register_brokered(&fixture.service, &fixture.rules, "resume-revoked-call")
+        .await
+        .expect("brokered wait registers");
+    fixture.source.push(fixture.event(1, "wanted"));
+    assert!(matches!(
+        fixture.service.process_next("resume-revoked-worker").await,
+        Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+    ));
+    let lease = fixture.resume().await;
+    fixture.broker_allowed.store(false, Ordering::SeqCst);
+    let control = AiSupervisedSubscriptionCheckpointControl::new(
+        fixture.service.clone(),
+        Arc::new(EmptySupervisedCheckpointControl),
+    );
+    assert!(matches!(
+        crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &lease).await,
+        Err(AiError::Forbidden)
+    ));
+    let adoptions = AiSubscriptionWaitAdoptionRecord::query(fixture.database.pool())
+        .fetch_all()
+        .await
+        .expect("adoptions load");
+    assert_eq!(adoptions[0].state, "queued", "the adoption was not claimed");
+}
+
+#[tokio::test]
+async fn sqlite_a_broker_entry_removed_under_a_parked_wait_is_capability_stale() {
+    let fixture = wait_fixture().await;
+    let parked = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "entry-removed-call")
+        .await
+        .expect("brokered wait registers");
+    let queued = fixture
+        .register_brokered(
+            &fixture.service,
+            &fixture.rules,
+            "entry-removed-queued-call",
+        )
+        .await
+        .expect("second brokered wait registers");
+    // Deliver the second wait's outcome while the entry still exists; the
+    // first stays parked.
+    fixture.source.push(fixture.event(1, "wanted"));
+    let delivered = fixture
+        .service
+        .process_next("entry-worker-a")
+        .await
+        .expect("one wait delivers");
+    let AiSubscriptionWaitWorkerOutcome::Queued {
+        waiter_id: delivered,
+        ..
+    } = delivered
+    else {
+        panic!("one wait queues: {delivered:?}");
+    };
+    let still_parked = if delivered == parked.waiter_id() {
+        &queued
+    } else {
+        &parked
+    };
+
+    // The host removes the subscription from the broker's index. The
+    // runtime catalogue still registers it with the same fingerprint.
+    fixture.broker_index.remove_subscriptions(&fixture);
+    fixture.source.push(fixture.event(2, "wanted"));
+    assert!(matches!(
+        fixture.service.process_next("entry-worker-b").await,
+        Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+            if waiter_id == still_parked.waiter_id()
+    ));
+    assert_eq!(
+        closed_codes(&fixture, still_parked).await,
+        (
+            AiRunState::Failed.as_str().to_owned(),
+            Some("capability_stale".to_owned()),
+            Some("capability_stale".to_owned()),
+        )
+    );
+    // The delivered wait cannot resume either.
+    let lease = fixture.resume().await;
+    let control = AiSupervisedSubscriptionCheckpointControl::new(
+        fixture.service.clone(),
+        Arc::new(EmptySupervisedCheckpointControl),
+    );
+    let error = crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &lease)
+        .await
+        .expect_err("a removed broker entry is never resumed");
+    assert_stale(&error);
+    assert_eq!(adoption_count(&fixture).await, 1);
+}
+
+#[tokio::test]
+async fn sqlite_a_service_without_the_broker_refuses_and_closes_brokered_waits() {
+    let fixture = wait_fixture().await;
+    let runtime = subscription_runtime(
+        &fixture.database,
+        &fixture.principal,
+        &fixture.principal_active,
+        &fixture.access_allowed,
+        &fixture.clock,
+        &fixture.target_id,
+        &fixture.capability_catalog,
+        Some(&fixture.capability_catalog),
+    )
+    .await;
+    let unbrokered = Arc::new(OrmAiSubscriptionWaitService::new(
+        fixture.run_service.clone(),
+        Arc::new(runtime),
+        fixture.sources.clone(),
+        Arc::new(TestRules(fixture.rules.clone())),
+        Arc::new(TestEgressAudit),
+        fixture.clock.clone(),
+        AiSubscriptionWaitLimits::default(),
+    ));
+    assert!(matches!(
+        fixture
+            .register_brokered(&unbrokered, &fixture.rules, "unbrokered-call")
+            .await,
+        Err(AiError::Forbidden)
+    ));
+    let registered = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "claimed-unbrokered-call")
+        .await
+        .expect("brokered wait registers");
+    fixture.source.push(fixture.event(1, "wanted"));
+    assert!(matches!(
+        unbrokered.process_next("unbrokered-worker").await,
+        Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+            if waiter_id == registered.waiter_id()
+    ));
+    assert_eq!(adoption_count(&fixture).await, 0);
 }

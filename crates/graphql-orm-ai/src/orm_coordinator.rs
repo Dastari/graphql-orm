@@ -1504,7 +1504,8 @@ impl AiReadOnlyAgentCoordinator {
             });
         }
         let (mut guard, mut turn_plan, mut rule_usage) = if lease.latest_checkpoint_id().is_some() {
-            let adopted = match self.checkpoint_adopter.adopt_tool_batch(&lease).await {
+            let adoption = self.checkpoint_adopter.adopt_tool_batch(&lease).await;
+            let adopted = match adoption {
                 Ok(Some(adopted)) => adopted,
                 Ok(None) | Err(_) => {
                     let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
@@ -1513,7 +1514,7 @@ impl AiReadOnlyAgentCoordinator {
                             &lease,
                             &guard,
                             AiAgentRecoveryPhase::ApplicationTool,
-                            "checkpoint_adoption_failed",
+                            adoption_failure_code(&adoption, "checkpoint_adoption_failed"),
                             None,
                         )
                         .await;
@@ -2674,6 +2675,24 @@ impl AiReadOnlyAgentCoordinator {
             provider_turns: guard.provider_turns(),
             total_tool_calls: guard.total_tool_calls(),
         })
+    }
+}
+
+/// Durable recovery code of a failed checkpoint adoption.
+///
+/// An adoption the adopter refused because the capability it resumes was
+/// removed or replaced ([`crate::AI_CAPABILITY_STALE`]) records
+/// `capability_stale`, so operator alerts keyed on that reason fire for a
+/// resumption exactly as for a claim. Every other failure keeps `fallback`.
+pub(crate) fn adoption_failure_code<T>(
+    adopted: &Result<T, AiError>,
+    fallback: &'static str,
+) -> &'static str {
+    match adopted {
+        Err(AiError::InvalidInput(message)) if message == crate::AI_CAPABILITY_STALE => {
+            "capability_stale"
+        }
+        _ => fallback,
     }
 }
 
@@ -5504,6 +5523,84 @@ mod tests {
         assert!(adopter.consumed.load(Ordering::SeqCst));
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    /// An adopter whose every adoption fails with one fixed error.
+    struct RefusingCheckpointAdopter {
+        stale: bool,
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointAdopter for RefusingCheckpointAdopter {
+        async fn adopt_tool_batch(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
+            Err(if self.stale {
+                AiError::InvalidInput(crate::AI_CAPABILITY_STALE.to_owned())
+            } else {
+                AiError::Conflict
+            })
+        }
+
+        async fn consume_before_provider(
+            &self,
+            _lease: &AiRunLease,
+            _checkpoint_id: Uuid,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
+    /// A resumption whose capability became stale records `capability_stale`
+    /// as its durable recovery code; every other adoption failure keeps the
+    /// generic code.
+    #[tokio::test]
+    async fn a_stale_capability_at_adoption_records_capability_stale() {
+        for (stale, expected) in [
+            (true, "capability_stale"),
+            (false, "checkpoint_adoption_failed"),
+        ] {
+            let base_lease = AiRunLease::test_running(principal_reference());
+            let claimed = base_lease.test_with_checkpoint(Uuid::new_v4());
+            let run = Arc::new(TestRunControl::new());
+            let provider = Arc::new(CheckpointClearedProvider {
+                response: Mutex::new(Some(AiProviderCallResult::test_result(
+                    &claimed,
+                    None,
+                    "must-not-run",
+                    Vec::new(),
+                ))),
+            });
+            let coordinator = AiReadOnlyAgentCoordinator::new(
+                run.clone(),
+                provider.clone(),
+                Arc::new(TestToolExecutor {
+                    expose_result: true,
+                }),
+                Arc::new(TestOutputWriter),
+                Arc::new(TestCheckpointWriter),
+                Arc::new(RefusingCheckpointAdopter { stale }),
+                Arc::new(TestRuleResolver),
+                Arc::new(AdoptionOnlyPlanner {
+                    scope: test_scope(),
+                    route: test_route(),
+                    continuation_count: AtomicUsize::new(0),
+                }),
+                limits(50),
+            );
+            let outcome = coordinator
+                .execute_claimed(&claimed)
+                .await
+                .expect("a refused adoption closes the run");
+            assert!(matches!(outcome, RecoveryRequired { .. }), "{outcome:?}");
+            assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+            assert_eq!(run.final_codes(), vec![expected.to_owned()]);
+            assert!(
+                provider.response.lock().expect("provider lock").is_some(),
+                "nothing reached the provider"
+            );
+        }
     }
 
     #[tokio::test]

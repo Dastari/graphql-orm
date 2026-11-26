@@ -33,8 +33,13 @@ subscription fingerprints. This completes the #551 broker scope.
    subscription capability was removed, or replaced with a different
    fingerprint, now closes as `capability_stale` (run `Failed`) at its next
    claim or delivery, instead of `subscription_authority_revoked`, and its
-   resumption is refused with `AI_CAPABILITY_STALE`. Update alerting or
-   reporting that matches the old code for that case.
+   resumption is refused with `AI_CAPABILITY_STALE`. When that refusal
+   happens at resumption, both coordinators now record `capability_stale` as
+   the run's `RecoveryRequired` code (and error code) instead of
+   `checkpoint_adoption_failed` or
+   `classified_mutation_checkpoint_adoption_failed`. Every other adoption
+   failure keeps its old code. Update alerting or reporting that matches the
+   old codes for these cases.
 4. **Opt in (optional).** Call
    `AiCapabilityBrokerSession::with_brokered_subscriptions` only on sessions
    whose host loop routes a brokered subscription to the wait service. Build
@@ -49,6 +54,21 @@ subscription fingerprints. This completes the #551 broker scope.
        .with_capability_delivery(delivery.clone());
    waits.register_wait(&lease, &provider_result, context).await?;
    ```
+
+   Construct the wait service with
+   `OrmAiSubscriptionWaitService::with_capability_broker`, passing the
+   host's `AiCapabilityDiscoveryBroker` (the one whose current index and
+   host capability policy decide brokered capabilities). Every service
+   instance that claims or resumes waits needs it. A broker-routed wait is
+   re-admitted by that broker for its registering run at registration and
+   again at every claim, delivery and resumption: an entry removed from the
+   current index, replaced, or without the in-process proof closes the wait
+   as `capability_stale`, and a host policy denial closes it as
+   `subscription_authority_revoked` (resumption refuses with
+   `AI_CAPABILITY_STALE` or `Forbidden`). Without the broker, broker-routed
+   registration is refused and an existing broker-routed wait closes at its
+   next claim. Revoking broker access for a principal, run or provider
+   therefore stops waits that are already parked.
 
    Do not dispatch that call through the coordinator or
    `execute_capability_broker_call`: their read path refuses it with the
@@ -69,6 +89,13 @@ subscription fingerprints. This completes the #551 broker scope.
    the provider's original broker call ID and tool ID.
 6. **Rollback.** Earlier builds cannot read a `formatVersion` 2 wait request
    and fail closed on it. Drain or cancel brokered waits before rolling back.
+7. **Model-facing: unreachable loaded references are `selection_stale`.**
+   Broker session clones share loaded state. Execute through a session that
+   does not reach the loaded capability's family (a subscription or mutation
+   it does not broker, or a static tool not in its list) now returns
+   `selection_stale`, exactly as for an unknown reference, instead of
+   `Forbidden`, with or without a continuation. Tests that expected
+   `Forbidden` for that case must expect `AI_CAPABILITY_SELECTION_STALE`.
 
 No schema module change, no GraphQL SDL change and no data migration.
 Restore and recovery are unchanged: a portable-restored wait is still

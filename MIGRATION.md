@@ -161,12 +161,16 @@ to generated subscriptions with
 `AiCapabilityBrokerSession::with_brokered_subscriptions`; the host routes a
 broker execute that resolves to one to
 `OrmAiSubscriptionWaitService::register_wait` with
-`AiSubscriptionWaitRegistrationContext::with_capability_delivery`. The wait
+`AiSubscriptionWaitRegistrationContext::with_capability_delivery`, on a wait
+service built with `with_capability_broker`, which re-admits the wait through
+the host's broker at every claim, delivery and resumption. The wait
 is classified by the resolved subscription's own fingerprint, keeps the
 schema module 0.86.0 dual identity, and answers the provider's broker call.
 The discover and execute broker fingerprints change in this same release.
 Rule allowlists now admit a subscription by its capability fingerprint, and
-a removed or replaced subscription closes its wait as `capability_stale`.
+a removed or replaced subscription, or broker entry, closes its wait as
+`capability_stale` (coordinators record it at resumption too), and a session
+that does not reach a loaded reference's family gets `selection_stale`.
 This completes the #551 broker scope. See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551).
 No schema or data migration is needed.
