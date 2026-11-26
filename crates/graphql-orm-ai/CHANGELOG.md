@@ -12,6 +12,47 @@ supersedes: []
 
 ## Unreleased - next breaking graphql-orm-ai release
 
+- **Breaking (#551).** Generated mutations can join the fixed capability
+  broker. A session opts in with
+  `AiCapabilityBrokerSession::with_brokered_mutations`; the classified native
+  supervised coordinator binds its rules to the session, and a mutation is
+  discoverable (`kind: "generated_mutation"`), browsable, describable (with
+  its `effect`) and executable only while those rules admit its exact
+  fingerprint at its reviewed classification. Execute only resolves the
+  mutation (`AiCapabilityExecution::is_consequential`); the coordinator
+  classifies and rule-checks the resolved mutation, not the broker
+  definition, and then runs or approves it exactly as the direct definition.
+  The read-only coordinator never discovers or executes one and refuses a
+  consequential resolution with `AI_CAPABILITY_CONSEQUENTIAL_UNROUTED`.
+  Tool-call rows keep both identities: AI schema module 0.86.0 adds nullable
+  `provider_tool_id` and `provider_tool_fingerprint`. Tool results and
+  provider continuation use the provider-facing identity; preparation,
+  approval binding, rules and execution use the resolved one. A brokered
+  row's protected arguments are an evidence envelope that binds its broker
+  origin, the exact offered broker fingerprint, the provider's original
+  argument hash and the admitting rule fingerprint, so it cannot be
+  downgraded to a direct row. Current rules are re-proved after broker
+  resolution and immediately before dispatch; approved execution of a
+  brokered mutation needs `OrmAiConsequentialToolCallService::with_rule_resolver`
+  and re-proves them before consumption and before dispatch. The rule
+  binding is per turn: a delivery clone never inherits it. The discover,
+  browse and execute broker definitions change, in the same release as
+  broker version 3. The final rule check runs inside the execution bridge,
+  immediately before the executor. `AiApprovalBinding` gains
+  `broker_origin`, which binds a brokered approval to its broker origin and
+  admitting rules; direct bindings hash unchanged. New API:
+  `AiToolCatalog::mutation_capability_signature`,
+  `OrmAiConsequentialToolCallService::with_rule_resolver`,
+  `AiApprovalBrokerOrigin`.
+  Subscriptions stay outside the broker.
+  [Migration](MIGRATION.md#generated-mutations-through-the-capability-broker-551)
+- **Fixed.** An approved generated mutation now executes. The approval
+  binding of a generated mutation hashes the provider plan, and
+  `AiRuntime::execute_approved_prepared_mutation` compared it with a hash of
+  the compiled variables, so every such approved execution converged to
+  `RecoveryRequired` without running. It now checks the plan hash
+  (`AiPreparedGraphqlMutation::argument_hash`).
+
 - **Breaking (#551).** Capability broker version 3. The fixed broker adds a
   fifth frozen definition, `graphql.capabilities.browse`, which lists the
   current capabilities by namespace, capability and operation after host

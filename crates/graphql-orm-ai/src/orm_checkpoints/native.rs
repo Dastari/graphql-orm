@@ -62,12 +62,9 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.provider_model.as_deref() != Some(result.provider_model())
                 || call.provider_response_id.as_deref() != result.provider_response_id()
                 || call.budget_reservation_id != Some(result.budget_reservation_id().0)
-                || call.provider_call_id != requested.call_id()
-                || call.tool_id != requested.tool_id().as_str()
-                || call.tool_fingerprint != requested.tool_fingerprint()
+                || !crate::orm_tools::row_records_call(&call, requested)?
                 || call.tool_call_index != i64::try_from(index).map_err(|_| AiError::Conflict)?
                 || call.provider_turn_index != i64::from(provider_turns - 1)
-                || call.argument_hash != canonical_json_hash(requested.arguments())?
                 || !matches!(call.state.as_str(), "completed" | "execution_failed")
                 || (call.state == "execution_failed"
                     && call.risk != "read_only"
@@ -126,9 +123,13 @@ impl OrmAiCoordinatorCheckpointService {
                 (
                     "protected_arguments",
                     call.protected_arguments.as_ref(),
-                    requested.arguments(),
+                    None,
                 ),
-                ("protected_result", call.protected_result.as_ref(), output),
+                (
+                    "protected_result",
+                    call.protected_result.as_ref(),
+                    Some(output),
+                ),
             ] {
                 let retained = self
                     .open(
@@ -142,7 +143,16 @@ impl OrmAiCoordinatorCheckpointService {
                         protected.ok_or(AiError::Conflict)?,
                     )
                     .await?;
-                if retained != *expected {
+                let matches = match expected {
+                    Some(expected) => retained == *expected,
+                    None => crate::orm_tools::protected_arguments_match(
+                        &call,
+                        requested.tool_fingerprint(),
+                        requested.arguments(),
+                        &retained,
+                    )?,
+                };
+                if !matches {
                     return Err(AiError::Conflict);
                 }
             }
@@ -587,12 +597,15 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.provider_model.as_deref() != Some(provider.provider_model.as_str())
                 || call.provider_response_id != provider.provider_response_id
                 || call.budget_reservation_id != Some(provider.budget_reservation_id)
-                || call.provider_call_id != requested.call_id
-                || call.tool_id != requested.tool_id
-                || call.tool_fingerprint != requested.tool_fingerprint
+                || !crate::orm_tools::row_records_parts(
+                    &call,
+                    &requested.call_id,
+                    &requested.tool_id,
+                    &requested.tool_fingerprint,
+                    &requested.arguments,
+                )?
                 || call.tool_call_index != i64::try_from(index).map_err(|_| AiError::Conflict)?
                 || call.provider_turn_index != i64::from(source.provider_turns - 1)
-                || call.argument_hash != canonical_json_hash(&requested.arguments)?
                 || step.run_id != call.run_id
                 || step.lease_generation != call.lease_generation
                 || step.state
@@ -619,7 +632,12 @@ impl OrmAiCoordinatorCheckpointService {
                     call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
                 )
                 .await?;
-            if arguments != requested.arguments {
+            if !crate::orm_tools::protected_arguments_match(
+                &call,
+                &requested.tool_fingerprint,
+                &requested.arguments,
+                &arguments,
+            )? {
                 return Err(AiError::Conflict);
             }
             let manifest = &outcome.egress_manifest;
@@ -687,8 +705,8 @@ impl OrmAiCoordinatorCheckpointService {
                     }
                     ordinary_tools.push(PreparedCoordinatorCheckpointTool {
                         id: call.id,
+                        tool_id: call.provider_facing_tool_id().to_owned(),
                         provider_call_id: call.provider_call_id,
-                        tool_id: call.tool_id,
                         result_egress_manifest_hash: manifest.stable_hash(),
                     });
                     call.result_egress_decision_id.ok_or(AiError::Conflict)?
@@ -704,7 +722,7 @@ impl OrmAiCoordinatorCheckpointService {
                     }
                     let receipt_binding = match kind {
                         AiNativeToolControlKind::ApprovalPending => {
-                            json!({"providerCallId":call.provider_call_id,"toolId":call.tool_id,"output":output})
+                            json!({"providerCallId":call.provider_call_id,"toolId":call.provider_facing_tool_id(),"output":output})
                         }
                         AiNativeToolControlKind::ConsequentialCallsPaused => {
                             serde_json::to_value(&outcome.model_input)
@@ -799,7 +817,7 @@ impl OrmAiCoordinatorCheckpointService {
                                     .map_err(|_| AiError::Conflict)?;
                             if stored.format_version != 1
                                 || stored.provider_call_id != call.provider_call_id
-                                || stored.tool_id != call.tool_id
+                                || stored.tool_id != call.provider_facing_tool_id()
                                 || stored.egress_manifest != *manifest
                                 || Some(stored.egress_decision_id) != decision_id
                             {
@@ -1334,7 +1352,7 @@ impl OrmAiCoordinatorCheckpointService {
         else {
             return Err(AiError::Conflict);
         };
-        if call_id != &call.provider_call_id || tool_id != &call.tool_id {
+        if call_id != &call.provider_call_id || tool_id != call.provider_facing_tool_id() {
             return Err(AiError::Conflict);
         }
         let stored = self
@@ -1380,7 +1398,7 @@ impl OrmAiCoordinatorCheckpointService {
         .await?;
         let continuation =
             AiAgentContinuation::from_checkpoint_value(payload.continuation.clone())?;
-        let expected = json!({"formatVersion":1,"kind":"FrameworkApprovedToolOutcome","toolCallId":call.id,"providerCallId":call.provider_call_id,"toolId":call.tool_id,"state":call.state,"output":output});
+        let expected = json!({"formatVersion":1,"kind":"FrameworkApprovedToolOutcome","toolCallId":call.id,"providerCallId":call.provider_call_id,"toolId":call.provider_facing_tool_id(),"state":call.state,"output":output});
         if payload.continuation.get("formatVersion") != Some(&json!(4))
             || continuation.input()
                 != [ModelInputBlock::Json {

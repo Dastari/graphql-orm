@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.33.0 mutation and subscription signatures
+
+**Action needed** only if you construct `AiCapabilitySearchCandidate` with a
+struct literal: set the new `approval` field from the index entry's
+`approval`. Deserializing a candidate without it yields `never`, which a
+broker treats as not admitted. Candidate JSON returned to the model is
+unchanged.
+
+The two signature methods are additive and model-facing only. Plans are
+still validated against the unchanged closed schemas, and no fingerprint
+changes. No schema or data migration is needed.
+
 ## 0.32.0 continuable keyset pages
 
 **No action.** The additions are opt-in. `compile_compact` still compiles

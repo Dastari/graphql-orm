@@ -1729,10 +1729,18 @@ pub(crate) struct AiToolCallRecord {
     pub provider_turn_index: i64,
     /// Zero-based call order within the provider turn.
     pub tool_call_index: i64,
-    /// Stable tool ID.
+    /// Stable ID of the tool or capability that runs. For a call routed
+    /// through the fixed capability broker this is the resolved capability.
     pub tool_id: String,
-    /// Exact descriptor fingerprint.
+    /// Exact descriptor or capability fingerprint of [`Self::tool_id`].
     pub tool_fingerprint: String,
+    /// Provider-facing tool ID when it differs from [`Self::tool_id`]: the
+    /// fixed broker execute definition of a broker-routed call. Null for a
+    /// direct call, whose provider-facing identity is [`Self::tool_id`].
+    pub provider_tool_id: Option<String>,
+    /// Provider-facing definition fingerprint, set exactly when
+    /// [`Self::provider_tool_id`] is set.
+    pub provider_tool_fingerprint: Option<String>,
     /// Non-secret crate-authored execution provenance; never a grant by itself.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub execution_provenance: Option<serde_json::Value>,
@@ -1791,6 +1799,20 @@ pub(crate) struct AiToolCallRecord {
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
+}
+
+impl AiToolCallRecord {
+    /// Tool ID the provider called and every tool result answers.
+    pub(crate) fn provider_facing_tool_id(&self) -> &str {
+        self.provider_tool_id.as_deref().unwrap_or(&self.tool_id)
+    }
+
+    /// Definition fingerprint the provider called.
+    pub(crate) fn provider_facing_tool_fingerprint(&self) -> &str {
+        self.provider_tool_fingerprint
+            .as_deref()
+            .unwrap_or(&self.tool_fingerprint)
+    }
 }
 
 /// Non-approvable preparation retained while a native provider turn settles.
@@ -2586,7 +2608,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.85.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.86.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

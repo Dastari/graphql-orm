@@ -920,17 +920,21 @@ impl AuthenticatedToolBridge {
             descriptor,
             &request,
         )?;
+        let admission = final_admission.map(SyncFinalAdmission);
         self.execute_with_binding_and_effect_guard(
             principal_reference,
             descriptor,
             request,
             binding,
             None,
-            final_admission,
+            admission
+                .as_ref()
+                .map(|admission| admission as &dyn AiFinalAdmission),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_generated_mutation(
         &self,
         principal_reference: &PrincipalReference,
@@ -939,6 +943,7 @@ impl AuthenticatedToolBridge {
         descriptor: &AiToolDescriptor,
         request: ToolGraphqlRequest,
         effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
+        final_admission: Option<&dyn AiFinalAdmission>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let binding = AiRegisteredToolExecutionBinding::generated_mutation(
             capability_id,
@@ -952,7 +957,7 @@ impl AuthenticatedToolBridge {
             request,
             binding,
             effect_guard,
-            None,
+            final_admission,
         )
         .await
     }
@@ -982,7 +987,7 @@ impl AuthenticatedToolBridge {
         request: ToolGraphqlRequest,
         binding: AiRegisteredToolExecutionBinding,
         effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
-        final_admission: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        final_admission: Option<&dyn AiFinalAdmission>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
@@ -1026,14 +1031,9 @@ impl AuthenticatedToolBridge {
             })?;
         // The last check before the executor, after every awaited admission
         // step: a caller-held condition (such as a continuation handle's
-        // retention and expiry) must still hold now.
-        if final_admission.is_some_and(|admit| !admit()) {
-            return Err(crate::execution_rejection::before_executor_error(
-                &binding,
-                &request,
-                ToolExecutionError::Authorization,
-            ));
-        }
+        // retention and expiry, or a brokered mutation's rule admission)
+        // must still hold now.
+        refuse_unless_admitted(final_admission, &binding, &request).await?;
         let expected_request = request.clone();
         let response = match &effect_guard {
             Some(guard) => {
@@ -1121,6 +1121,7 @@ impl AuthenticatedToolBridge {
             expected_authorization_state_digest,
             required_approval,
             None,
+            None,
         )
         .await
     }
@@ -1135,6 +1136,7 @@ impl AuthenticatedToolBridge {
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
         effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
+        final_admission: Option<&dyn AiFinalAdmission>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         self.execute_registered_bound_requiring(
             principal_reference,
@@ -1145,6 +1147,7 @@ impl AuthenticatedToolBridge {
             expected_authorization_state_digest,
             None,
             effect_guard,
+            final_admission,
         )
         .await
     }
@@ -1160,6 +1163,7 @@ impl AuthenticatedToolBridge {
         expected_authorization_state_digest: &str,
         required_approval: Option<AiApprovalRule>,
         effect_guard: Option<graphql_orm::graphql::orm::DependentDeleteGuard>,
+        final_admission: Option<&dyn AiFinalAdmission>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
@@ -1193,6 +1197,7 @@ impl AuthenticatedToolBridge {
             .map_err(|error| {
                 crate::execution_rejection::before_executor_error(&binding, &request, error)
             })?;
+        refuse_unless_admitted(final_admission, &binding, &request).await?;
         let expected_request = request.clone();
         let response = match &effect_guard {
             Some(guard) => {
@@ -1220,4 +1225,59 @@ impl AuthenticatedToolBridge {
         }
         Ok((response, authorization))
     }
+}
+
+/// A caller-held condition checked as the last step before the executor,
+/// after principal rehydration, host tool policy and request-context
+/// construction have all been awaited.
+#[async_trait]
+pub(crate) trait AiFinalAdmission: Send + Sync {
+    /// Whether execution may still proceed. `false` refuses it before the
+    /// executor runs.
+    async fn admits(&self) -> bool;
+
+    /// Whether a refusal is attested as a trusted no-effect rejection. Only
+    /// a caller whose durable lifecycle proves the invocation crossed no
+    /// earlier effect boundary (a pre-effect checkpoint or a consumed
+    /// one-shot approval) may return `true`.
+    fn attests_no_effect(&self) -> bool {
+        false
+    }
+}
+
+/// The synchronous final admission a public caller passes.
+struct SyncFinalAdmission<'a>(&'a (dyn Fn() -> bool + Send + Sync));
+
+#[async_trait]
+impl AiFinalAdmission for SyncFinalAdmission<'_> {
+    async fn admits(&self) -> bool {
+        (self.0)()
+    }
+}
+
+/// Applies an optional final admission immediately before the executor.
+async fn refuse_unless_admitted(
+    final_admission: Option<&dyn AiFinalAdmission>,
+    binding: &AiRegisteredToolExecutionBinding,
+    request: &ToolGraphqlRequest,
+) -> Result<(), ToolExecutionError> {
+    let Some(admission) = final_admission else {
+        return Ok(());
+    };
+    if admission.admits().await {
+        return Ok(());
+    }
+    if admission.attests_no_effect() {
+        return Err(ToolExecutionError::RejectedBeforeExecution(
+            binding.reject_before_execution(
+                request,
+                crate::ToolPreExecutionRejectionReason::AuthorizationDenied,
+            )?,
+        ));
+    }
+    Err(crate::execution_rejection::before_executor_error(
+        binding,
+        request,
+        ToolExecutionError::Authorization,
+    ))
 }

@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.85.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.86.0");
     assert_eq!(catalog.entities().len(), 50);
     // The stored-response ledger keeps its identifiers in backups so a
     // restored deletion debt is not lost.
@@ -718,4 +718,91 @@ async fn sqlite_upgrades_legacy_approval_lookup_index() {
     .await
     .expect("open SQLite fixture");
     legacy_approval_upgrade::legacy_approval_upgrade(&database).await;
+}
+
+/// Schema module 0.86.0 adds the nullable provider-facing identity of a
+/// broker-routed tool call. A 0.85.0 store upgrades with two additive column
+/// steps and keeps every existing row as a direct call: both columns null.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn tool_call_provider_identity_upgrade_is_additive_and_keeps_rows_direct() {
+    use graphql_orm::graphql::orm::{ApplyOptions, MigrationRisk, MigrationStep, OrmSchemaModule};
+    use graphql_orm::prelude::{Database, SqliteBackend};
+
+    const TOOL_CALLS: &str = "graphql_orm_ai_tool_calls";
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .expect("in-memory SQLite should open");
+    let module = AiSchemaModule;
+    let initial = database
+        .schema()
+        .plan_migration_to_entities("ai-provider-identity-v1", "AI module", module.entities())
+        .await
+        .expect("AI module should plan");
+    database
+        .schema()
+        .apply_migration(&initial, ApplyOptions::default())
+        .await
+        .expect("AI module should apply");
+    // Reproduce a 0.85.0 store with one direct call.
+    for column in ["provider_tool_id", "provider_tool_fingerprint"] {
+        graphql_orm::sqlx::query(&format!("ALTER TABLE {TOOL_CALLS} DROP COLUMN {column}"))
+            .execute(database.pool())
+            .await
+            .expect("0.86.0 column should drop");
+    }
+    let id = graphql_orm::uuid::Uuid::new_v4().to_string();
+    graphql_orm::sqlx::query(&format!(
+        "INSERT INTO {TOOL_CALLS} (id, run_id, provider_call_key, provider_call_id, \
+         provider_turn_index, tool_call_index, tool_id, tool_fingerprint, argument_hash, risk, \
+         lease_generation, state, created_at, row_version) \
+         VALUES (?, ?, 'legacy-key', 'legacy-call', 0, 0, 'records.update', 'fingerprint', \
+         'arguments', 'high_impact', 1, 'waiting_approval', 1, 0)"
+    ))
+    .bind(&id)
+    .bind(graphql_orm::uuid::Uuid::new_v4().to_string())
+    .execute(database.pool())
+    .await
+    .expect("a 0.85.0 store accepts a direct call");
+
+    let upgrade = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-provider-identity-v2",
+            "provider identity",
+            module.entities(),
+        )
+        .await
+        .expect("upgrade should plan");
+    assert_eq!(upgrade.steps.len(), 2, "{:?}", upgrade.statements);
+    for column in ["provider_tool_id", "provider_tool_fingerprint"] {
+        assert!(
+            upgrade
+                .steps
+                .iter()
+                .any(|step| step.risk != MigrationRisk::Destructive
+                    && matches!(
+                        &step.step,
+                        MigrationStep::AddColumn { table_name, column: added }
+                            if table_name == TOOL_CALLS && added.name == column && added.nullable
+                    ))
+        );
+    }
+    database
+        .schema()
+        .apply_migration(&upgrade, ApplyOptions::default())
+        .await
+        .expect("additive upgrade should apply");
+    let (provider_tool_id, provider_tool_fingerprint, tool_id) = graphql_orm::sqlx::query_as::<
+        _,
+        (Option<String>, Option<String>, String),
+    >(&format!(
+        "SELECT provider_tool_id, provider_tool_fingerprint, tool_id FROM {TOOL_CALLS} WHERE id = ?"
+    ))
+    .bind(&id)
+    .fetch_one(database.pool())
+    .await
+    .expect("the legacy call should read");
+    assert_eq!((provider_tool_id, provider_tool_fingerprint), (None, None));
+    assert_eq!(tool_id, "records.update");
 }

@@ -22,6 +22,7 @@ enum CallbackScenario {
     TamperedPreflight,
     FailedReadCompleted,
     BrokerCompleted,
+    BrokeredMutationCompleted,
     ReadOnlyCompleted,
     EmptyCompleted,
     TamperedResult,
@@ -41,6 +42,7 @@ impl CallbackScenario {
                 | Self::TamperedPreflight
                 | Self::FailedReadCompleted
                 | Self::BrokerCompleted
+                | Self::BrokeredMutationCompleted
                 | Self::ReadOnlyCompleted
                 | Self::EmptyCompleted
                 | Self::TamperedResult
@@ -60,7 +62,10 @@ impl CallbackScenario {
         )
     }
     fn broker(self) -> bool {
-        matches!(self, Self::FixedBroker | Self::BrokerCompleted)
+        matches!(
+            self,
+            Self::FixedBroker | Self::BrokerCompleted | Self::BrokeredMutationCompleted
+        )
     }
 }
 
@@ -244,7 +249,38 @@ impl AiProvider for MixedRetainedProvider {
                     assert!(calls[0].completed_at.is_some());
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
-                if scenario.broker() {
+                if scenario == CallbackScenario::BrokeredMutationCompleted {
+                    // Discover, describe and execute a generated mutation
+                    // through the fixed broker: the coordinator classifies
+                    // the resolved automatic mutation and runs it once.
+                    let tool = |id: &str| request.tools.iter().find(|tool| tool.tool_id == id).unwrap();
+                    let discover = tool(AI_CAPABILITY_DISCOVER_TOOL_ID);
+                    let call_id = "native-mutation-discover".to_owned();
+                    let arguments = json!({"text":"create record", "kind":"generated_mutation", "maximumResults":2});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:discover.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, discover, arguments.clone())?).await?;
+                    let candidate = reply.output()["candidates"][0].clone();
+                    assert_eq!(candidate["kind"], "generated_mutation", "{:?}", reply.output());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                    let describe = tool(AI_CAPABILITY_DESCRIBE_TOOL_ID);
+                    let call_id = "native-mutation-describe".to_owned();
+                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateFingerprint":candidate["candidateFingerprint"]});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:describe.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, describe, arguments.clone())?).await?;
+                    assert_eq!(reply.output()["effect"], "automatic", "{:?}", reply.output());
+                    let loaded = reply.output()["loadedReference"].clone();
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                    let execute = tool(AI_CAPABILITY_EXECUTE_TOOL_ID);
+                    let call_id = "native-mutation-execute".to_owned();
+                    let arguments = json!({"loadedReference":loaded,
+                        "arguments":[{"name":"input.subject", "value":"through the broker"}],
+                        "selections":["recordId", "subject"]});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:execute.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, execute, arguments.clone())?).await?;
+                    assert_eq!(reply.output()["data"]["CreateRecord"]["recordId"], "generated-record-1", "{:?}", reply.output());
+                    replies.lock().await.push(reply.output().clone());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                } else if scenario.broker() {
                     let definition = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_DISCOVER_TOOL_ID).unwrap();
                     let call_id = "native-broker-discover".to_owned();
                     let arguments = json!({"text":"records", "maximumResults":2});
@@ -278,7 +314,7 @@ impl AiProvider for MixedRetainedProvider {
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
                 let callbacks: &[(usize, &str, &str)] = match scenario {
-                    CallbackScenario::EmptyCompleted => &[],
+                    CallbackScenario::EmptyCompleted | CallbackScenario::BrokeredMutationCompleted => &[],
                     CallbackScenario::ReadOnlyCompleted => &[(0, "records.read", "ordinary")],
                     CallbackScenario::MfaPreflightCompleted | CallbackScenario::TamperedPreflight => &[(0, "records.automatic", "mfa"), (1, "records.read", "after-mfa-refusal")],
                     CallbackScenario::DeniedPreflightCompleted => &[(0, "records.automatic", "preflight-denied"), (1, "records.read", "after-permission-refusal")],
@@ -404,6 +440,8 @@ impl AiContentProtector for CheckpointRaceProtector {
                         tool_call_index: extra.tool_call_index,
                         tool_id: extra.tool_id,
                         tool_fingerprint: extra.tool_fingerprint,
+                        provider_tool_id: None,
+                        provider_tool_fingerprint: None,
                         execution_provenance: extra.execution_provenance,
                         protected_arguments: extra.protected_arguments,
                         argument_hash: extra.argument_hash,
@@ -472,6 +510,7 @@ struct MixedPlanner {
     fixture: Arc<Fixture>,
     descriptor: AiProviderSessionDescriptor,
     broker: bool,
+    brokered_mutations: bool,
 }
 
 impl MixedPlanner {
@@ -508,9 +547,13 @@ impl MixedPlanner {
         base.budget.lease_generation = lease.lease_generation();
         base.budget.idempotency_key = format!("mixed-native:{}", lease.attempt_id());
         base.transfers[0].estimated_bytes = 16_384;
-        let delivery = self
-            .broker
-            .then(|| mixed_broker_delivery(&self.fixture, base.request.tools.clone()));
+        let delivery = self.broker.then(|| {
+            if self.brokered_mutations {
+                mixed_broker_delivery_with_mutations(&self.fixture, base.request.tools.clone())
+            } else {
+                mixed_broker_delivery(&self.fixture, base.request.tools.clone())
+            }
+        });
         if let Some(delivery) = &delivery {
             base.request.tools = delivery.current_tools();
         }
@@ -685,6 +728,51 @@ pub(super) fn mixed_broker_delivery(
         )
         .unwrap(),
     );
+    broker_delivery_over(
+        fixture,
+        index,
+        definitions,
+        AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).unwrap(),
+    )
+}
+
+/// A fixed-broker delivery over the generated `CreateRecord` mutation, with
+/// mutations brokered.
+fn mixed_broker_delivery_with_mutations(
+    fixture: &Fixture,
+    definitions: Vec<ModelToolDefinition>,
+) -> AiCapabilityDeliveryTurn {
+    let (semantics, mutation_catalog) = automatic_mutation_catalog();
+    let index = Arc::new(
+        AiCapabilityIndex::compile(
+            GraphqlExecutionTargetId::parse("generated-application").unwrap(),
+            mutation_catalog.finished_schema_fingerprint(),
+            &semantics,
+            None,
+            Some(&mutation_catalog),
+            None,
+            [],
+            "target-policy-v1",
+            AiCapabilityIndexLimits::default(),
+        )
+        .unwrap(),
+    );
+    broker_delivery_over(
+        fixture,
+        index,
+        definitions,
+        AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .unwrap()
+            .with_brokered_mutations(),
+    )
+}
+
+fn broker_delivery_over(
+    fixture: &Fixture,
+    index: Arc<AiCapabilityIndex>,
+    definitions: Vec<ModelToolDefinition>,
+    session: AiCapabilityBrokerSession,
+) -> AiCapabilityDeliveryTurn {
     let index_set = AiCapabilityIndexSet::compile([index.clone()]).unwrap();
     let broker = Arc::new(
         AiCapabilityDiscoveryBroker::new(
@@ -722,7 +810,7 @@ pub(super) fn mixed_broker_delivery(
         true,
         binding,
         broker,
-        AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).unwrap(),
+        session,
     )
     .unwrap()
 }
@@ -804,6 +892,16 @@ async fn native_coordinator_completed_fixed_broker_turn_counts_all_callbacks() {
     .await;
 }
 
+/// A generated mutation reached through the fixed broker runs once as itself
+/// and the completed native turn's evidence binds the broker execute call.
+#[tokio::test]
+async fn native_coordinator_completed_fixed_broker_mutation_turn() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::BrokeredMutationCompleted,
+    ))
+    .await;
+}
+
 #[tokio::test]
 async fn native_coordinator_completed_read_only_turn() {
     Box::pin(native_coordinator_lifecycle(
@@ -844,6 +942,9 @@ async fn assert_retry_does_not_complete(
 }
 
 async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
+    if scenario == CallbackScenario::BrokeredMutationCompleted {
+        BROKERED_GENERATED_MUTATION.with(|cell| cell.set(true));
+    }
     let provider = Arc::new(MixedRetainedProvider {
         scenario,
         ..Default::default()
@@ -938,7 +1039,11 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         )
         .unwrap(),
     );
-    let consequential = Arc::new(consequential.with_provider_session_service(sessions.clone()));
+    let consequential = Arc::new(
+        consequential
+            .with_provider_session_service(sessions.clone())
+            .with_rule_resolver(Arc::new(NativeTestRuleResolver)),
+    );
     // This fixture can prepend a rejected read to the four mixed callbacks.
     // Keep application admission aligned with its eight-call coordinator limit.
     let applications = Arc::new(OrmAiApplicationToolCallService::new(
@@ -994,6 +1099,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     let planner = Arc::new(MixedPlanner {
         fixture: fixture.clone(),
         broker: scenario.broker(),
+        brokered_mutations: scenario == CallbackScenario::BrokeredMutationCompleted,
         descriptor: AiProviderSessionDescriptor::new(
             ProviderKind::OpenAiCompatible,
             "mock-profile",
@@ -1125,6 +1231,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             CallbackScenario::ReadOnlyCompleted => 1,
             CallbackScenario::FailedReadCompleted => 3,
             CallbackScenario::BrokerCompleted => 5,
+            CallbackScenario::BrokeredMutationCompleted => 3,
             _ => 2,
         };
         assert!(
@@ -1138,6 +1245,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
                 scenario,
                 CallbackScenario::ReadOnlyCompleted
                     | CallbackScenario::EmptyCompleted
+                    | CallbackScenario::BrokeredMutationCompleted
                     | CallbackScenario::RefusedAutomaticCompleted
                     | CallbackScenario::MfaPreflightCompleted
                     | CallbackScenario::DeniedPreflightCompleted

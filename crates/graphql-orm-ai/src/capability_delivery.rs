@@ -448,7 +448,7 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
     broker_definition(
         AI_CAPABILITY_DISCOVER_TOOL_ID,
         "graphql_capabilities_discover",
-        "Search the current reviewed read capabilities. A generated_entity candidate covers every read operation of one entity; its operations list names them.",
+        "Search the current reviewed capabilities. A generated_entity candidate covers every read operation of one entity; its operations list names them. A generated_mutation candidate is a change this run may request; describe reports whether it needs approval.",
         None,
         json!({
             "type": "object",
@@ -457,8 +457,8 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
                 "namespace": {"type": ["string", "null"], "maxLength": 256},
                 "kind": {
                     "type": ["string", "null"],
-                    "enum": ["generated_query", "generated_entity", "reviewed_static", null],
-                    "description": "generated_query: every generated read; generated_entity: entity capabilities only; reviewed_static: reviewed tools only."
+                    "enum": ["generated_query", "generated_entity", "reviewed_static", "generated_mutation", null],
+                    "description": "generated_query: every generated read; generated_entity: entity capabilities only; reviewed_static: reviewed tools only; generated_mutation: generated mutations only."
                 },
                 "entityOrClass": {"type": ["string", "null"], "maxLength": 256},
                 "maximumResults": {"type": "integer", "minimum": 1, "maximum": 32}
@@ -469,13 +469,27 @@ fn fixed_discovery_definition() -> ModelToolDefinition {
     )
 }
 
+/// Fingerprint of the frozen fixed-broker execute definition of the current
+/// broker version: the only provider-facing identity a broker-routed
+/// tool-call row may carry.
+pub(crate) fn fixed_broker_execute_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        fixed_broker_definitions()
+            .into_iter()
+            .find(|definition| definition.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID)
+            .map(|definition| definition.fingerprint)
+            .unwrap_or_default()
+    })
+}
+
 fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
     let index_fingerprint = None;
     let discover = fixed_discovery_definition();
     let browse = broker_definition(
         AI_CAPABILITY_BROWSE_TOOL_ID,
         "graphql_capabilities_browse",
-        "Browse the current reviewed read capabilities by hierarchy when a search is ambiguous. level namespaces lists the logical namespaces; capabilities lists the capabilities of one namespace, optionally of one entity; operations lists the operations of one entity capability. Every listed capability can be described with its capabilityId and candidateReference. Page with offset and nextOffset.",
+        "Browse the current reviewed capabilities by hierarchy when a search is ambiguous. level namespaces lists the logical namespaces; capabilities lists the capabilities of one namespace, optionally of one entity; operations lists the operations of one entity capability. Every listed capability can be described with its capabilityId and candidateReference. Page with offset and nextOffset.",
         index_fingerprint,
         json!({
             "type": "object",
@@ -545,7 +559,7 @@ fn fixed_broker_definitions() -> Vec<ModelToolDefinition> {
     let execute = broker_definition(
         AI_CAPABILITY_EXECUTE_TOOL_ID,
         "graphql_capabilities_execute",
-        "Execute one operation of a previously loaded exact capability. Use only argument and selection paths its signature and expanded types admit: flatten argument leaves into name/value entries with dotted paths, and omit optional fields you do not need. When a result carries a continuation handle, fetch the next page with loadedReference, operation and continuation only.",
+        "Execute one operation of a previously loaded exact capability. Use only argument and selection paths its signature and expanded types admit: flatten argument leaves into name/value entries with dotted paths, and omit optional fields you do not need. When a result carries a continuation handle, fetch the next page with loadedReference, operation and continuation only. A mutation whose description requires approval is not run by this call: it waits for that approval.",
         index_fingerprint,
         json!({
             "type": "object",
@@ -2023,6 +2037,14 @@ pub struct AiCapabilityBrokerSession {
     limits: AiCapabilityDeliveryLimits,
     brokered_static_tools: Arc<BTreeSet<String>>,
     inline_describe_schema: bool,
+    brokered_mutations: bool,
+    /// Hierarchical rules a classified coordinator bound for brokered
+    /// mutations. Without them no mutation is discoverable or executable.
+    ///
+    /// A value, not shared state: binding returns a new session for the
+    /// classified turn alone, so a clone taken before binding, or one a
+    /// read-only plan holds, never inherits another plan's rules.
+    mutation_rules: Option<Arc<crate::AiResolvedRuleSet>>,
 }
 
 impl AiCapabilityBrokerSession {
@@ -2038,6 +2060,8 @@ impl AiCapabilityBrokerSession {
             limits,
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
+            brokered_mutations: false,
+            mutation_rules: None,
         })
     }
 
@@ -2122,6 +2146,129 @@ impl AiCapabilityBrokerSession {
             && self
                 .brokered_static_tools
                 .contains(&entry.capability_fingerprint)
+    }
+
+    /// Lets this run's fixed broker also discover, describe and resolve
+    /// generated mutations.
+    ///
+    /// Opting in grants nothing by itself. A mutation is reachable only when
+    /// a classified supervised coordinator that can route consequential
+    /// calls binds its hierarchical rules to this session, and only while
+    /// those rules admit the mutation's exact capability fingerprint at its
+    /// reviewed classification: an approval-required mutation as a one-shot
+    /// supervised write, an automatic one as an approval-free autonomous
+    /// write. A prohibited mutation is never offered. The read-only
+    /// coordinator binds no rules, so through it no mutation is ever
+    /// discovered, described or executed.
+    ///
+    /// Execute only resolves a mutation: it returns the exact capability
+    /// and closed plan, and the coordinator classifies, rule-checks,
+    /// approves and runs that resolved mutation exactly as it would the
+    /// direct definition, with every ordinary resolver authorization check.
+    #[must_use]
+    pub fn with_brokered_mutations(mut self) -> Self {
+        self.brokered_mutations = true;
+        self
+    }
+
+    /// Whether this session lets its fixed broker reach generated mutations.
+    pub const fn brokers_mutations(&self) -> bool {
+        self.brokered_mutations
+    }
+
+    /// Returns this session bound to the classified coordinator's current
+    /// rules for brokered mutations. The returned value alone carries them:
+    /// this session, and every clone taken from it, stays unbound. Binding a
+    /// session already bound to rules with a different fingerprint is a
+    /// conflict. A session that does not broker mutations is returned
+    /// unchanged.
+    pub(crate) fn bind_mutation_rules(
+        &self,
+        rules: &crate::AiResolvedRuleSet,
+    ) -> Result<Self, AiError> {
+        if !self.brokered_mutations {
+            return Ok(self.clone());
+        }
+        if self
+            .mutation_rules
+            .as_ref()
+            .is_some_and(|current| current.fingerprint() != rules.fingerprint())
+        {
+            return Err(AiError::Conflict);
+        }
+        let mut bound = self.clone();
+        bound.mutation_rules = Some(Arc::new(rules.clone()));
+        Ok(bound)
+    }
+
+    /// Fingerprint of the rules bound for brokered mutations, if any.
+    pub(crate) fn mutation_rule_fingerprint(&self) -> Option<&str> {
+        self.mutation_rules
+            .as_ref()
+            .map(|rules| rules.fingerprint())
+    }
+
+    /// Whether the bound rules admit this generated mutation entry at its
+    /// reviewed classification.
+    fn brokers_mutation_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+        entry.kind == AiCapabilityKind::GeneratedMutation
+            && self.brokers_mutation(&entry.capability_fingerprint, entry.approval)
+    }
+
+    /// Whether the bound rules admit a generated mutation with this exact
+    /// capability fingerprint at the reviewed classification `approval`.
+    fn brokers_mutation(&self, capability_fingerprint: &str, approval: AiApprovalRule) -> bool {
+        // TODO(#910): a generated `@transientInput` argument must never be
+        // offered through the broker. The marker is not on this base yet;
+        // once it is, refuse any mutation whose compact schema carries one
+        // here, before discovery, describe or execute can reach it.
+        if !self.brokered_mutations {
+            return false;
+        }
+        let Some(binding) = brokered_mutation_binding(approval) else {
+            return false;
+        };
+        self.mutation_rules.as_ref().is_some_and(|rules| {
+            rules.constrain_tool(capability_fingerprint, binding.0, binding.1) == Some(binding.1)
+        })
+    }
+
+    /// Whether this run's broker reaches a held candidate, decided from the
+    /// candidate alone, before any current-index lookup. Describe applies
+    /// it first, so a candidate this run may not reach is the same stale
+    /// selection whether or not the catalogue has since changed.
+    fn brokers_candidate(&self, candidate: &crate::AiCapabilitySearchCandidate) -> bool {
+        match candidate.kind {
+            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery => true,
+            AiCapabilityKind::ReviewedStatic => self
+                .brokered_static_tools
+                .contains(&candidate.capability_fingerprint),
+            AiCapabilityKind::GeneratedMutation => {
+                self.brokers_mutation(&candidate.capability_fingerprint, candidate.approval)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `arguments` name a loaded reference this session holds for a
+    /// generated mutation. This is a routing hint only: it authorizes
+    /// nothing, and the execute it routes repeats every check.
+    pub(crate) fn holds_loaded_mutation(&self, arguments: &serde_json::Value) -> bool {
+        arguments
+            .get("loadedReference")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|reference| self.loaded(reference))
+            .is_some_and(|loaded| loaded.capability_kind == AiCapabilityKind::GeneratedMutation)
+    }
+
+    /// Whether this run's broker reaches the entry at all: a generated read,
+    /// a brokered static tool, or an admitted generated mutation.
+    fn brokers_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
+        matches!(
+            entry.kind,
+            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
+        ) || self.brokers_static_entry(entry)
+            || self.brokers_mutation_entry(entry)
     }
 
     /// Exact bounds applied to retained searches, loaded bindings, and one
@@ -2672,6 +2819,15 @@ fn insert_broker_argument_segments(
 /// for capabilities the current principal cannot see.
 pub const AI_CAPABILITY_SELECTION_STALE: &str = "broker capability selection is stale";
 
+/// Safe [`AiError::InvalidInput`] message for a broker execute that resolved
+/// to a generated mutation on a path that cannot route consequential calls.
+///
+/// The model-facing code is `invalid_arguments` with a fixed correction:
+/// nothing was executed and this run cannot request the change. Only a
+/// classified supervised coordinator routes brokered mutations.
+pub const AI_CAPABILITY_CONSEQUENTIAL_UNROUTED: &str =
+    "broker capability requires a classified coordinator";
+
 /// Safe [`AiError::InvalidInput`] message for a selection the run does hold
 /// whose index, schema, catalogue, entry, capability or policy fingerprint no
 /// longer matches the current published state.
@@ -2703,6 +2859,23 @@ pub const AI_CAPABILITY_TYPE_UNKNOWN: &str =
 
 /// Whether index metadata admits a reviewed static tool to the fixed broker.
 /// The registered descriptor is checked again before describe and execute.
+/// The reviewed classification a generated mutation is admitted at: an
+/// approval-required mutation is a one-shot supervised write and an
+/// automatic one an approval-free autonomous write. A prohibited mutation,
+/// or any other approval rule, has none.
+pub(crate) fn brokered_mutation_binding(
+    approval: AiApprovalRule,
+) -> Option<(crate::ToolMaturity, AiApprovalRule)> {
+    match approval {
+        AiApprovalRule::OneShot => Some((
+            crate::ToolMaturity::SupervisedWrite,
+            AiApprovalRule::OneShot,
+        )),
+        AiApprovalRule::None => Some((crate::ToolMaturity::AutonomousWrite, AiApprovalRule::None)),
+        _ => None,
+    }
+}
+
 fn brokerable_static_entry(entry: &AiCapabilityIndexEntry) -> bool {
     entry.kind == AiCapabilityKind::ReviewedStatic
         && entry.risk == AiToolRisk::ReadOnly
@@ -3082,6 +3255,17 @@ impl AiCapabilityExecution {
             .as_ref()
             .map_or(1, |continued| continued.page)
     }
+
+    /// Whether this execution resolves a consequential capability: a
+    /// generated mutation.
+    ///
+    /// A consequential resolution is never executed by the broker. The
+    /// classified coordinator classifies and rule-checks the resolved
+    /// capability, then requests approval or runs it exactly as it would the
+    /// direct definition. Every other coordinator refuses it.
+    pub const fn is_consequential(&self) -> bool {
+        matches!(self.capability_kind, AiCapabilityKind::GeneratedMutation)
+    }
 }
 
 fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json::Value {
@@ -3112,6 +3296,17 @@ fn candidate_value(candidate: &crate::AiCapabilitySearchCandidate) -> serde_json
         );
     }
     value
+}
+
+/// Model-facing effect of executing one described generated mutation:
+/// `automatic`, or `approval_required` when nothing runs until a person
+/// approves the exact request. Reads carry no effect.
+fn capability_effect(entry: &AiCapabilityIndexEntry) -> Option<&'static str> {
+    match (entry.kind, entry.approval) {
+        (AiCapabilityKind::GeneratedMutation, AiApprovalRule::None) => Some("automatic"),
+        (AiCapabilityKind::GeneratedMutation, _) => Some("approval_required"),
+        _ => None,
+    }
 }
 
 /// Model-facing usage note of every broker version 3 description.
@@ -3155,7 +3350,7 @@ fn planning_contract(
             "resultRecordCost": entry.result_record_cost,
         })]
     };
-    json!({
+    let mut contract = json!({
         "version": AI_CAPABILITY_BROKER_VERSION,
         "loadedReference": loaded_reference,
         "expiresInSeconds": expires_in_seconds,
@@ -3174,7 +3369,11 @@ fn planning_contract(
         "candidateFingerprint": entry.fingerprint,
         "usage": DESCRIBE_USAGE,
         "operations": operations,
-    })
+    });
+    if let (Some(effect), Some(object)) = (capability_effect(entry), contract.as_object_mut()) {
+        object.insert("effect".to_owned(), json!(effect));
+    }
+    contract
 }
 
 /// One operation of a described capability: the exact root whose signature
@@ -3293,9 +3492,12 @@ impl AiCapabilityDiscoveryBroker {
     ///
     /// The result is bounded authority-neutral generated-query metadata: it contains no
     /// argument schema, GraphQL document, target, resolver, or credential, and
-    /// it grants no load or execution authority. Static tools remain exact
-    /// bootstrap definitions, while mutations and subscriptions use their
-    /// separate approval/wait contracts and cannot enter this broker. Every
+    /// it grants no load or execution authority. It covers generated reads,
+    /// the reviewed static tools this run brokers and, only when the session
+    /// brokers mutations and the classified coordinator's bound rules admit
+    /// them ([`AiCapabilityBrokerSession::with_brokered_mutations`]),
+    /// generated mutations. Subscriptions keep their wait contract and never
+    /// enter this broker. Every
     /// returned candidate has already passed current host policy for the
     /// current principal.
     ///
@@ -3333,12 +3535,16 @@ impl AiCapabilityDiscoveryBroker {
                 let session = session.clone();
                 Box::new(move |entry: &AiCapabilityIndexEntry| session.brokers_static_entry(entry))
             }
+            Some(AiCapabilityKind::GeneratedMutation) if session.brokers_mutations() => {
+                let session = session.clone();
+                Box::new(move |entry: &AiCapabilityIndexEntry| {
+                    session.brokers_mutation_entry(entry)
+                })
+            }
             Some(_) => return Err(malformed_broker_arguments()),
             None => {
                 let session = session.clone();
-                Box::new(move |entry: &AiCapabilityIndexEntry| {
-                    generated(entry) || session.brokers_static_entry(entry)
-                })
+                Box::new(move |entry: &AiCapabilityIndexEntry| session.brokers_entry(entry))
             }
         };
         let query = AiCapabilitySearchQuery {
@@ -3429,12 +3635,7 @@ impl AiCapabilityDiscoveryBroker {
             match parsed.level {
                 // Operations belong to an entity capability alone.
                 BrowseLevel::Operations => entry.kind == AiCapabilityKind::GeneratedEntity,
-                _ => {
-                    matches!(
-                        entry.kind,
-                        AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
-                    ) || session.brokers_static_entry(entry)
-                }
+                _ => session.brokers_entry(entry),
             }
         });
         // Policy decides the listed entries in order, in batches of at most
@@ -3719,6 +3920,17 @@ impl AiCapabilityDiscoveryBroker {
                 )
             })
             .ok_or_else(stale_selection)?;
+        // Admission is decided from the held candidate first: a candidate
+        // this run's rules or brokered tools do not reach is a stale
+        // selection, never a distinguishable catalogue-drift outcome.
+        if !search
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == capability_id)
+            .is_some_and(|candidate| session.brokers_candidate(candidate))
+        {
+            return Err(stale_selection());
+        }
         let indexes = self.current_indexes.current_index_set(run)?;
         // The run holds this exact candidate, so reporting catalogue drift
         // discloses nothing the principal was not already shown.
@@ -3727,11 +3939,7 @@ impl AiCapabilityDiscoveryBroker {
         // A static tool is loadable only while this run brokers its exact
         // fingerprint. A cached discovery from a run that did, or any other
         // capability family, is the same stale selection as an unknown ID.
-        if !matches!(
-            entry.kind,
-            AiCapabilityKind::GeneratedEntity | AiCapabilityKind::GeneratedQuery
-        ) && !session.brokers_static_entry(entry)
-        {
+        if !session.brokers_entry(entry) {
             return Err(stale_selection());
         }
         let loaded = self
@@ -3833,9 +4041,15 @@ impl AiCapabilityDiscoveryBroker {
                 parsed.operation.as_deref(),
             )
             .await?;
-        let field_descriptions = self
-            .current_indexes
-            .current_index_set(run)?
+        let indexes = self.current_indexes.current_index_set(run)?;
+        if loaded.capability_kind == AiCapabilityKind::GeneratedMutation
+            && !indexes
+                .entry(&loaded.capability_id)
+                .is_some_and(|(_, entry)| session.brokers_mutation_entry(entry))
+        {
+            return Err(AiError::Forbidden);
+        }
+        let field_descriptions = indexes
             .entry(&loaded.capability_id)
             .map(|(_, entry)| {
                 entry
@@ -3933,9 +4147,12 @@ impl AiCapabilityDiscoveryBroker {
     /// Dispatches one frozen `graphql.capabilities.execute` call up to, but
     /// not including, the resolver.
     ///
-    /// Only a generated read capability is executable through the frozen
-    /// broker; reviewed static tools, mutations, and subscriptions retain
-    /// their own exact delivery and approval contracts and fail closed here.
+    /// A generated read, a brokered reviewed static tool and, for a session
+    /// [`AiCapabilityBrokerSession::with_brokered_mutations`] whose bound
+    /// rules admit it, a generated mutation resolve here. A mutation is only
+    /// resolved ([`AiCapabilityExecution::is_consequential`]): the classified
+    /// coordinator classifies, approves and runs it. Subscriptions keep their
+    /// own wait contract and fail closed here.
     /// The returned closed plan contains public names and finite typed values
     /// only and is compiled by the authoritative schema-derived compiler.
     ///
@@ -3998,6 +4215,7 @@ impl AiCapabilityDiscoveryBroker {
             {
                 true
             }
+            AiCapabilityKind::GeneratedMutation if session.brokers_mutations() => false,
             _ => return Err(AiError::Forbidden),
         };
         if parsed
@@ -4015,11 +4233,20 @@ impl AiCapabilityDiscoveryBroker {
                 parsed.operation.as_deref(),
             )
             .await?;
-        if static_tool {
+        if static_tool || loaded.capability_kind == AiCapabilityKind::GeneratedMutation {
+            // A static tool or mutation is executable only while this run
+            // still brokers it: for a mutation, while the bound rules still
+            // admit its exact fingerprint at its reviewed classification.
             let indexes = self.current_indexes.current_index_set(run)?;
             if !indexes
                 .entry(&loaded.capability_id)
-                .is_some_and(|(_, entry)| session.brokers_static_entry(entry))
+                .is_some_and(|(_, entry)| {
+                    if static_tool {
+                        session.brokers_static_entry(entry)
+                    } else {
+                        session.brokers_mutation_entry(entry)
+                    }
+                })
             {
                 return Err(AiError::Forbidden);
             }
@@ -4522,6 +4749,19 @@ impl AiCapabilityDeliveryTurn {
         state.static_fingerprints = selected_fingerprints.clone();
         state.generation = generation;
         Ok(())
+    }
+
+    /// Returns this delivery with its broker session bound to the classified
+    /// coordinator's rules for brokered mutations
+    /// ([`AiCapabilityBrokerSession::bind_mutation_rules`]). Only the
+    /// returned delivery carries them; the turn it was cloned from, and any
+    /// other clone, stays closed to mutations.
+    pub(crate) fn with_mutation_rules(
+        mut self,
+        rules: &crate::AiResolvedRuleSet,
+    ) -> Result<Self, AiError> {
+        self.session = self.session.bind_mutation_rules(rules)?;
+        Ok(self)
     }
 
     /// Exact crate-authored definition of one broker operation in this
@@ -7292,6 +7532,8 @@ mod tests {
             limits: session.limits,
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
+            brokered_mutations: false,
+            mutation_rules: None,
         };
         assert!(matches!(
             broker
@@ -7304,6 +7546,434 @@ mod tests {
                 .await,
             Err(AiError::Forbidden)
         ));
+    }
+
+    /// One automatic `CreateRecord` and one approval-required
+    /// `ArchiveRecord` mutation of the `Record` entity.
+    fn mutation_index(target_policy: &str) -> Arc<AiCapabilityIndex> {
+        let sdl = "schema { query: Query, mutation: Mutation }
+            type Query { health: Boolean! }
+            type Mutation { CreateRecord(input: RecordInput!): Record!, ArchiveRecord(recordId: ID!): Record! }
+            input RecordInput { subject: String! }
+            type Record { recordId: ID!, subject: String! }";
+        let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
+            field_name: field_name.to_owned(),
+            description: format!("Reviewed public {field_name}."),
+            type_ref: GraphqlSemanticTypeRef::named(
+                scalar_name,
+                GraphqlSemanticTypeKind::Scalar,
+                false,
+            ),
+            selectable: true,
+            filter_operators: Vec::new(),
+            filter_input: None,
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: false,
+        };
+        let entity = GraphqlEntitySemanticMetadata {
+            generated_input_members: Vec::new(),
+            entity_name: "Record".to_owned(),
+            description: "A reviewed application record.".to_owned(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+            label_fields: Vec::new(),
+            record_version: None,
+        };
+        let record =
+            GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false);
+        let create = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Mutation,
+            "CreateRecord",
+            "Create one reviewed application record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "input".to_owned(),
+                description: "Reviewed record input.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "RecordInput",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+            }],
+            record.clone(),
+            true,
+        )
+        .expect("create semantics")
+        .with_ai_mutation_execution(graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic)
+        .expect("automatic classification");
+        let archive = GraphqlSemanticOperationDescriptor::custom(
+            GraphqlOperationKind::Mutation,
+            "ArchiveRecord",
+            "Archive one reviewed application record.",
+            vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "recordId".to_owned(),
+                description: "Reviewed record identifier.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "ID",
+                    GraphqlSemanticTypeKind::Scalar,
+                    false,
+                ),
+            }],
+            record,
+            true,
+        )
+        .expect("archive semantics")
+        .with_ai_mutation_execution(
+            graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired,
+        )
+        .expect("approval classification");
+        let semantics = GraphqlSemanticCatalog::compose_with_custom(
+            [entity],
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            [create, archive],
+        )
+        .expect("mutation semantics");
+        let target = crate::GraphqlExecutionTargetId::parse("generated-application")
+            .expect("generated target");
+        let catalogue = crate::AiGraphqlMutationCapabilityCatalog::compile_with_options(
+            "generated",
+            target.clone(),
+            sdl,
+            &semantics,
+            crate::AiGraphqlQueryCapabilityLimits::default(),
+            crate::AiGraphqlQueryCapabilityOptions::default().with_custom_input_disclosure(
+                crate::AiCustomInputDisclosure::new()
+                    .with_exportable_field("RecordInput", "subject")
+                    .expect("custom input disclosure"),
+            ),
+        )
+        .expect("mutation capabilities");
+        Arc::new(
+            AiCapabilityIndex::compile(
+                target,
+                catalogue.finished_schema_fingerprint(),
+                &semantics,
+                None,
+                Some(&catalogue),
+                None,
+                [],
+                target_policy,
+                crate::AiCapabilityIndexLimits::default(),
+            )
+            .expect("mutation capability index"),
+        )
+    }
+
+    fn mutation_rules(allowed: Option<BTreeSet<String>>) -> crate::AiResolvedRuleSet {
+        let scope = crate::AiScope {
+            kind: "workspace".to_owned(),
+            id: "workspace-1".to_owned(),
+            tenant_id: Some("tenant-1".to_owned()),
+        };
+        crate::AiResolvedRuleSet::new(
+            scope.clone(),
+            crate::AiRuleConstraints {
+                enabled: true,
+                maximum_classification: crate::DataClassification::Restricted,
+                maximum_tool_maturity: crate::ToolMaturity::AutonomousWrite,
+                approval_requirement: crate::AiRuleApprovalRequirement::DescriptorPolicy,
+                allowed_tool_fingerprints: allowed,
+                allowed_provider_kinds: None,
+                allowed_provider_capabilities: None,
+                allow_provider_retention: true,
+                allow_byok: true,
+                budget: crate::AiRuleBudgetCeilings::default(),
+            },
+            vec![crate::AiAppliedRuleLayer {
+                scope,
+                row_version: 1,
+            }],
+        )
+        .expect("rules")
+    }
+
+    #[tokio::test]
+    async fn generated_mutations_reach_the_broker_only_under_bound_rules_and_are_only_resolved() {
+        let principal = principal();
+        let principal_reference = principal.reference();
+        let indexes = AiCapabilityIndexSet::compile([
+            generated_index("target-policy-v1"),
+            mutation_index("target-policy-v1"),
+        ])
+        .expect("index set");
+        let entry = |operation: &str| {
+            indexes
+                .indexes()
+                .flat_map(|index| index.entries())
+                .find(|entry| {
+                    entry.kind == AiCapabilityKind::GeneratedMutation
+                        && entry.operation_name == operation
+                })
+                .expect("mutation entry")
+                .clone()
+        };
+        let (create, archive) = (entry("CreateRecord"), entry("ArchiveRecord"));
+        assert_eq!(create.approval, AiApprovalRule::None);
+        assert_eq!(archive.approval, AiApprovalRule::OneShot);
+        let authority = Arc::new(Authority {
+            allowed: AtomicBool::new(true),
+            policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+        });
+        let current = Arc::new(CurrentIndexes(RwLock::new(Arc::new(indexes))));
+        let broker = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal)),
+            current.clone(),
+            authority.clone(),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        let run = run_binding();
+        let search =
+            json!({"text": "archive create reviewed application record", "maximumResults": 16});
+        let mutation_search = json!({"text": "archive create record", "kind": "generated_mutation", "maximumResults": 8});
+
+        // Default session: mutations stay outside the broker.
+        let default =
+            AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).expect("session");
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &default, &search)
+            .await
+            .expect("default discovery");
+        assert!(!candidate_kinds(&discovery).contains("generated_mutation"));
+        assert!(matches!(
+            broker
+                .dispatch_discover(&principal_reference, &run, &default, &mutation_search)
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+        // Opted in but no coordinator bound rules (the read-only path):
+        // nothing consequential is discoverable.
+        let unbound = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("session")
+            .with_brokered_mutations();
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &unbound, &mutation_search)
+            .await
+            .expect("unbound discovery");
+        assert!(discovery["candidates"].as_array().unwrap().is_empty());
+        // Rules that admit only other fingerprints (for example the broker's
+        // own) never admit a mutation.
+        let narrow = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("session")
+            .with_brokered_mutations()
+            .bind_mutation_rules(&mutation_rules(Some(BTreeSet::from([
+                fixed_broker_definitions()[0].fingerprint.clone(),
+            ]))))
+            .expect("bind narrow rules");
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &narrow, &mutation_search)
+            .await
+            .expect("narrow discovery");
+        assert!(discovery["candidates"].as_array().unwrap().is_empty());
+
+        // Rules admitting the approval-required mutation alone. Binding
+        // returns the bound session; the session it was taken from, and any
+        // clone of it, stays closed.
+        let opted = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())
+            .expect("session")
+            .with_brokered_mutations();
+        let unbound_clone = opted.clone();
+        let rules = mutation_rules(Some(BTreeSet::from([archive
+            .capability_fingerprint
+            .clone()])));
+        let session = opted.bind_mutation_rules(&rules).expect("bind rules");
+        session
+            .bind_mutation_rules(&rules)
+            .expect("same rules rebind");
+        assert!(matches!(
+            session.bind_mutation_rules(&mutation_rules(None)),
+            Err(AiError::Conflict)
+        ));
+        for closed in [&opted, &unbound_clone] {
+            let discovery = broker
+                .dispatch_discover(&principal_reference, &run, closed, &mutation_search)
+                .await
+                .expect("unbound clone discovery");
+            assert!(
+                discovery["candidates"].as_array().unwrap().is_empty(),
+                "a clone never inherits another plan's rules"
+            );
+        }
+        let discovery = broker
+            .dispatch_discover(&principal_reference, &run, &session, &mutation_search)
+            .await
+            .expect("mutation discovery");
+        let candidates = discovery["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1, "{discovery}");
+        assert_eq!(candidates[0]["capabilityId"], archive.id.as_str());
+        assert_eq!(candidates[0]["kind"], "generated_mutation");
+        // Unfiltered discovery covers reads and the admitted mutation.
+        let mixed = broker
+            .dispatch_discover(&principal_reference, &run, &session, &search)
+            .await
+            .expect("mixed discovery");
+        assert!(candidate_kinds(&mixed).contains("generated_mutation"));
+        assert!(
+            !mixed.to_string().contains(create.id.as_str()),
+            "a mutation the rules refuse is never listed"
+        );
+        // Browse lists the same admitted mutation.
+        let browsed = broker
+            .dispatch_browse(
+                &principal_reference,
+                &run,
+                &session,
+                &json!({"level": "capabilities", "namespace": archive.namespace}),
+            )
+            .await
+            .expect("browse");
+        assert!(
+            browsed.to_string().contains(archive.id.as_str()),
+            "{browsed}"
+        );
+        assert!(!browsed.to_string().contains(create.id.as_str()));
+
+        let describe = json!({
+            "capabilityId": archive.id.as_str(),
+            "candidateFingerprint": archive.fingerprint,
+        });
+        // The same candidate in a session whose rules refuse it is stale.
+        narrow.record_search(
+            session
+                .candidate_search(&archive.id, &archive.fingerprint)
+                .expect("recorded search"),
+        );
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &narrow, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+        ));
+        let description = broker
+            .dispatch_describe(&principal_reference, &run, &session, &describe)
+            .await
+            .expect("mutation description");
+        assert_eq!(
+            description.capability_kind(),
+            AiCapabilityKind::GeneratedMutation
+        );
+        assert_eq!(description.contract()["effect"], "approval_required");
+        assert_eq!(
+            description.contract()["approval"],
+            json!(AiApprovalRule::OneShot)
+        );
+        assert_eq!(description.operations().len(), 1);
+        let loaded_reference = description.loaded_reference().to_owned();
+        assert!(session.holds_loaded_mutation(&json!({"loadedReference": loaded_reference})));
+        assert!(!default.holds_loaded_mutation(&json!({"loadedReference": loaded_reference})));
+
+        let execute = json!({
+            "loadedReference": loaded_reference,
+            "arguments": [{"name": "recordId", "value": "record-7"}],
+            "selections": ["recordId", "subject"]
+        });
+        let execution = broker
+            .authorize_broker_execution(&principal_reference, &run, &session, &execute)
+            .await
+            .expect("mutation resolution");
+        assert!(execution.is_consequential());
+        assert_eq!(execution.capability_id(), &archive.id);
+        assert_eq!(
+            execution.capability_fingerprint(),
+            archive.capability_fingerprint
+        );
+        assert_eq!(
+            execution.plan()["arguments"],
+            json!({"recordId": "record-7"})
+        );
+        // A mutation is never continued.
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(
+                    &principal_reference,
+                    &run,
+                    &session,
+                    &json!({"loadedReference": loaded_reference, "continuation": "a".repeat(64)}),
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        // The loaded binding in a run whose rules no longer admit the
+        // mutation does not resolve.
+        let revoked_rules = AiCapabilityBrokerSession {
+            inner: Arc::clone(&session.inner),
+            limits: session.limits,
+            brokered_static_tools: Arc::new(BTreeSet::new()),
+            inline_describe_schema: false,
+            brokered_mutations: true,
+            mutation_rules: Some(Arc::new(mutation_rules(Some(BTreeSet::new())))),
+        };
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(&principal_reference, &run, &revoked_rules, &execute)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        // An unbound clone sharing this run's broker state still describes
+        // no mutation, and executes none of its loaded references.
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &opted, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+        ));
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(&principal_reference, &run, &opted, &execute)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        // Host policy revoked between describe and execute refuses.
+        authority.allowed.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            broker
+                .authorize_broker_execution(&principal_reference, &run, &session, &execute)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        authority.allowed.store(true, Ordering::SeqCst);
+
+        // After a catalogue change, a held mutation candidate the turn's
+        // rules refuse is the same stale selection as before; only a turn
+        // that may reach it learns of the drift.
+        *current.0.write().unwrap() = Arc::new(
+            AiCapabilityIndexSet::compile([generated_index("target-policy-v1")])
+                .expect("index set"),
+        );
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &narrow, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+        ));
+        assert!(matches!(
+            broker
+                .dispatch_describe(&principal_reference, &run, &session, &describe)
+                .await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
+        ));
+    }
+
+    #[test]
+    fn only_reviewed_automatic_and_approval_required_mutations_have_a_broker_binding() {
+        assert_eq!(
+            brokered_mutation_binding(AiApprovalRule::OneShot),
+            Some((
+                crate::ToolMaturity::SupervisedWrite,
+                AiApprovalRule::OneShot
+            ))
+        );
+        assert_eq!(
+            brokered_mutation_binding(AiApprovalRule::None),
+            Some((crate::ToolMaturity::AutonomousWrite, AiApprovalRule::None))
+        );
+        assert_eq!(brokered_mutation_binding(AiApprovalRule::Never), None);
     }
 
     #[tokio::test]

@@ -346,6 +346,7 @@ fn approval_invalidates_when_resource_or_policy_binding_changes() {
         authorization_state_digest: "auth-v1".to_owned(),
         resources: vec![resource],
         preview_hash: preview.stable_hash(),
+        broker_origin: None,
     };
     binding.validate(&preview).expect("binding should validate");
     let now = OffsetDateTime::now_utc();

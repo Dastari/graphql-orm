@@ -2804,6 +2804,8 @@ mod bootstrap_window_tests {
                             tool_call_index: 0,
                             tool_id: "test.read".to_owned(),
                             tool_fingerprint: "tool-fingerprint".to_owned(),
+                            provider_tool_id: None,
+                            provider_tool_fingerprint: None,
                             execution_provenance: None,
                             protected_arguments: None,
                             argument_hash: "argument-hash".to_owned(),

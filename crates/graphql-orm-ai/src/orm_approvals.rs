@@ -3401,6 +3401,8 @@ mod tests {
                     tool_call_index: 0,
                     tool_id: "application.change".to_owned(),
                     tool_fingerprint: fixture.tool_fingerprint.clone(),
+                    provider_tool_id: None,
+                    provider_tool_fingerprint: None,
                     protected_arguments: serde_json::json!({"protection": "database_managed", "value": {"id": "resource-1"}}),
                     argument_hash: "argument-hash-v1".to_owned(),
                     risk: "high_impact".to_owned(),
@@ -3453,6 +3455,7 @@ mod tests {
             authorization_state_digest: "auth-state-v1".to_owned(),
             resources: vec![resource],
             preview_hash: preview.stable_hash(),
+            broker_origin: None,
         };
         (binding, preview)
     }
@@ -4074,6 +4077,8 @@ mod tests {
                 tool_call_index: call.tool_call_index + 1,
                 tool_id: call.tool_id.clone(),
                 tool_fingerprint: call.tool_fingerprint.clone(),
+                provider_tool_id: None,
+                provider_tool_fingerprint: None,
                 execution_provenance: None,
                 protected_arguments: None,
                 argument_hash: call.argument_hash.clone(),

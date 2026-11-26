@@ -105,6 +105,23 @@ catalogue, index and existing plan fingerprints are unchanged, and approvals
 stay valid. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#capability-broker-version-3-551).
 No data migration is needed.
 
+### 8. Apply AI schema module 0.86.0 for brokered generated mutations (#551)
+
+**Action needed** for hosts of the graphql-orm-ai ORM services. Apply AI
+schema module 0.86.0: two nullable tool-call columns record the
+provider-facing identity of a call routed through the fixed broker. There is
+no backfill and existing rows stay direct calls. A fixed-broker session can
+now opt in to generated mutations with
+`AiCapabilityBrokerSession::with_brokered_mutations` under the classified
+native supervised coordinator; the coordinator classifies, rule-checks and
+approves the resolved mutation exactly as the direct definition, and
+re-proves current rules immediately before dispatch. Construct
+`OrmAiConsequentialToolCallService` with `with_rule_resolver` to execute
+brokered approvals; without it they are refused. The
+discover, browse and execute broker fingerprints change in this same
+release. Approved generated mutations now execute instead of converging to
+`RecoveryRequired`. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-mutations-through-the-capability-broker-551).
+
 ## 0.219.0 to 0.220.0: Canonical PostgreSQL journal keys
 
 **No action.** The default uses the legacy journal recorder and full backup

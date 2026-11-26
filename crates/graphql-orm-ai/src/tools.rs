@@ -890,6 +890,24 @@ impl AiToolCatalog {
         Ok(definition)
     }
 
+    /// Compact typed signature of one registered classified mutation
+    /// capability, as the capability broker's describe and describe-type
+    /// return it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for an absent capability or a schema that cannot
+    /// be rendered.
+    pub fn mutation_capability_signature(
+        &self,
+        id: &AiToolId,
+    ) -> Result<crate::AiCapabilitySignature, AiError> {
+        self.mutation_capabilities
+            .get(id)
+            .ok_or(AiError::Forbidden)?
+            .capability_signature()
+    }
+
     /// Compiles one provider-authored typed mutation plan against the exact
     /// registered semantic capability.
     ///

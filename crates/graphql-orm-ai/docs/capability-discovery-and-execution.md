@@ -3,7 +3,7 @@ title: "Capability discovery and execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-23
+last_reviewed: 2026-11-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -400,8 +400,10 @@ classification is below `Restricted` and which declares no result media can
 be brokered. Anything else in the list is never discoverable and never
 executable through the broker; keep it a bootstrap definition. A brokered
 call carries no `AiToolExecutionProvenance`, so a host executor that requires
-provenance refuses it. Mutations and subscriptions keep their own approval
-and wait contracts and cannot enter the broker.
+provenance refuses it. Reviewed static mutations stay bootstrap definitions.
+Generated mutations can enter the broker under a classified coordinator (see
+[Generated mutations through the fixed broker](#generated-mutations-through-the-fixed-broker));
+subscriptions keep their wait contract and cannot.
 
 ### Coordinator construction and dispatch
 
@@ -657,6 +659,155 @@ for broker calls.
 **Server-side aggregates** are the entity's generated aggregate and count
 operations: a count question's top candidate offers the `aggregate`
 operation, and its result is the aggregate, not the rows.
+
+### Generated mutations through the fixed broker
+
+A session can also let its fixed broker reach generated mutations:
+
+```rust,ignore
+let session = AiCapabilityBrokerSession::new(delivery_limits)?
+    .with_brokered_mutations();
+```
+
+Opting in grants nothing by itself. Only the classified native supervised
+coordinator routes consequential calls, and only it binds its turn's
+hierarchical rules when the delivery is attached
+(`AiSupervisedAgentTurnPlan::with_capability_delivery`). The binding is part
+of that turn's own delivery value: the delivery the host passed in, and any
+clone of it (for example one attached to a read-only plan), stays closed to
+mutations. A generated mutation is then discoverable, browsable, describable
+and executable only while those rules admit its exact capability fingerprint
+at its reviewed classification:
+
+| Reviewed classification | Admitted as | Describe `effect` |
+| --- | --- | --- |
+| `ApprovalRequired` | one-shot supervised write | `approval_required` |
+| `Automatic` | approval-free autonomous write | `automatic` |
+| `Prohibited` | never offered | — |
+
+Rules that admit only the five broker fingerprints admit no mutation. The
+read-only coordinator binds no rules, so through it no mutation is ever
+discovered, described or executed; an execute that resolves to one anyway is
+refused with the fixed correction `AI_CAPABILITY_CONSEQUENTIAL_UNROUTED`.
+Discover takes `kind: "generated_mutation"`. Describe returns the mutation's
+risk, approval and `effect` and one compact signature, built from the
+mutation's compact plan schema exactly as for a query. Describe decides
+admission from the held candidate (its kind, fingerprint and reviewed
+approval) before it looks the capability up in the current index, so a
+mutation the turn's rules refuse is the same `selection_stale` whether or not
+the catalogue has since changed.
+
+**Describe does not report operation assurance.** The capability index
+carries no assurance metadata, so a described mutation does not say whether
+it requires recent authentication or another assurance level. The owning
+service enforces assurance only at execution, exactly as for the direct
+definition: a mutation that needs fresh assurance is refused there, after
+approval for an approval-required one.
+
+Execute only **resolves** a mutation. The broker proves the loaded binding,
+the current index, host capability policy and the bound rules, and returns
+the exact capability and closed plan; it never reaches a resolver. The
+coordinator then classifies and rule-checks the **resolved** mutation, not
+the broker definition, from the registered catalogue. Because resolution
+awaited, it resolves current rules again: they must still be the turn's
+rules (same fingerprint) and admit the mutation's own fingerprint at its
+reviewed classification. From there it is the direct definition's path:
+
+- an automatic mutation runs once, with the same pre-effect fence and
+  `RecoveryRequired` convergence. Its rule admission is re-proved once more
+  inside the execution bridge, as the last step before the executor: after
+  the pre-effect checkpoint, principal rehydration, host tool policy and
+  request-context construction. A rule change or revocation committed
+  before that check refuses the mutation as a durable
+  `not_started_authorization_denied` result, and the executor never runs;
+- an approval-required one is prepared and parked exactly as a direct one,
+  with the same server-built preview, one-shot binding of the resolved
+  fingerprint and plan hash, forced step-up for `HighImpact` and approval
+  lifetime cap; nothing runs until the approval is consumed;
+- while an approval is pending, a later consequential call in the same
+  native turn receives the closed paused reply.
+
+**Approved execution re-proves rules.** Construct the consequential service
+with `OrmAiConsequentialToolCallService::with_rule_resolver`, using the
+coordinator's resolver. For a broker-routed call, native finalization and
+`execute_approved` resolve current rules for the exact claimed lease and
+scope. They require the rules that admitted the mutation (their fingerprint
+is bound in the call's protected evidence) and a one-shot admission of the
+mutation's own fingerprint: before the approval is consumed, where a
+refusal leaves it unconsumed, and again inside the execution bridge as the
+last step before the executor (after consumption, principal rehydration,
+bound host tool policy and request-context construction), where a refusal
+is a durable `not_started_authorization_denied` result. Without a rule
+resolver, every broker-routed approval is refused. A worker that claims an
+approval and calls `execute_approved` directly is held to the same proof.
+
+The approval binding itself records the broker origin
+(`AiApprovalBinding::broker_origin`: the execute tool ID, the exact offered
+fingerprint, the provider argument hash and the admitting rule
+fingerprint). Execution recomputes the binding from the durable call, so an
+approval granted for a broker-routed call matches only while the call still
+records that origin and those rules. A direct binding omits the field and
+hashes as before.
+
+A rule recheck cannot be atomic with the resolver's own work, which runs in
+the owning service. What is guaranteed is ordering: a revocation committed
+before the final check, the last step before the executor, always wins.
+
+Every generated authorization check (auth mode, scopes, operation assurance,
+entity, row and field policies, RLS) runs in the resolver as for the direct
+tool.
+
+**Two identities.** The durable tool-call row keeps both. `tool_id` and
+`tool_fingerprint` are the resolved mutation, and the new nullable
+`provider_tool_id` and `provider_tool_fingerprint` (AI schema module 0.86.0)
+are the broker execute definition the provider called. A direct row leaves
+both new columns null. Preparation, approval binding, the protected
+arguments (the resolved closed plan), rules and execution use the resolved
+identity. Every tool result, native control reply, approved-outcome
+continuation and checkpoint comparison with the provider's own call uses the
+provider-facing one, so the approved result answers the provider's
+`graphql.capabilities.execute` call ID with the broker tool ID. Approved
+execution and native finalization re-resolve a broker-routed row from its
+stored resolved identity and arguments only; the broker's process-local
+loaded binding is never needed again.
+
+**Protected evidence.** A broker-routed row's protected arguments are an
+envelope (`graphql-orm-ai/brokered-call/v1`). It records the broker origin
+(the execute tool ID and the exact offered definition fingerprint), the hash
+of the provider's original broker arguments, the fingerprint of the rules
+that admitted the mutation, and the resolved plan. The row's `argument_hash`
+stays the hash of that plan. Checkpoint validation compares the evidence
+with the provider's own requested call (its fingerprint and argument hash),
+and finalization does the same against the settled provider turn.
+
+Only the clear dual-identity columns claim broker origin; the envelope is
+parsed only for a row that has them. A direct row's protected arguments are
+taken verbatim, so direct arguments that happen to contain the envelope's
+`format` value stay ordinary arguments. The envelope and the columns must
+agree:
+
+- columns added to a direct row are refused, because its arguments are not
+  an envelope;
+- a broker-routed row whose columns are cleared no longer hashes to its own
+  `argument_hash`, and its approval binding still records the broker
+  origin, so it is refused rather than run as a direct call;
+- a provider fingerprint other than the current fixed-broker execute
+  definition is refused.
+
+A direct row, including every row from before schema module 0.86.0, keeps
+its own arguments and both columns null.
+
+**Database writers.** With the built-in database-managed content
+protection, protected values are stored as readable JSON: an actor who can
+write the AI tables can rewrite a row's columns, its envelope and its
+argument hash together. The approval binding defeats the downgrade above for
+approvals, but database-managed protection does not defend the durable
+state against database writers in general. A host that needs that must use
+an encrypting or authenticating `AiContentProtector`, which can bind each
+protected value to the entity, row and field it is given.
+
+Brokered mutations add no provider definition, so first-turn definitions stay
+the five fixed broker definitions at every catalogue size.
 
 ### Turn amplification
 

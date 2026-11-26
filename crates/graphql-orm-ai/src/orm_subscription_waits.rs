@@ -3130,6 +3130,8 @@ impl OrmAiSubscriptionWaitService {
                             tool_call_index: 0,
                             tool_id: registration.tool_id,
                             tool_fingerprint: registration.tool_fingerprint,
+                            provider_tool_id: None,
+                            provider_tool_fingerprint: None,
                             execution_provenance: None,
                             protected_arguments: Some(registration.protected_arguments),
                             argument_hash: registration.argument_hash,

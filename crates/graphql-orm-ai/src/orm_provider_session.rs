@@ -4846,6 +4846,8 @@ mod service {
                     tool_call_index: 0,
                     tool_id: "records.update".to_owned(),
                     tool_fingerprint: "e".repeat(64),
+                    provider_tool_id: None,
+                    provider_tool_fingerprint: None,
                     execution_provenance: None,
                     protected_arguments: Some(serde_json::json!({"protected": true})),
                     argument_hash: "f".repeat(64),

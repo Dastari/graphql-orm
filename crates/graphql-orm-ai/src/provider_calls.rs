@@ -5895,6 +5895,7 @@ fn valid_provider_call_id(value: &str) -> bool {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    mod brokered_mutation_tests;
     mod entity_reference_tests;
     mod native_coordinator_tests;
     mod tool_media_tests;
@@ -6384,9 +6385,12 @@ mod tests {
             _descriptor: &AiToolDescriptor,
             request: &ToolGraphqlRequest,
         ) -> Result<AiCanonicalActionPreview, AiError> {
+            // The generated `CreateRecord` fixture names its new record by
+            // its subject.
             let record_id = request
                 .variables
                 .get("recordId")
+                .or_else(|| request.variables.pointer("/v0/subject"))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| AiError::InvalidInput("record ID is missing".to_owned()))?;
             Ok(AiCanonicalActionPreview {
@@ -6859,6 +6863,37 @@ mod tests {
         type Record { recordId: ID!, subject: String! }
     "#;
 
+    thread_local! {
+        /// Test-only: the generated `CreateRecord` fixture mutation requires
+        /// approval instead of running automatically. Tokio tests run on one
+        /// thread, so this applies to exactly one fixture.
+        static APPROVAL_REQUIRED_GENERATED_MUTATION: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    fn approval_required_generated_mutation() -> bool {
+        APPROVAL_REQUIRED_GENERATED_MUTATION.with(std::cell::Cell::get)
+    }
+
+    thread_local! {
+        /// Test-only: a static-tool fixture also registers the generated
+        /// `CreateRecord` mutation, for native turns that reach it through
+        /// the fixed broker.
+        static BROKERED_GENERATED_MUTATION: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    fn brokered_generated_mutation() -> bool {
+        BROKERED_GENERATED_MUTATION.with(std::cell::Cell::get)
+    }
+
+    /// The automatic-mutation fixture with an approval-required generated
+    /// mutation instead.
+    async fn approval_required_mutation_fixture() -> Fixture {
+        APPROVAL_REQUIRED_GENERATED_MUTATION.with(|cell| cell.set(true));
+        automatic_mutation_fixture().await
+    }
+
     fn automatic_mutation_catalog() -> (GraphqlSemanticCatalog, AiGraphqlMutationCapabilityCatalog)
     {
         let scalar = |field_name: &str, scalar_name: &str| GraphqlSemanticFieldMetadata {
@@ -6907,7 +6942,11 @@ mod tests {
             true,
         )
         .expect("test mutation semantics should validate")
-        .with_ai_mutation_execution(AiMutationExecutionPolicy::Automatic)
+        .with_ai_mutation_execution(if approval_required_generated_mutation() {
+            AiMutationExecutionPolicy::ApprovalRequired
+        } else {
+            AiMutationExecutionPolicy::Automatic
+        })
         .expect("automatic classification should validate");
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [entity],
@@ -7547,7 +7586,7 @@ mod tests {
         let mut automatic_mutation_id = None;
         let mut automatic_mutation_fingerprint = None;
         let mut automatic_schema_fingerprint = None;
-        if !include_static_tools {
+        if !include_static_tools || brokered_generated_mutation() {
             let (mutation_semantics, mutation_catalog) = automatic_mutation_catalog();
             let automatic_mutation = mutation_catalog
                 .capabilities()
@@ -7557,16 +7596,19 @@ mod tests {
             automatic_mutation_fingerprint = Some(automatic_mutation.fingerprint().to_owned());
             automatic_schema_fingerprint =
                 Some(mutation_catalog.finished_schema_fingerprint().to_owned());
+            let binding = AiGeneratedGraphqlTargetPolicyBinding::new(
+                automatic_mutation.target_id().clone(),
+                mutation_catalog.finished_schema_fingerprint(),
+                mutation_semantics.fingerprint.clone(),
+            )
+            .expect("generated target binding should validate")
+            .allow_automatic_mutations();
             generated_target_policy
-                .bind(
-                    AiGeneratedGraphqlTargetPolicyBinding::new(
-                        automatic_mutation.target_id().clone(),
-                        mutation_catalog.finished_schema_fingerprint(),
-                        mutation_semantics.fingerprint.clone(),
-                    )
-                    .expect("generated target binding should validate")
-                    .allow_automatic_mutations(),
-                )
+                .bind(if approval_required_generated_mutation() {
+                    binding.allow_approval_required_mutations()
+                } else {
+                    binding
+                })
                 .expect("generated target should bind once");
             tool_catalog
                 .register_mutation_capability_catalog(&mutation_catalog)

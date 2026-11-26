@@ -28,6 +28,12 @@ handles. Fixed-broker sessions rebind once.
 [Broker version 3](docs/capability-discovery-and-execution.md#broker-version-3-browsing-and-continuation-handles) ·
 [migration](MIGRATION.md#capability-broker-version-3-551)
 
+Under the classified native supervised coordinator, a fixed-broker session
+can also reach generated mutations, which are classified, rule-checked and
+approved as the resolved mutation. Apply AI schema module 0.86.0.
+[Generated mutations through the broker](docs/capability-discovery-and-execution.md#generated-mutations-through-the-fixed-broker) ·
+[migration](MIGRATION.md#generated-mutations-through-the-capability-broker-551)
+
 AI 0.163.0 adds operator reports for legacy skill schemas and invalid saved
 provider endpoints. Skill history audits require `AiSkillAction::ManageSkill`.
 Editing a reported profile requires correcting its URL. See the

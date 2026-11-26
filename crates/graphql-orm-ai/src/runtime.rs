@@ -249,6 +249,9 @@ pub struct AiPreparedGraphqlMutation {
     execution_policy: AiMutationExecutionPolicy,
     capability_fingerprint: String,
     plan_fingerprint: String,
+    /// Canonical hash of the exact provider plan this mutation was prepared
+    /// from: the argument hash a one-shot approval binds.
+    argument_hash: String,
     descriptor: AiToolDescriptor,
     disclosure_schema: crate::AiDisclosureSchema,
     request: ToolGraphqlRequest,
@@ -268,6 +271,17 @@ impl AiPreparedGraphqlMutation {
     /// Returns the exact closed-plan fingerprint.
     pub fn plan_fingerprint(&self) -> &str {
         &self.plan_fingerprint
+    }
+
+    /// Returns the canonical hash of the exact provider plan this mutation
+    /// was prepared from.
+    ///
+    /// A one-shot approval of a generated mutation binds this hash, the hash
+    /// of the plan the preview was built from. The compiled variables are
+    /// derived from that plan by the authoritative compiler again at
+    /// execution, so they are not bound separately.
+    pub fn argument_hash(&self) -> &str {
+        &self.argument_hash
     }
 
     /// Returns the compiled execution descriptor.
@@ -845,6 +859,7 @@ impl AiRuntime {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
         }
+        let argument_hash = crate::tools::canonical_json_digest(&plan);
         let compiled = self.tool_catalog.compile_mutation_capability(
             capability_id,
             capability_fingerprint,
@@ -881,6 +896,7 @@ impl AiRuntime {
             execution_policy,
             capability_fingerprint: compiled_capability_fingerprint,
             plan_fingerprint,
+            argument_hash,
             descriptor,
             disclosure_schema,
             request,
@@ -1015,6 +1031,19 @@ impl AiRuntime {
         principal_reference: &PrincipalReference,
         prepared: AiPreparedGraphqlMutation,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_prepared_automatic_mutation_admitted(principal_reference, prepared, None)
+            .await
+    }
+
+    /// [`Self::execute_prepared_automatic_mutation`] with a final admission
+    /// checked after principal rehydration, host tool policy and request
+    /// context construction, immediately before the executor.
+    pub(crate) async fn execute_prepared_automatic_mutation_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+        final_admission: Option<&dyn crate::execution::AiFinalAdmission>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
         if prepared.execution_policy != AiMutationExecutionPolicy::Automatic {
             return Err(AiError::Forbidden);
@@ -1029,6 +1058,7 @@ impl AiRuntime {
                 &prepared.descriptor,
                 prepared.request,
                 effect_guard,
+                final_admission,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1054,6 +1084,27 @@ impl AiRuntime {
         approval: &ConsumedAiApproval,
         binding: &AiApprovalBinding,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_approved_prepared_mutation_admitted(
+            principal_reference,
+            prepared,
+            approval,
+            binding,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::execute_approved_prepared_mutation`] with a final admission
+    /// checked after principal rehydration, bound host tool policy and
+    /// request context construction, immediately before the executor.
+    pub(crate) async fn execute_approved_prepared_mutation_admitted(
+        &self,
+        principal_reference: &PrincipalReference,
+        prepared: AiPreparedGraphqlMutation,
+        approval: &ConsumedAiApproval,
+        binding: &AiApprovalBinding,
+        final_admission: Option<&dyn crate::execution::AiFinalAdmission>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         self.validate_prepared_mutation(&prepared)?;
         if !approved_prepared_mutation_matches(principal_reference, &prepared, approval, binding) {
             return Err(AiError::Forbidden);
@@ -1077,6 +1128,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 effect_guard,
+                final_admission,
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1278,6 +1330,7 @@ impl AiRuntime {
                 &binding.policy_version,
                 &binding.authorization_state_digest,
                 escalated_automatic.then_some(AiApprovalRule::OneShot),
+                None,
                 None,
             )
             .await
@@ -1944,7 +1997,10 @@ fn approved_prepared_mutation_matches(
     approval: &ConsumedAiApproval,
     binding: &AiApprovalBinding,
 ) -> bool {
-    approved_static_request_matches(principal_reference, &prepared.request, binding)
+    // The approval binds the hash of the provider plan, not of the compiled
+    // variables: the preview and the durable call row record that plan.
+    approved_request_binding_matches(principal_reference, &prepared.request, binding)
+        && prepared.argument_hash == binding.argument_hash
         && prepared.execution_policy == AiMutationExecutionPolicy::ApprovalRequired
         && approval.binding_hash() == binding.stable_hash()
         && !approval.approval_id().0.is_nil()
@@ -1968,13 +2024,22 @@ fn approved_static_request_matches(
     request: &ToolGraphqlRequest,
     binding: &AiApprovalBinding,
 ) -> bool {
+    approved_request_binding_matches(principal_reference, request, binding)
+        && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
+}
+
+/// The call, scope, delegation and principal an approval binds.
+fn approved_request_binding_matches(
+    principal_reference: &PrincipalReference,
+    request: &ToolGraphqlRequest,
+    binding: &AiApprovalBinding,
+) -> bool {
     request.invocation.tool_call_id == binding.tool_call_id
         && request.invocation.scope == binding.scope
         && request.invocation.delegation_reference == binding.delegation_reference
         && principal_reference.actor_subject == binding.delegated_actor_subject
         && AiApprovalBinding::principal_fingerprint(principal_reference)
             == binding.principal_reference_fingerprint
-        && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
 }
 
 pub(crate) fn is_automatic_application_mutation(descriptor: &AiToolDescriptor) -> bool {
@@ -2073,6 +2138,7 @@ mod mutation_binding_tests {
             capability_fingerprint: CAPABILITY_FINGERPRINT.to_owned(),
             plan_fingerprint: "3333333333333333333333333333333333333333333333333333333333333333"
                 .to_owned(),
+            argument_hash: crate::tools::canonical_json_digest(&json!({"plan": "test"})),
             descriptor,
             disclosure_schema: AiDisclosureSchema::new(
                 "test-v1",
@@ -2101,6 +2167,7 @@ mod mutation_binding_tests {
             resources: Vec::new(),
             preview_hash: "6666666666666666666666666666666666666666666666666666666666666666"
                 .to_owned(),
+            broker_origin: None,
         }
     }
 
@@ -2168,7 +2235,7 @@ mod mutation_binding_tests {
         .unwrap();
         let mut binding = binding(compiled_operation);
         binding.tool_call_id = prepared.request.invocation.tool_call_id;
-        binding.argument_hash = crate::tools::canonical_json_digest(&prepared.request.variables);
+        binding.argument_hash = prepared.argument_hash.clone();
         binding.principal_reference_fingerprint =
             AiApprovalBinding::principal_fingerprint(&reference);
         let approval = consumed(&binding);
@@ -2181,7 +2248,10 @@ mod mutation_binding_tests {
             changed.request = prepared.request.clone();
             let mut principal = reference.clone();
             match change {
-                0 => changed.request.variables = json!({"impact": "different"}),
+                0 => {
+                    changed.argument_hash =
+                        crate::tools::canonical_json_digest(&json!({"impact": "different"}));
+                }
                 1 => changed.request.invocation.tool_call_id = AiToolCallId::new(),
                 2 => changed.request.invocation.scope = AiScope::new("tenant", "other"),
                 3 => principal.subject = "other".to_owned(),
