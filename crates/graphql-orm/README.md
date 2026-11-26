@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.231.0 aligns the receiver-admission test suite with the workspace's
+jsonwebtoken 11 dependency. [Migration](../../MIGRATION.md#02300-to-02310-jwt-and-fixture-dependencies)
+
 Version 0.230.0 shares offset list and aggregate execution across generated
 resolvers.
 See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).

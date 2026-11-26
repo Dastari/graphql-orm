@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.230.0 to 0.231.0: JWT and fixture dependencies
+
+**No action.** Upgrade ORM and macros together. The ORM test suite uses
+jsonwebtoken 11, the same major version as the router and agql-auth. The
+full-stack macro fixture inherits the runtime and TLS features of its
+selected ORM backend. No data migration is needed. See the
+[dependency stack review](docs/reference/dependency-security-disposition.md#duplicate-crypto-and-http-stacks-498)
+for the remaining upstream dependencies.
+
 ## 0.229.0 to 0.230.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate
