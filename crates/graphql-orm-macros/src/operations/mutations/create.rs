@@ -1,3 +1,4 @@
+use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
 use crate::operations::nested_create::{Child, ChildPipeline, Parent};
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -17,7 +18,6 @@ pub(in crate::operations) struct CreateInput<'a> {
     pub(in crate::operations) input_arg_description: &'a str,
     pub(in crate::operations) result_type: &'a syn::Ident,
     pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) rls_request_guard: &'a TokenStream,
     pub(in crate::operations) create_scope_enforcement: &'a TokenStream,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
@@ -61,7 +61,6 @@ pub(in crate::operations) fn create(
         input_arg_description,
         result_type,
         resolver_auth_mode,
-        rls_request_guard,
         create_scope_enforcement,
         backend_marker,
         entity_name_lit,
@@ -119,19 +118,30 @@ pub(in crate::operations) fn create(
     } else {
         quote! {}
     };
-    let resolver_access = quote! {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
-                #create_scope_enforcement
+    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let request = admitted_request();
+    let admit = |assurance| {
+        admit_request(
+            struct_name,
+            backend_marker,
+            resolver_auth_mode,
+            create_scope_enforcement,
+            assurance,
+        )
     };
-    let entity_access = quote! {
-                db.ensure_entity_access(
-                    ::std::option::Option::Some(ctx),
-                    #entity_name_lit,
-                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
-                    ::graphql_orm::graphql::orm::EntityAccessKind::Write,
-                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                db.ensure_row_write_provider(#entity_name_lit, <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy).map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+    let admit_parent = admit(Assurance::Resolver);
+    // A child row is admitted on its parent's database under its own field
+    // context, and enforces its entity's own create root.
+    let admit_child = {
+        let admit_request = admit(Assurance::Operation(create_mutation_name));
+        quote! {
+            #entity
+            #admit_request
+            let __gom_authority = __gom_request
+                .__admit_entity_on(ctx, db, __gom_entity)
+                .await?
+                .into_authority();
+        }
     };
     let rebind_insert = quote! { let sql = #struct_name::__gom_rebind_sql(#insert_sql, 1); };
     let prepare_row = |check_binding: TokenStream, rebind: &TokenStream| {
@@ -159,21 +169,28 @@ pub(in crate::operations) fn create(
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&mutation_fields, &bind_values);
     };
     let write_row = |check_binding: TokenStream| {
+        let before_hook = Hook {
+            request: &request,
+            phase: "Before",
+            action: quote! { ::graphql_orm::graphql::orm::ChangeAction::Created },
+            id: created_key_id.clone(),
+            changes: quote! { mutation_changes.clone() },
+            before_state: quote! { ::std::option::Option::None },
+            after_state: quote! { ::std::option::Option::None },
+        }
+        .dispatch();
+        let after_hook = Hook {
+            request: &request,
+            phase: "After",
+            action: quote! { ::graphql_orm::graphql::orm::ChangeAction::Created },
+            id: create_graphql_entity_id.clone(),
+            changes: quote! { mutation_changes.clone() },
+            before_state: quote! { ::std::option::Option::None },
+            after_state: quote! { after_state },
+        }
+        .dispatch();
         quote! {
-                    hook_ctx.__run_generated_mutation_hook(
-                        ::std::option::Option::Some(ctx),
-                        &::graphql_orm::graphql::orm::MutationEvent {
-                            phase: ::graphql_orm::graphql::orm::MutationPhase::Before,
-                            action: ::graphql_orm::graphql::orm::ChangeAction::Created,
-                            entity_name: #entity_name_lit,
-                            table_name: #table_name,
-                            metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: #created_key_id,
-                            changes: mutation_changes.clone(),
-                            before_state: ::std::option::Option::None,
-                            after_state: ::std::option::Option::None,
-                        },
-                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                    #before_hook.await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                     __gom_outcome.write_attempted();
                     hook_ctx.execute(&sql, &bind_values)
@@ -191,20 +208,7 @@ pub(in crate::operations) fn create(
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     );
 
-                    hook_ctx.__run_generated_mutation_hook(
-                        ::std::option::Option::Some(ctx),
-                        &::graphql_orm::graphql::orm::MutationEvent {
-                            phase: ::graphql_orm::graphql::orm::MutationPhase::After,
-                            action: ::graphql_orm::graphql::orm::ChangeAction::Created,
-                            entity_name: #entity_name_lit,
-                            table_name: #table_name,
-                            metadata: <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                            id: #create_graphql_entity_id,
-                            changes: mutation_changes.clone(),
-                            before_state: ::std::option::Option::None,
-                            after_state,
-                        },
-                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                    #after_hook.await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                     #struct_name::__gom_queue_changed_event(
                         &mut hook_ctx,
@@ -250,8 +254,8 @@ pub(in crate::operations) fn create(
                 input_arg_name,
                 create_input,
                 created_key_id,
-                resolver_access: &resolver_access,
-                entity_access: &entity_access,
+                admit: &admit_child,
+                entity: &entity,
                 write_setup: &child_write_setup,
             },
             |check_binding| prepare_row(check_binding, &TokenStream::new()),
@@ -273,28 +277,19 @@ pub(in crate::operations) fn create(
                 ::graphql_orm::graphql::input_validation::require_generated_input_validation(ctx)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                #resolver_access
-                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
-                    ctx,
-                    ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
-                )?;
-                let db = ::graphql_orm::db::request_database::<#backend_marker>(ctx)?;
+                #entity
+                #admit_parent
+                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx, __gom_entity).await?;
+                let __gom_authority = __gom_write.authority();
+                let db = __gom_write.db();
                 let pool = db.pool();
-                let auth_context = ctx
-                    .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
-                    .cloned();
-                #entity_access
                 #nested_extract
                 #nested_child_only
                 let mut input: #create_input = input.into();
                 #prepare_parent
                 #prepare_children
                 #write_setup
-                let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin_with_auth(
-                    db,
-                    ::graphql_orm::graphql::orm::TransactionMode::Default,
-                    auth_context.as_ref(),
-                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                let mut hook_ctx = __gom_write.begin(::graphql_orm::graphql::orm::TransactionMode::Default).await?;
                 #execute
                 hook_ctx.commit_and_emit_tracked(::std::option::Option::Some(&__gom_outcome)).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let result = {

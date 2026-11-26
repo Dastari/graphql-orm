@@ -10,8 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.231.0 aligns with ORM 0.231.0. The full-stack test fixture builds
-its selected backend. [Migration](../../MIGRATION.md#02300-to-02310-jwt-and-fixture-dependencies)
+Version 0.232.0 aligns with ORM 0.232.0. The full-stack test fixture builds
+its selected backend. [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
+
+Version 0.231.0 generates GraphQL writes that call the ORM's shared
+[write pipeline](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
+instead of inlining their authorization sequence.
 
 Version 0.230.0 splits query emission by operation family and delegates offset
 list and aggregate execution to the ORM runtime.

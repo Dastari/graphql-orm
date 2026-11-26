@@ -3203,40 +3203,55 @@ where
         self.dispatch_mutation_hook(ctx, event, None).await
     }
 
-    /// [`Self::run_mutation_hook`] for a generated GraphQL mutation.
+    /// [`Self::run_mutation_hook`] for a generated write: the hook dispatch
+    /// step of the write pipeline (`write_pipeline`).
     ///
-    /// **Macro-internal. Host code must not call this method.** Use
-    /// [`Self::run_mutation_hook`], which attaches no request authority.
+    /// **Macro-internal.** Host code uses [`Self::run_mutation_hook`].
     ///
-    /// On a database that propagates request authority to hooks, the hook's
-    /// operations on this transaction present the originating request when
-    /// that request is admitted to write `event`'s entity on the
+    /// `request` is the originating GraphQL request and the authority its
+    /// admission issued; a repository write passes `None`. On a database that
+    /// propagates request authority to hooks, the hook's operations on this
+    /// transaction present that request when the authority was issued for
+    /// `entity` and the request is still admitted to write it on the
     /// `GraphqlMutation` surface: the entity decision is asked again here. A
     /// nested invocation keeps the authority already presented.
     ///
-    /// That entity write-policy decision is the only admission this method
-    /// performs, and it trusts the entity name and policy key of the `event`
-    /// it is given. The generated resolver's own admission (resolver auth
-    /// and scopes, declared assurance, and the checks on the mutation's
-    /// target rows) happens in generated code before the call. A host that
-    /// calls this method with its own request and event therefore attaches
-    /// that request's authority to the hook without those checks. It is
-    /// `pub` only because generated code compiles in the host's crate;
-    /// [#724](https://github.com/Dastari/graphql-orm/issues/724) moves
-    /// generated write admission into the runtime and seals this entry.
+    /// A [`GeneratedWriteAuthority`](super::GeneratedWriteAuthority) has no
+    /// public constructor. It is issued only by the pipeline's request and
+    /// entity admission, so a caller that did not run them attaches nothing.
     #[doc(hidden)]
-    pub async fn __run_generated_mutation_hook<'a>(
-        &'a mut self,
-        ctx: Option<&'a async_graphql::Context<'_>>,
-        event: &'a MutationEvent,
+    #[allow(clippy::too_many_arguments)]
+    pub async fn __run_generated_write_hook(
+        &mut self,
+        entity: &super::GeneratedWriteEntity,
+        request: Option<super::__GeneratedWriteRequestAuthority<'_, '_>>,
+        phase: MutationPhase,
+        action: ChangeAction,
+        id: String,
+        changes: Vec<MutationFieldValue>,
+        before_state: Option<EntityState>,
+        after_state: Option<EntityState>,
     ) -> async_graphql::Result<()> {
+        let event = MutationEvent {
+            phase,
+            action,
+            entity_name: entity.entity_name(),
+            table_name: entity.table_name(),
+            metadata: entity.metadata(),
+            id,
+            changes,
+            before_state,
+            after_state,
+        };
+        let ctx = request.map(|(ctx, _)| ctx);
         let presented = self
             .hook_request
             .as_ref()
             .is_some_and(|request| request.is_live());
-        let authority = match ctx {
-            Some(ctx)
-                if self.db.propagates_request_authority_to_hooks()
+        let authority = match request {
+            Some((ctx, admitted))
+                if admitted.covers(entity)
+                    && self.db.propagates_request_authority_to_hooks()
                     && !presented
                     && self.db.mutation_hook().is_some()
                     && matches!(
@@ -3258,7 +3273,7 @@ where
             }
             _ => None,
         };
-        self.dispatch_mutation_hook(ctx, event, authority).await
+        self.dispatch_mutation_hook(ctx, &event, authority).await
     }
 
     async fn dispatch_mutation_hook<'a>(

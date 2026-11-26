@@ -21,16 +21,30 @@ def packages(*args):
     return result
 
 
+# The expected jsonwebtoken major is the workspace's single supported line. A
+# coordinated move to a new major (with agql-auth and the router) must update
+# JWT_MAJOR here in the same change.
+JWT_MAJOR = "11."
+
+
+def root_lock_versions(name):
+    lock = (ROOT / "Cargo.lock").read_text()
+    return re.findall(rf'^name = "{re.escape(name)}"\nversion = "([^"]+)"', lock, re.MULTILINE)
+
+
 def check():
     errors = []
+    locked = root_lock_versions("jsonwebtoken")
+    if len(locked) != 1 or not locked[0].startswith(JWT_MAJOR):
+        errors.append(f"root Cargo.lock resolves jsonwebtoken {locked}; expected one {JWT_MAJOR}x entry")
     for backend in ("sqlite", "postgres", "mssql"):
         graph = packages(
             "-p", "graphql-orm", "--no-default-features", "--features",
             f"{backend},auth-agql", "-e", "normal,build,dev",
         )
         versions = graph.get("jsonwebtoken", set())
-        if len(versions) != 1 or not all(version.startswith("11.") for version in versions):
-            errors.append(f"ORM {backend} + auth-agql resolved jsonwebtoken {sorted(versions)}; expected only 11.x")
+        if len(versions) != 1 or not all(version.startswith(JWT_MAJOR) for version in versions):
+            errors.append(f"ORM {backend} + auth-agql resolved jsonwebtoken {sorted(versions)}; expected only {JWT_MAJOR}x")
 
     fixture = "crates/graphql-orm-macros/fixtures/full-stack/Cargo.toml"
     graph = packages("--manifest-path", fixture, "--no-default-features", "--features", "sqlite")
