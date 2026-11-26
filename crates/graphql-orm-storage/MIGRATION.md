@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.20.0 to 0.20.0
+
+**No action.** The discarded-stream warning from
+`StorageByteStream::into_inner` now includes a message. No data migration is
+needed.
+
 ## 0.18.3 to 0.19.0: integration test binaries
 
 **No action.** The integration test binaries are grouped by lane.

@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-storage
 
+Version 0.20.0 gives the discarded-stream warning from
+`StorageByteStream::into_inner` an explicit message for Rust 1.99 Clippy
+compatibility.
+
 Version 0.19.0 groups integration tests by lane. See the
 [migration guide](MIGRATION.md#0183-to-0190-integration-test-binaries).
 

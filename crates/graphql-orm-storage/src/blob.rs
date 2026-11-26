@@ -57,7 +57,7 @@ impl StorageByteStream {
     }
 
     /// Consumes the wrapper and returns the inner stream.
-    #[must_use]
+    #[must_use = "the stream must be polled to read its byte chunks"]
     pub fn into_inner(self) -> BoxedStorageStream {
         self.inner
     }
