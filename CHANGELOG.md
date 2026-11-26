@@ -14,6 +14,11 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.230.0
+
+- Generated list and aggregate execution moved to shared runtime helpers; no
+  measurable compile-cost change (groundwork for #677/#358).
+
 ## Unreleased - ORM/macros 0.229.0
 
 - **No action** — Sortable portable Decimal fields are available in generated

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.230.0 splits query emission by operation family and delegates offset
+list and aggregate execution to the ORM runtime.
+See the [migration guide](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution).
+
 Version 0.228.0 aligns with the ORM's
 [transient input validation redaction](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors).
 

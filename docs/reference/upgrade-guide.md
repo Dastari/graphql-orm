@@ -70,9 +70,10 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.229.0**; **`graphql-orm-macros` 0.229.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.230.0**; **`graphql-orm-macros` 0.230.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
 
 - **No action** — router 0.20.0 adds rate-limited downstream GraphQL error logs and opt-in message disclosure for queries and mutations (#923). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0190-to-0200)
+- **No action** — ORM/macros 0.230.0 shares generated list and aggregate execution (#677, #723, #358). [Migration](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution)
 - **No action** — ORM/macros 0.229.0 add sortable portable Decimal members to affected keyset order inputs (#920). [Migration](../../MIGRATION.md#02280-to-02290-decimal-keyset-ordering)
 - **No action** — ORM/macros 0.228.0 redact generated transient input validation messages (#913). [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 - **Action needed** — ORM/macros 0.227.0 removes the 0.215.0 ASCII VARCHAR conversion and validates unsigned inputs before selecting update and upsert targets (#860). Hosts relying on that seek under a legacy `SQL_` collation can move to a Windows collation or index a persisted computed Unicode column. [Migration](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
