@@ -445,8 +445,11 @@ pub(in crate::operations) struct ChildPipeline<'a> {
     pub(in crate::operations) input_arg_name: &'a str,
     pub(in crate::operations) create_input: &'a Ident,
     pub(in crate::operations) created_key_id: &'a TokenStream,
-    pub(in crate::operations) resolver_access: &'a TokenStream,
-    pub(in crate::operations) entity_access: &'a TokenStream,
+    /// Request and entity admission of one child row; binds `__gom_entity`
+    /// and `__gom_authority`.
+    pub(in crate::operations) admit: &'a TokenStream,
+    /// Binds `__gom_entity` alone.
+    pub(in crate::operations) entity: &'a TokenStream,
     pub(in crate::operations) write_setup: &'a TokenStream,
 }
 
@@ -466,8 +469,8 @@ impl Child<'_> {
             input_arg_name,
             create_input,
             created_key_id,
-            resolver_access,
-            entity_access,
+            admit,
+            entity,
             write_setup,
         } = pipeline;
         let Child {
@@ -531,6 +534,7 @@ impl Child<'_> {
                 bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue>,
                 binding: #binding_type,
                 field: ::graphql_orm::async_graphql::Positioned<::graphql_orm::async_graphql::parser::types::Field>,
+                authority: ::graphql_orm::graphql::orm::GeneratedWriteAuthority,
             }
 
             impl #prepared_type {
@@ -602,13 +606,7 @@ impl Child<'_> {
                         ::graphql_orm::async_graphql::Value::Object(values),
                     );
                     let ctx = &ctx.with_field(&field);
-                    #resolver_access
-                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
-                        ctx,
-                        ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
-                        #create_mutation_name,
-                    )?;
-                    #entity_access
+                    #admit
                     let __gom_nested = true;
                     let mut input = #create_input { #(#conversion)* };
                     let supplied = #supplied_key;
@@ -620,6 +618,7 @@ impl Child<'_> {
                         bind_values,
                         binding: binding.clone(),
                         field,
+                        authority: __gom_authority,
                     })
                 }
 
@@ -632,8 +631,10 @@ impl Child<'_> {
                     row: #prepared_type,
                 ) -> ::graphql_orm::async_graphql::Result<()> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
-                    let #prepared_type { created_pk, bind_values, binding, field, .. } = row;
+                    let #prepared_type { created_pk, bind_values, binding, field, authority, .. } = row;
+                    let __gom_authority = &authority;
                     let ctx = &ctx.with_field(&field);
+                    #entity
                     #write_setup
                     #write_child
                     ::std::result::Result::Ok(())

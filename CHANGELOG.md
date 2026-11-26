@@ -14,6 +14,18 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.231.0
+
+- **Changed (#724).** Generated GraphQL create, update, upsert, delete, bulk
+  and nested-create mutations call a shared runtime write pipeline for request
+  admission, entity admission, target admission and hook dispatch. The checks
+  and their order are unchanged, as are the SDL and catalogues; generated code
+  is smaller. A mutation hook receives the originating request's authority
+  only with an authority that pipeline's admission issued. The hidden
+  macro-internal `MutationContext::__run_generated_mutation_hook` is removed,
+  which is a source break for host code that called it.
+  [Migration](MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
 ## Unreleased - ORM/macros 0.230.0
 
 - Generated list and aggregate execution moved to shared runtime helpers; no

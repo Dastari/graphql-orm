@@ -10,6 +10,31 @@ supersedes: []
 
 # Migration Guide
 
+## 0.230.0 to 0.231.0: Generated write pipeline
+
+**No action** for supported callers: hosts that use the derives, the
+repository API, `Database::transaction` and
+`MutationContext::run_mutation_hook`. Generated GraphQL writes call shared
+runtime functions for their authorization sequence instead of inlining it
+(#724). The checks, their order, the refusals, the SDL and the catalogues are
+unchanged. Recompile with matching `graphql-orm` and `graphql-orm-macros`
+versions, as for every release.
+
+**Action needed** only for host code that called the hidden
+`MutationContext::__run_generated_mutation_hook` directly, against its
+documentation. The method is removed, so that code no longer compiles.
+Replace the call with `MutationContext::run_mutation_hook(ctx, &event)`,
+which runs the hook and the change journal record and attaches no request
+authority. If the hook's nested writes relied on the originating request's
+authority, authorize them explicitly instead: run them in
+`MutationContext::with_system_access` under a named `SystemAccess` that the
+policy admits, or move the write into a generated mutation.
+
+Request authority for a hook now requires a `GeneratedWriteAuthority`, which
+only the write pipeline's admission issues. The pipeline's entry points are
+macro-internal and hidden; they are not a supported replacement. See
+[what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
+
 ## 0.229.0 to 0.230.0: Shared generated read execution
 
 **No action.** Upgrade ORM and macros together. Generated list and aggregate
@@ -121,8 +146,9 @@ It is macro-internal: it attaches the caller's request authority after only
 an entity write-policy check, without the generated resolver's scope,
 assurance or target admission. Host code that dispatches hooks itself uses
 `run_mutation_hook`, which attaches none.
-[#724](https://github.com/Dastari/graphql-orm/issues/724) will move
-admission into the runtime and seal that entry.
+ORM/macros 0.228.0 remove that entry and issue the authority from the
+runtime's own admission: see
+[generated write pipeline](#02300-to-02310-generated-write-pipeline).
 
 See [repository / system access](docs/reference/graphql-orm/strict-authorization.md#repository-system-access).
 

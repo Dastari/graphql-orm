@@ -256,26 +256,37 @@ pub(crate) fn generate(
             .clone();
         // The GraphQL Context deliberately retains the caller's root selection.
         // Internal writes must classify their own generated operation instead.
-        struct ExplicitAssurance(syn::LitStr);
+        // The runtime's request admission enforces the assurance it is told
+        // to: name this write's own operation instead of the resolved field.
+        struct ExplicitAssurance(syn::LitStr, bool);
         impl VisitMut for ExplicitAssurance {
-            fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
-                if let syn::Expr::Path(path) = call.func.as_mut()
+            fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+                if let syn::Expr::Path(path) = expr
                     && path.path.segments.iter().map(|s| s.ident.to_string()).eq([
                         "graphql_orm",
                         "graphql",
-                        "assurance",
-                        "enforce_resolver_assurance",
+                        "orm",
+                        "GeneratedWriteAssurance",
+                        "Resolver",
                     ])
-                    && let Some(last) = path.path.segments.last_mut()
                 {
-                    last.ident = format_ident!("enforce_operation_assurance");
                     let coordinate = &self.0;
-                    call.args.push(syn::parse_quote! { #coordinate });
+                    *expr = syn::parse_quote! {
+                        ::graphql_orm::graphql::orm::GeneratedWriteAssurance::Operation(#coordinate)
+                    };
+                    self.1 = true;
+                    return;
                 }
-                syn::visit_mut::visit_expr_call_mut(self, call);
+                syn::visit_mut::visit_expr_mut(self, expr);
             }
         }
-        ExplicitAssurance(operation_name).visit_block_mut(&mut body);
+        let mut explicit_assurance = ExplicitAssurance(operation_name, false);
+        explicit_assurance.visit_block_mut(&mut body);
+        // A body without the request admission would keep the caller's
+        // requirement: refuse to emit it.
+        if !explicit_assurance.1 {
+            return Err(error("missing generated write admission"));
+        }
         // Both paths share the same generated checks, transforms and hooks. Only
         // transaction ownership and postcommit dispatch belong to the caller.
         let transaction = transaction_range(&body, input.span())?;
@@ -521,17 +532,28 @@ pub(crate) fn generate(
             };
             admission.stmts.drain(transaction);
             strip_boundaries(&mut admission.stmts);
-            struct UnlockedAdmission;
+            // The root admits its target without a transaction: the plan
+            // locks and re-admits every row it writes.
+            struct UnlockedAdmission(bool);
             impl VisitMut for UnlockedAdmission {
-                fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
-                    if call.method == "fetch_one_for_write_in_transaction" {
-                        call.method = format_ident!("fetch_one_with_auth");
-                        call.args = syn::parse_quote! { db, auth_context.as_ref() };
+                fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
+                    if let syn::Expr::Path(path) = call.func.as_mut()
+                        && let Some(last) = path.path.segments.last_mut()
+                        && last.ident == "__lock_generated_write_target"
+                        && call.args.len() == 5
+                    {
+                        last.ident = format_ident!("__read_generated_write_target");
+                        call.args[2] = syn::parse_quote! { __gom_write.auth_context() };
+                        self.0 = true;
                     }
-                    syn::visit_mut::visit_expr_method_call_mut(self, call);
+                    syn::visit_mut::visit_expr_call_mut(self, call);
                 }
             }
-            UnlockedAdmission.visit_block_mut(&mut admission);
+            let mut unlocked = UnlockedAdmission(false);
+            unlocked.visit_block_mut(&mut admission);
+            if !unlocked.0 {
+                return Err(error("missing generated write target admission"));
+            }
             let admission = &admission.stmts;
             // The plan's own writes and commit are not tracked here, so an
             // error once it runs reports `unknown`.
