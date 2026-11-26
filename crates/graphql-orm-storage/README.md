@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-storage
 
+Version 0.19.0 gives the discarded-stream warning from
+`StorageByteStream::into_inner` an explicit message for Rust 1.99 Clippy
+compatibility.
+
 Version 0.18.2 adds a seeded property suite for blob key validation: each validator
 matches an independent model of its documented contract, accepted keys stay below their
 root, and the local provider round-trips them without writing outside its root

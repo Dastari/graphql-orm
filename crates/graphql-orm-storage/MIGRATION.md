@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.18.3 to 0.19.0
+
+**No action.** The discarded-stream warning from
+`StorageByteStream::into_inner` now includes a message. No data migration is
+needed.
+
 ## 0.18.2 to 0.18.3: install documentation
 
 **No action.** The README now shows how to select a reviewed Git revision.

@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.19.0
+
+- Explain why the stream returned by `StorageByteStream::into_inner` must be
+  used. The message preserves the discarded-stream warning and satisfies Rust
+  1.99 Clippy.
+
 ## Unreleased - 0.18.3
 
 - Install from a reviewed Git revision using the package inventory and release manifest.
