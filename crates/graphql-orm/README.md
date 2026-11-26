@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.227.0 redacts validation messages for generated transient mutation
+arguments. [Migration](../../MIGRATION.md#02250-to-02270-transient-input-validation-errors)
+
 Version 0.225.0 preserves opaque partial-index predicates in SQLite and
 PostgreSQL schema comparisons. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
 

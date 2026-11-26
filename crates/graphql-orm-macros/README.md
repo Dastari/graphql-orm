@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.227.0 aligns with the ORM's
+[transient input validation redaction](../../MIGRATION.md#02250-to-02270-transient-input-validation-errors).
+
 Version 0.225.0 aligns with the ORM's
 [partial-index introspection fix](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates).
 

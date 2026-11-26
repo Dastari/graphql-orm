@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.227.0
+
+- **No action** — Generated schemas redact validation messages for transient
+  arguments and defaults of variables used in those arguments (#913).
+  [Migration](MIGRATION.md#02250-to-02270-transient-input-validation-errors)
+
 ## Unreleased - ORM/macros 0.225.0
 
 - **Fixed (#880).** SQLite and PostgreSQL retain opaque partial-index filters

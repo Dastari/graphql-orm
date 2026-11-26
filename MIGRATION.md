@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.225.0 to 0.227.0: Transient input validation errors
+
+**No action.** Generated schema builders now return a fixed message when
+async-graphql rejects a transient argument or a default for a variable used
+in that argument. Validation still rejects the request and preserves the
+original error metadata.
+[Transient mutation input](docs/reference/graphql-orm/runtime-and-writes.md#transient-mutation-input)
+
 ## 0.224.0 to 0.225.0: Opaque partial-index predicates
 
 **Action needed.** Review schema validation and migration plans before applying

@@ -105,6 +105,31 @@ pub struct SnapshotProof {
     pub digest: String,
     pub nonce: String,
     pub tags: Option<Vec<i32>>,
+    pub checks: Option<Vec<SnapshotCheck>>,
+}
+
+#[derive(InputObject, Clone)]
+pub struct SnapshotCheck {
+    pub state: SnapshotCheckState,
+}
+
+#[derive(async_graphql::Enum, Clone, Copy, Eq, PartialEq)]
+pub enum SnapshotCheckState {
+    Ready,
+}
+
+#[derive(Default)]
+pub struct OrdinaryProofMutation;
+
+#[async_graphql::Object]
+impl OrdinaryProofMutation {
+    async fn ordinary_proof(&self, proof: SnapshotProof) -> i64 {
+        proof.sequence
+    }
+}
+
+impl graphql_orm::graphql::orm::GraphqlRootFieldNames for OrdinaryProofMutation {
+    const ROOT_FIELD_NAMES: &'static [&'static str] = &["ordinaryProof"];
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -267,6 +292,7 @@ schema_roots! {
     backend: "sqlite",
     query_custom_ops: [],
     entities: [StatusSnapshot, MachineNote],
+    extra_mutation_types: [OrdinaryProofMutation],
     client_metadata: true,
 }
 #[cfg(feature = "postgres")]
@@ -274,6 +300,7 @@ schema_roots! {
     backend: "postgres",
     query_custom_ops: [],
     entities: [StatusSnapshot, MachineNote],
+    extra_mutation_types: [OrdinaryProofMutation],
     client_metadata: true,
 }
 #[cfg(feature = "mssql")]
@@ -282,6 +309,7 @@ schema_roots! {
     schema_policy: "external_writable",
     query_custom_ops: [],
     entities: [StatusSnapshot, MachineNote],
+    extra_mutation_types: [OrdinaryProofMutation],
     client_metadata: true,
 }
 
@@ -1110,9 +1138,13 @@ async fn key_has_no_public_surface(base: &Database<Backend>) -> TestResult {
         !sdl.contains("machine_key") && !sdl.contains("machinekey"),
         "{sdl}"
     );
-    // The transient type appears as the upsert's argument type only.
+    // The two transient arguments and the ordinary argument share one type.
     assert!(sdl.contains("input snapshotproof"), "{sdl}");
-    assert_eq!(sdl.matches("snapshotproof").count(), 3, "{sdl}");
+    assert_eq!(sdl.matches("snapshotproof").count(), 4, "{sdl}");
+    assert!(
+        sdl.contains("ordinaryproof(proof: snapshotproof!):"),
+        "{sdl}"
+    );
     // Both transient arguments carry the schema marker that tool-profile
     // compilers refuse to map.
     assert!(sdl.contains("snapshotproof! @transientinput"), "{sdl}");
@@ -1852,6 +1884,7 @@ async fn transaction_code_sets_its_own_transient_input(base: &Database<Backend>)
                         digest: String::new(),
                         nonce: String::new(),
                         tags: None,
+                        checks: None,
                     })
                     .is_err()
                     && hook_ctx.take_transient_input::<SnapshotProof>().is_err()
@@ -1880,6 +1913,7 @@ async fn transaction_code_sets_its_own_transient_input(base: &Database<Backend>)
                 digest: "t".to_owned(),
                 nonce: NONCE.to_owned(),
                 tags: None,
+                checks: None,
             })?;
             // An extension of the same type is a separate value.
             assert!(tx.extension::<SnapshotProof>().is_none());
@@ -1964,6 +1998,126 @@ async fn every_contract_step(
     transaction_code_sets_its_own_transient_input(&fixture.db)
         .await
         .map_err(|error| ("transaction transient input", error))?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn transient_validation_errors_do_not_echo_values() -> TestResult {
+    let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let schema = schema_builder(db).finish();
+    let upsert = |proof: &str| {
+        format!(
+            "{}({}: {{ {}: \"x\" }}, {}: {proof}) {{ success }}",
+            r("upsertStatusSnapshot"),
+            a("input"),
+            f("payload"),
+            a("proof"),
+        )
+    };
+    let ordinary = |proof: &str| format!("ordinaryProof(proof: {proof})");
+    let valid_base = r#"sequence: 1, digest: "digest", nonce: "nonce""#;
+    let secret = "TRANSIENT_SENTINEL";
+    let invalid_enum = format!("{{ {valid_base}, checks: [{{ state: {secret} }}] }}");
+    let fragment = upsert("$proof");
+    let selected = ordinary("$proof");
+    let cases = [
+        (
+            format!("mutation {{ {} }}", upsert(&invalid_enum)),
+            json!({}),
+        ),
+        (
+            format!(
+                "mutation($proof: SnapshotProof!) {{ {} }}",
+                upsert("$proof")
+            ),
+            json!({"proof": {"sequence": 1, "digest": "digest", "nonce": "nonce",
+                "checks": [{"state": secret}]}}),
+        ),
+        (
+            format!(
+                "mutation($state: SnapshotCheckState! = {secret}) {{ ...Outer }}
+                 fragment Outer on Mutation {{ ...Inner }}
+                 fragment Inner on Mutation {{ {} }}",
+                upsert(&format!(
+                    "{{ {valid_base}, checks: [{{ state: $state }}] }}"
+                ))
+            ),
+            json!({}),
+        ),
+        (
+            format!(
+                "mutation {{ {} }}",
+                upsert(&format!(r#"{{ {valid_base}, tags: ["{secret}"] }}"#))
+            ),
+            json!({}),
+        ),
+        (
+            format!(
+                "mutation {{ {} }}",
+                upsert(r#"{sequence: 1, digest: "digest"}"#)
+            ),
+            json!({}),
+        ),
+        (
+            format!(
+                "mutation Selected($proof: SnapshotProof! = {{ {valid_base} }}) {{ {selected} }}
+                 mutation Other($proof: SnapshotProof! = {invalid_enum}) {{ ...Proof }}
+                 fragment Proof on Mutation {{ {fragment} }}"
+            ),
+            json!({}),
+        ),
+    ];
+    for (query, variables) in cases {
+        let mut request = async_graphql::Request::new(query)
+            .variables(async_graphql::Variables::from_json(variables));
+        if request.query.contains("mutation Selected") {
+            request = request.operation_name("Selected");
+        }
+        let response = schema.execute(request).await;
+        assert_eq!(response.data, async_graphql::Value::Null);
+        assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
+        let error = &response.errors[0];
+        assert_eq!(error.message, "transient input is not a valid value");
+        assert_eq!(error.locations.len(), 1);
+        assert!(error.path.is_empty());
+        assert!(error.extensions.is_none());
+        assert!(!serde_json::to_string(&response)?.contains(secret));
+    }
+
+    let public = "ORDINARY_SENTINEL";
+    let invalid_public = format!("{{ {valid_base}, checks: [{{ state: {public} }}] }}");
+    let mixed = schema
+        .execute(format!(
+            "mutation {{ {} {} }}",
+            upsert(&invalid_enum),
+            ordinary(&invalid_public),
+        ))
+        .await;
+    assert_eq!(mixed.errors.len(), 2, "{:?}", mixed.errors);
+    assert_eq!(
+        mixed.errors[0].message,
+        "transient input is not a valid value"
+    );
+    assert!(mixed.errors[1].message.contains(public));
+    assert!(!serde_json::to_string(&mixed)?.contains(secret));
+
+    let ordinary_default = schema
+        .execute(
+            async_graphql::Request::new(format!(
+                "mutation Selected($proof: SnapshotProof! = {invalid_public}) {{ {selected} }}
+                 mutation Other($proof: SnapshotProof! = {{ {valid_base} }}) {{ {fragment} }}"
+            ))
+            .operation_name("Selected"),
+        )
+        .await;
+    assert_eq!(
+        ordinary_default.errors.len(),
+        1,
+        "{:?}",
+        ordinary_default.errors
+    );
+    assert!(ordinary_default.errors[0].message.contains(public));
     Ok(())
 }
 

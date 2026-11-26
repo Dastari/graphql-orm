@@ -758,11 +758,17 @@ let proof = hook_ctx.transient_input::<SnapshotProof>();
     execution (`ai_mutations(upsert = "automatic" | "approval_required")`) takes one. Leave such
     an upsert prohibited, which is the default.
 
-Where the value can still be seen:
+How the schema handles transient values in errors and logs
 
 - **Redacted.** The argument is marked `secret`. async-graphql's rendered execution document
   (`ExtensionContext::stringify_execute_doc`, which its `Logger` extension records) shows
   `"<secret>"` in place of the whole value, whether it was sent as a literal or as a variable.
+- **Redacted in validation responses.** `GeneratedInputValidation`, installed by the generated
+  schema builders, replaces upstream validation messages for transient arguments and their
+  variable defaults with `transient input is not a valid value`. The error locations, paths and
+  extensions are retained. An ordinary argument with the same input type keeps its own
+  diagnostics. Custom validation hooks inside the extension chain can see upstream messages
+  before redaction, so use the final response for error logging.
 - **Not redacted: the raw request.** `Debug` of an `async_graphql::Request`, its `query` text and
   its `variables`, and anything your HTTP layer logs before the schema runs, still contain the
   value. Do not log raw requests for a schema that accepts transient input.
@@ -771,12 +777,6 @@ Where the value can still be seen:
   their default values verbatim. Only the argument is redacted. The upsert refuses such an
   operation, but the extension has already printed the document by then. Enable these extensions
   only where their output is treated like the raw request.
-- **Not redacted: async-graphql's validation errors.** async-graphql validates arguments and
-  variable defaults against the schema before the generated argument type runs. Its messages can
-  quote the rejected value. An invalid enum value is quoted, including one nested inside an input
-  object. So an error for a malformed transient input can echo the caller's own submitted value
-  back in the response, and into anything that logs response errors. The ORM does not rewrite
-  these messages. Avoid enum fields in a transient input type if that matters to you.
 - **Not redacted: your own callbacks.** The ORM never formats the value into an error or a log
   line. An error that your transform or hook builds from it is your text: with a public code it
   reaches the client, and without one it is a server-side diagnostic that

@@ -20,10 +20,14 @@ use async_graphql::{
         Extension, ExtensionContext, ExtensionFactory, NextParseQuery, NextPrepareRequest,
         NextValidation,
     },
-    parser::types::{ExecutableDocument, OperationDefinition, Selection, SelectionSet},
+    parser::types::{
+        ExecutableDocument, OperationDefinition, OperationType, Selection, SelectionSet,
+    },
     registry::{MetaType, MetaTypeName, Registry, ScalarValidatorFn},
 };
 use std::sync::{Arc, Mutex};
+
+mod transient;
 
 /// The stable code of an argument value refused by these checks.
 pub(crate) const INVALID_GRAPHQL_INPUT: &str = "invalid_graphql_input";
@@ -80,6 +84,14 @@ pub(crate) fn selected_operation<'a>(
             None => document.operations.iter().len() == 1,
         })
         .map(|(_, operation)| &operation.node)
+}
+
+fn operation_root<'a>(registry: &'a Registry, operation: &OperationDefinition) -> Option<&'a str> {
+    match operation.ty {
+        OperationType::Query => Some(registry.query_type.as_str()),
+        OperationType::Mutation => registry.mutation_type.as_deref(),
+        OperationType::Subscription => registry.subscription_type.as_deref(),
+    }
 }
 
 /// Whether `value` is a valid input value of the GraphQL type `ty`.
@@ -285,7 +297,6 @@ pub(crate) fn validate_arguments(
     budget: &mut usize,
     scalar: &dyn Fn(&ScalarValidatorFn, &Value) -> bool,
 ) -> bool {
-    use async_graphql::parser::types::OperationType;
     let mut uses = std::collections::BTreeMap::new();
     for definition in &operation.variable_definitions {
         let definition = &definition.node;
@@ -309,11 +320,7 @@ pub(crate) fn validate_arguments(
             },
         );
     }
-    let Some(root) = (match operation.ty {
-        OperationType::Query => Some(registry.query_type.as_str()),
-        OperationType::Mutation => registry.mutation_type.as_deref(),
-        OperationType::Subscription => registry.subscription_type.as_deref(),
-    }) else {
+    let Some(root) = operation_root(registry, operation) else {
         return false;
     };
     let mut walk = ArgumentWalk {
@@ -520,6 +527,9 @@ fn document_nodes(document: &ExecutableDocument) -> usize {
 /// `ValidationMode::Fast`, and refuses a nullable or omitted member variable in
 /// either mode.
 ///
+/// It also redacts async-graphql validation messages for arguments marked
+/// `@transientInput` and defaults of variables used in those arguments.
+///
 /// Generated `schema_builder` helpers install this automatically. A schema
 /// built by hand from generated roots must install it too: the extension
 /// installs a private request mark, and generated resolvers that take an input
@@ -608,12 +618,7 @@ impl Extension for InputValidation {
         ctx: &ExtensionContext<'_>,
         next: NextValidation<'_>,
     ) -> Result<async_graphql::ValidationResult, Vec<ServerError>> {
-        let result = next.run(ctx).await?;
-        let selected = self
-            .selected
-            .lock()
-            .map_err(|_| vec![invalid_input_error()])?
-            .clone();
+        let result = next.run(ctx).await;
         let parsed = self
             .parsed
             .lock()
@@ -621,6 +626,15 @@ impl Extension for InputValidation {
         let Some((document, variables)) = parsed.as_ref() else {
             return Err(vec![invalid_input_error()]);
         };
+        let result = result.map_err(|mut errors| {
+            transient::redact_errors(&ctx.schema_env.registry, document, &mut errors);
+            errors
+        })?;
+        let selected = self
+            .selected
+            .lock()
+            .map_err(|_| vec![invalid_input_error()])?
+            .clone();
         // An unknown or ambiguous operation name is async-graphql's to report.
         let Some(operation) = selected_operation(document, selected.as_deref()) else {
             return Ok(result);
