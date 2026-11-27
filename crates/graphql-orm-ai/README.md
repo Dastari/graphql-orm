@@ -564,7 +564,9 @@ subscription observation. `OrmAiSubscriptionWaitService` binds that plan to an
 authenticated registered replay source and the existing run queue; it
 rehydrates current authority at open, event and adoption boundaries. For a
 direct subscription wait, the rule's `allowed_tool_fingerprints` allowlist
-matches the registered subscription capability fingerprint. See
+matches the registered subscription capability fingerprint. Brokered
+waits require a host revocation version and final admission before provider
+dispatch. See
 [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
 ## Actionable application refusals
