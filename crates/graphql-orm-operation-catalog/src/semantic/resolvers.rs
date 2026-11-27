@@ -42,8 +42,10 @@ use super::{
 };
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationKind, rfc8785_canonical_json};
 
+const RESOLVER_CATALOG_WIRE_V1: u16 = 1;
+
 /// Current resolver-catalogue wire version.
-pub const GRAPHQL_RESOLVER_CATALOG_VERSION: u16 = 1;
+pub const GRAPHQL_RESOLVER_CATALOG_VERSION: u16 = RESOLVER_CATALOG_WIRE_V1;
 
 /// Router descriptor extension carrying a resolver catalogue.
 pub const GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME: &str = "graphql-orm.resolver-catalog";
@@ -89,6 +91,131 @@ pub struct GraphqlResolverCatalog {
     pub entities: Vec<GraphqlEntityResolverDescriptor>,
     /// Stable fingerprint over the versioned document.
     pub fingerprint: String,
+}
+
+/// Receiver pin for one reviewed resolver catalogue in wire format v1.
+///
+/// The pin uses the catalogue's
+/// [RFC 8785 SHA-256 fingerprint](GRAPHQL_RESOLVER_CATALOG_FINGERPRINT_ALGORITHM),
+/// which also covers its semantic catalogue fingerprint. Provision the expected
+/// value independently of the received export or descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphqlResolverCatalogBindingV1 {
+    expected_fingerprint: String,
+}
+
+impl GraphqlResolverCatalogBindingV1 {
+    /// Pins the fingerprint of the resolver catalogue the receiver expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the fingerprint is a lowercase SHA-256 hex digest.
+    pub fn new(expected_fingerprint: impl Into<String>) -> Result<Self, GraphqlSemanticError> {
+        let expected_fingerprint = expected_fingerprint.into();
+        if !valid_fingerprint(&expected_fingerprint) {
+            return Err(GraphqlSemanticError::new(
+                "expected resolver catalogue fingerprint is invalid",
+            ));
+        }
+        Ok(Self {
+            expected_fingerprint,
+        })
+    }
+
+    /// Decodes a standalone v1 JSON export and checks its identity and semantic catalogue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing, malformed, unsupported, stale, or
+    /// unpinned export, or an invalid or mismatched semantic catalogue.
+    pub fn decode_export_json(
+        &self,
+        export: &str,
+        semantic: &GraphqlSemanticCatalog,
+    ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+        // Keep the typed decoder's duplicate-field checks on the original input.
+        if !export.trim_start().starts_with('{') {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue must be an object",
+            ));
+        }
+        self.check_decoded(GraphqlResolverCatalog::from_export_json(export)?, semantic)
+    }
+
+    /// Requires exactly one v1 resolver catalogue in a list of descriptor extensions.
+    ///
+    /// Checks the named carrier's fingerprint before decoding its payload.
+    /// A receiver should also validate the complete descriptor at its own boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resolver extension is absent, duplicated,
+    /// unsupported, invalid or stale, or its payload fails the catalogue binding.
+    #[cfg(feature = "router-protocol")]
+    pub fn decode_extensions(
+        &self,
+        extensions: &[graphql_orm_router_protocol::DescriptorExtension],
+        semantic: &GraphqlSemanticCatalog,
+    ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+        use graphql_orm_router_protocol::DescriptorExtension;
+
+        let mut matching = extensions
+            .iter()
+            .filter(|extension| extension.name == GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME);
+        let extension = matching
+            .next()
+            .ok_or_else(|| GraphqlSemanticError::new("resolver catalogue extension is missing"))?;
+        if matching.next().is_some() {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue extension is duplicated",
+            ));
+        }
+        if extension.version != RESOLVER_CATALOG_WIRE_V1 {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue extension version is unsupported",
+            ));
+        }
+        if !extension.payload.is_object() {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue must be an object",
+            ));
+        }
+        let verified = DescriptorExtension::new(
+            GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+            extension.version,
+            extension.payload.clone(),
+        )
+        .map_err(|_| GraphqlSemanticError::new("resolver catalogue extension is invalid"))?;
+        if extension.fingerprint != verified.fingerprint {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue extension fingerprint is stale",
+            ));
+        }
+        self.check_decoded(
+            GraphqlResolverCatalog::from_extension_payload(verified.payload)?,
+            semantic,
+        )
+    }
+
+    fn check_decoded(
+        &self,
+        resolvers: GraphqlResolverCatalog,
+        semantic: &GraphqlSemanticCatalog,
+    ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+        if resolvers.version != RESOLVER_CATALOG_WIRE_V1 {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue version is unsupported",
+            ));
+        }
+        if resolvers.fingerprint != self.expected_fingerprint {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue fingerprint does not match the receiver binding",
+            ));
+        }
+        semantic.validate()?;
+        resolvers.validate_catalog_entries(semantic)?;
+        Ok(resolvers)
+    }
 }
 
 /// One generated relationship field resolver.
@@ -684,6 +811,13 @@ impl GraphqlResolverCatalog {
         catalog: &GraphqlSemanticCatalog,
     ) -> Result<(), GraphqlSemanticError> {
         self.validate()?;
+        self.validate_catalog_entries(catalog)
+    }
+
+    fn validate_catalog_entries(
+        &self,
+        catalog: &GraphqlSemanticCatalog,
+    ) -> Result<(), GraphqlSemanticError> {
         if self.semantic_catalog_fingerprint != catalog.fingerprint {
             return Err(GraphqlSemanticError::new(
                 "resolver catalogue describes another semantic catalogue",
@@ -1408,6 +1542,178 @@ mod tests {
         assert_eq!(serde_json::to_vec(&after).unwrap(), bytes);
         assert_eq!(after.fingerprint, fingerprint);
         before.validate().unwrap();
+    }
+
+    #[test]
+    fn receiver_rejects_positional_array_with_the_reviewed_fields() {
+        let semantic = catalog();
+        let resolvers = composed();
+        let binding = GraphqlResolverCatalogBindingV1::new(&resolvers.fingerprint).unwrap();
+        let array = serde_json::json!([
+            resolvers.version,
+            resolvers.semantic_catalog_fingerprint,
+            resolvers.relations,
+            resolvers.entities,
+            resolvers.fingerprint,
+        ]);
+        assert!(
+            binding
+                .decode_export_json(&array.to_string(), &semantic)
+                .is_err()
+        );
+
+        #[cfg(feature = "router-protocol")]
+        {
+            let extension = graphql_orm_router_protocol::DescriptorExtension::new(
+                GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+                1,
+                array,
+            )
+            .unwrap();
+            assert!(binding.decode_extensions(&[extension], &semantic).is_err());
+        }
+    }
+
+    #[test]
+    fn receiver_binding_requires_a_pinned_v1_export_and_semantic_catalogue() {
+        let semantic = catalog();
+        let resolvers = composed();
+        let exported = resolvers.export_json().unwrap();
+        let binding = GraphqlResolverCatalogBindingV1::new(&resolvers.fingerprint).unwrap();
+        assert_eq!(
+            binding.decode_export_json(&exported, &semantic).unwrap(),
+            resolvers
+        );
+        assert!(GraphqlResolverCatalogBindingV1::new("").is_err());
+
+        let different = compose(&semantic, []).unwrap();
+        different.validate_against(&semantic).unwrap();
+        assert!(
+            binding
+                .decode_export_json(&different.export_json().unwrap(), &semantic)
+                .is_err()
+        );
+
+        let mut invalid_semantic = semantic.clone();
+        invalid_semantic.version += 1;
+        resolvers.validate_against(&invalid_semantic).unwrap();
+        assert!(
+            binding
+                .decode_export_json(&exported, &invalid_semantic)
+                .is_err()
+        );
+
+        let other_semantic = GraphqlSemanticCatalog::compose_descriptors([], []).unwrap();
+        assert!(
+            binding
+                .decode_export_json(&exported, &other_semantic)
+                .is_err()
+        );
+
+        let mut inconsistent = resolvers.clone();
+        inconsistent.relations[0].target = "Other".into();
+        let inconsistent = resealed(inconsistent);
+        let inconsistent_binding =
+            GraphqlResolverCatalogBindingV1::new(&inconsistent.fingerprint).unwrap();
+        assert!(
+            inconsistent_binding
+                .decode_export_json(&inconsistent.export_json().unwrap(), &semantic)
+                .is_err()
+        );
+
+        let mut stale = resolvers.clone();
+        stale.relations.clear();
+        assert!(
+            binding
+                .decode_export_json(&serde_json::to_string(&stale).unwrap(), &semantic)
+                .is_err()
+        );
+
+        let mut newer = resolvers;
+        newer.version = 2;
+        let newer = resealed(newer);
+        let newer_binding = GraphqlResolverCatalogBindingV1::new(&newer.fingerprint).unwrap();
+        assert!(
+            newer_binding
+                .decode_export_json(&serde_json::to_string(&newer).unwrap(), &semantic)
+                .is_err()
+        );
+        assert!(binding.decode_export_json("{}", &semantic).is_err());
+        assert!(
+            binding
+                .decode_export_json(
+                    &exported.replace("\"version\":1", "\"version\":1,\"extra\":true"),
+                    &semantic
+                )
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "router-protocol")]
+    #[test]
+    fn receiver_binding_requires_one_intact_v1_resolver_extension() {
+        use graphql_orm_router_protocol::DescriptorExtension;
+
+        let semantic = catalog();
+        let resolvers = composed();
+        let binding = GraphqlResolverCatalogBindingV1::new(&resolvers.fingerprint).unwrap();
+        let extension = resolvers.router_protocol_extension().unwrap();
+        let make =
+            |name, version, payload| DescriptorExtension::new(name, version, payload).unwrap();
+        let unrelated = make("another.catalog", 1, extension.payload.clone());
+        assert_eq!(
+            binding
+                .decode_extensions(&[unrelated.clone(), extension.clone()], &semantic)
+                .unwrap(),
+            resolvers
+        );
+        assert!(binding.decode_extensions(&[], &semantic).is_err());
+        assert!(binding.decode_extensions(&[unrelated], &semantic).is_err());
+        assert!(
+            binding
+                .decode_extensions(&[extension.clone(), extension.clone()], &semantic)
+                .is_err()
+        );
+
+        let wrong_outer_version = make(
+            GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+            2,
+            extension.payload.clone(),
+        );
+        assert!(
+            binding
+                .decode_extensions(&[wrong_outer_version], &semantic)
+                .is_err()
+        );
+        let missing = make(
+            GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+            1,
+            serde_json::Value::Null,
+        );
+        assert!(binding.decode_extensions(&[missing], &semantic).is_err());
+
+        let mut wrong_inner_version = extension.payload.clone();
+        wrong_inner_version["version"] = 2.into();
+        let wrong_inner_version = make(
+            GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+            1,
+            wrong_inner_version,
+        );
+        assert!(
+            binding
+                .decode_extensions(&[wrong_inner_version], &semantic)
+                .is_err()
+        );
+
+        let different = compose(&semantic, [])
+            .unwrap()
+            .router_protocol_extension()
+            .unwrap();
+        assert!(binding.decode_extensions(&[different], &semantic).is_err());
+
+        let mut stale = extension;
+        stale.fingerprint = graphql_orm_router_protocol::Fingerprint::sha256("stale");
+        assert!(binding.decode_extensions(&[stale], &semantic).is_err());
     }
 
     #[test]

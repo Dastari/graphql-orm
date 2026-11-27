@@ -24,6 +24,13 @@ for historical context.
   compositions previously refused with `AUTHORIZATION_MISCONFIGURED` now build.
   [Migration](MIGRATION.md#02370-to-02380-nested-closure-targets)
 
+## Unreleased - operation catalogue 0.17.0
+
+- **No action** (refs #934, item 3). Add an opt-in receiver pin for resolver
+  catalogue v1 exports and descriptor extensions. The pin rejects missing,
+  unsupported, stale or mismatched catalogues.
+  [Migration](MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
+
 ## Unreleased - ORM/macros 0.237.0
 
 - **Security hardening (#921).** The authority that lets a generated GraphQL
