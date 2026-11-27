@@ -1,3 +1,5 @@
+//! Protocol compatibility, descriptor validation, and canonical fingerprints.
+
 use std::{fs, path::PathBuf};
 
 use graphql_orm_router_protocol::{

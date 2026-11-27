@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::{
     AuthenticationProvider, ByteRoute, ExactScopeMatcher, NetworkPolicy, RouterError,
-    RouterErrorKind, ScopeMatcher,
+    RouterErrorKind, ScopeMatcher, SubgraphErrorLogConfig, SubgraphErrorMasking,
     node_lookup::{NODE_SUBGRAPH_NAME, NodeLookupConfig},
 };
 
@@ -59,6 +59,8 @@ pub struct RouterConfig {
     pub(crate) anonymous_development_mode: bool,
     pub(crate) introspection: bool,
     pub(crate) refusal_outcome: bool,
+    pub(crate) subgraph_error_masking: SubgraphErrorMasking,
+    pub(crate) subgraph_error_logging: SubgraphErrorLogConfig,
     pub(crate) forwarded_headers: BTreeSet<String>,
     pub(crate) subgraphs: Vec<StaticSubgraph>,
     pub(crate) schema_fetch_timeout: Duration,
@@ -99,6 +101,8 @@ impl RouterConfig {
             anonymous_development_mode: false,
             introspection: false,
             refusal_outcome: false,
+            subgraph_error_masking: SubgraphErrorMasking::default(),
+            subgraph_error_logging: SubgraphErrorLogConfig::default(),
             forwarded_headers: BTreeSet::new(),
             subgraphs: Vec::new(),
             node_lookup: None,
@@ -190,14 +194,28 @@ impl RouterConfig {
     /// The value uses the outcome vocabulary of generated ORM services
     /// (`refused`, `failed`, `committed`, `unknown`), so a client reads a
     /// router refusal and a service refusal the same way. The router only
-    /// ever adds `refused`, never replaces an `outcome` it receives, and never
-    /// marks an operation for which any subgraph request started, including
-    /// a request timeout or an execution failure. A client reads an absent
+    /// ever adds `refused` before any subgraph request starts. With default
+    /// subgraph error masking, an `outcome` sent by a subgraph passes through.
+    /// A request timeout or execution failure never receives the marker. A client reads an absent
     /// `outcome` as unknown. Codes, messages, paths and HTTP status are
     /// unchanged either way.
     #[must_use]
     pub fn with_refusal_outcome(mut self, enabled: bool) -> Self {
         self.refusal_outcome = enabled;
+        self
+    }
+
+    /// Selects the client-facing masking policy for downstream GraphQL fetch errors.
+    #[must_use]
+    pub fn with_subgraph_error_masking(mut self, masking: SubgraphErrorMasking) -> Self {
+        self.subgraph_error_masking = masking;
+        self
+    }
+
+    /// Configures the structured downstream GraphQL error events.
+    #[must_use]
+    pub fn with_subgraph_error_logging(mut self, logging: SubgraphErrorLogConfig) -> Self {
+        self.subgraph_error_logging = logging;
         self
     }
 
@@ -409,6 +427,14 @@ impl RouterConfig {
                 ));
             }
         }
+        if let SubgraphErrorMasking::AllowlistByCode { codes } = &self.subgraph_error_masking
+            && codes.is_empty()
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                "subgraph error masking `allowlist-by-code` requires at least one code",
+            ));
+        }
         self.request_limits.validate()?;
         if let Some(admin) = &self.admin {
             let Some(public) = &self.authentication else {
@@ -615,6 +641,8 @@ impl fmt::Debug for RouterConfig {
             .field("request_limits", &self.request_limits)
             .field("admin", &self.admin)
             .field("telemetry", &self.telemetry)
+            .field("subgraph_error_masking", &self.subgraph_error_masking)
+            .field("subgraph_error_logging", &self.subgraph_error_logging)
             .field("graceful_shutdown_timeout", &self.graceful_shutdown_timeout)
             .field("public_request_timeout", &self.public_request_timeout)
             .field("subgraph_request_timeout", &self.subgraph_request_timeout)

@@ -82,22 +82,68 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.230.0**; **`graphql-orm-macros` 0.230.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.234.0**; **`graphql-orm-macros` 0.234.0**; `graphql-orm-operation-catalog` 0.16.0; **`graphql-orm-storage` 0.20.0**; **`graphql-orm-backup` 0.33.0**; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; **`graphql-orm-router-protocol` 0.4.0**; **`graphql-orm-router` 0.22.0**.
 
+- **Action needed** — The breaking ORM/macros release validates `default_sort` against persisted columns and changes fingerprints where sort SQL changes (#542). [Migration](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542)
+- **No action** — ORM/macros 0.234.0 use `time` internally and preserve existing date-time behavior (#768). [Migration](../../MIGRATION.md#02330-to-02340-internal-date-time-engine)
+- **No action** — storage, backup, router protocol and router update build-time lint coverage and public API docs (#510, #545). [backup 0.33.0](../../crates/graphql-orm-backup/MIGRATION.md#0320-to-0330) · [router 0.22.0](../../crates/graphql-orm-router/MIGRATION.md#0210-to-0220) · [router-protocol 0.4.0](../../crates/graphql-orm-router-protocol/MIGRATION.md#031-to-040) · [storage 0.20.0](../../crates/graphql-orm-storage/MIGRATION.md#0190-to-0200)
+- **No action** — storage 0.20.0 adds a message to the discarded-stream warning for Rust 1.99 Clippy compatibility (#107). [Storage migration](../../crates/graphql-orm-storage/MIGRATION.md#0190-to-0200)
+- **No action** — ORM/macros 0.233.0 shares SQL for nested read-predicate closures over built-in column tests (#785). [Migration](../../MIGRATION.md#02320-to-02330-nested-closure-sql)
+- **No action** — router 0.21.0 replaces sleep-based waits in its tests with explicit signals; runtime behaviour is unchanged (#545). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0200-to-0210-deterministic-test-waits)
+- **No action** — Backup 0.32.0 and storage 0.19.0 group their integration tests by lane (#771). [Backup migration](../../crates/graphql-orm-backup/MIGRATION.md#0310-to-0320-integration-test-binaries) · [Storage migration](../../crates/graphql-orm-storage/MIGRATION.md#0183-to-0190-integration-test-binaries)
+- **No action** — ORM/macros 0.232.0 align jsonwebtoken in tests and isolates the full-stack fixture's database dependencies (#498). [Migration](../../MIGRATION.md#02310-to-02320-jwt-and-fixture-dependencies)
+- **No action** for supported callers — ORM/macros 0.231.0 move the authorization sequence of generated GraphQL writes into shared runtime functions (#724). Checks, order, SDL and catalogues are unchanged. **Action needed** only for host code that called the hidden macro-internal `MutationContext::__run_generated_mutation_hook`: it is removed; use `run_mutation_hook`. [Migration](../../MIGRATION.md#02300-to-02310-generated-write-pipeline)
+
+### workspace-2026.11.26.3
+
+Commit `dcccbfe4999c` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.26.3)
+
+Packages (changed in bold): **`graphql-orm` 0.230.0**; **`graphql-orm-macros` 0.230.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.20.0**.
+
+- **No action** — router 0.20.0 adds rate-limited downstream GraphQL error logs and opt-in message disclosure for queries and mutations (#923). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0190-to-0200)
 - **No action** — ORM/macros 0.230.0 shares generated list and aggregate execution (#677, #723, #358). [Migration](../../MIGRATION.md#02290-to-02300-shared-generated-read-execution)
+
+### workspace-2026.11.26.2
+
+Commit `51ed94bc0dbf` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.26.2)
+
+Packages (changed in bold): **`graphql-orm` 0.229.0**; **`graphql-orm-macros` 0.229.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
+
 - **No action** — ORM/macros 0.229.0 add sortable portable Decimal members to affected keyset order inputs (#920). [Migration](../../MIGRATION.md#02280-to-02290-decimal-keyset-ordering)
+
+### workspace-2026.11.26.1
+
+Commit `c8e9c255a71d` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.26.1)
+
+Packages (changed in bold): **`graphql-orm` 0.228.0**; **`graphql-orm-macros` 0.228.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.167.0; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
+
 - **No action** — ORM/macros 0.228.0 redact generated transient input validation messages (#913). [Migration](../../MIGRATION.md#02270-to-02280-transient-input-validation-errors)
 - **Action needed** — ORM/macros 0.227.0 removes the 0.215.0 ASCII VARCHAR conversion and validates unsigned inputs before selecting update and upsert targets (#860). Hosts relying on that seek under a legacy `SQL_` collation can move to a Windows collation or index a persisted computed Unicode column. [Migration](../../MIGRATION.md#02260-to-02270-sql-server-varchar-and-bulk-update-validation)
 - **No action** unless opting in to generated nested create in ORM/macros 0.226.0 (#353). Opted-in parents expose typed child lists on their create input. [Migration](../../MIGRATION.md#02250-to-02260-generated-nested-create)
+
+### workspace-2026.11.25.4
+
+Commit `8f6920ed0314` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.25.4)
+
+Packages (changed in bold): **`graphql-orm` 0.225.0**; **`graphql-orm-macros` 0.225.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.167.0**; `graphql-orm-router-protocol` 0.3.1; `graphql-orm-router` 0.19.0.
+
 - **Action needed** for hosts that construct their own `AiApprovalBinding` (use `prepared.argument_hash()`); **no action** for hosts using the built-in AI approval service. AI 0.167.0 verifies the stored provider plan hash when executing an approved generated mutation. Hosts that construct a binding for a prepared generated mutation must use its plan digest. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01660-to-01670-approved-generated-mutations)
 - **Action needed** — ORM/macros 0.225.0 keep unparseable partial-index predicates opaque on SQLite and PostgreSQL and mark filtered SQL Server indexes whose definition is unavailable (#880). Existing databases with such indexes see new plan steps or reports. [Migration](../../MIGRATION.md#02240-to-02250-opaque-partial-index-predicates)
 - **No action** for AI 0.166.0. The legacy approval-index upgrade still admits the original plain index with ORM 0.225.0. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01650-to-01660)
 - **No action** — ORM/macros 0.224.0 add an opt-in that lets a mutation hook's nested writes be authorized from the originating request, and pass an explicit `PolicyAuthority` to entity, row and repository field policies (#291). [Migration](../../MIGRATION.md#02230-to-02240-explicit-authority-for-hooks-and-workers)
 - **No action** — AI 0.165.0: host-owned repository field decisions on the crate's internal handle go to the host policy's authority-aware methods (#291). A host that overrides those methods should check it admits them. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#01640-to-01650-authority-aware-host-field-decisions)
 - **Action needed** for drifted SQL Server columns in ORM/macros 0.223.0 and AI 0.164.0. Check live types for opted-in columns and review plan guides and Query Store forced plans. Generated exact string filters can seek on declared BIN2 Unicode key columns, including AI run state (#867). [ORM migration](../../MIGRATION.md#02220-to-02230-sql-server-exact-string-filter-seeks) · [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01630-to-01640)
+
+### workspace-2026.11.25.3
+
+Commit `f14720264a66` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.25.3)
+
+Packages (changed in bold): **`graphql-orm` 0.222.0**; **`graphql-orm-macros` 0.222.0**; **`graphql-orm-operation-catalog` 0.16.0**; `graphql-orm-storage` 0.18.3; `graphql-orm-backup` 0.31.0; **`graphql-orm-ai-tool-profiles` 0.32.0**; `graphql-orm-ai` 0.163.0; `graphql-orm-router-protocol` 0.3.1; **`graphql-orm-router` 0.19.0**.
+
 - **No action** — ORM/macros 0.222.0 adds three opt-in options for generated upserts: a private conflict key bound from the verified request (`upsert_bound_key`), a typed, size-bounded transient input for the transform and hooks (`transient_input`), and a hook acknowledgement that answers a retry without writing (`upsert_acknowledge`) (#908). [Migration](../../MIGRATION.md#02210-to-02220-principal-bound-upserts)
 - **No action** — AI tool profiles 0.32.0 refuses GraphQL tool profiles, loaded manifests and typed capabilities that would carry a transient mutation argument (`@transientInput`), so AI runs never retain one (#908). Validate loaded manifests against the owning SDL before registering them. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0320-transient-mutation-arguments)
 - **No action** — ORM/macros 0.221.0 and operation catalogue 0.16.0 add opt-in, bounded replay for generated Changed streams (#668). [Migration](../../MIGRATION.md#02200-to-02210-generated-changed-replay)
+- **No action** — router 0.19.0 forwards the optional resume argument and the subgraph's change, started and reset-required frames through the existing WebSocket transport (#668). [Router migration](../../crates/graphql-orm-router/MIGRATION.md#0180-to-0190-changed-replay-gateway-coverage)
 
 ### workspace-2026.11.25.2
 

@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.32.0 groups integration tests by lane. See the
+[migration guide](MIGRATION.md#0310-to-0320-integration-test-binaries).
+
 Version 0.30.0 supports the SQLite and PostgreSQL ORM adapters when other
 workspace members enable additional ORM backends. See the
 [migration guide](MIGRATION.md#0290-to-0300-adapter-backend-selection).
@@ -122,6 +125,9 @@ crate does not define application authorization, scheduling, object metadata,
 cloud credentials, application transactions, or a claim that a restore is safe
 for an unverified target.
 
+Workspace lints forbid unsafe Rust in this crate and check documentation
+for its public API.
+
 ## Install
 
 Find the package manifest in the
@@ -196,12 +202,12 @@ the host validates its target and recovery process. Both modes check manifest
 backend/schema compatibility before adapter writes.
 
 The canonical executable fixture is
-[`tests/full_backup_creation.rs`](tests/full_backup_creation.rs); it supplies
+[`tests/backup_core/full_backup_creation.rs`](tests/backup_core/full_backup_creation.rs); it supplies
 test-only adapters and verifies repository layout, checksums, deduplication,
 and manifest-last publication. Run it with:
 
 ```sh
-cargo test -p graphql-orm-backup --test full_backup_creation
+cargo test -p graphql-orm-backup --test backup_core full_backup_creation::
 ```
 
 ## Features and safety boundary

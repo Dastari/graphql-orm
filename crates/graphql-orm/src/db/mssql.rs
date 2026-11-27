@@ -13,11 +13,12 @@ pub use transport::MssqlTransportPolicy;
 use crate::graphql::orm::{
     BackupRestoreExternallyManaged, MssqlParameterType, SqlValue, TemporalKind, TemporalValue,
 };
-use chrono::{Datelike, Timelike};
+use crate::temporal;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiberius::{ColumnData, Config, Query};
+use time::{Date, OffsetDateTime, PrimitiveDateTime, Time};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -1621,40 +1622,79 @@ impl MssqlScalar for String {
     where
         I: MssqlColumnIndex,
     {
-        use tiberius::FromSql;
-
-        decode_column(row, index, |value| {
-            Ok(match value {
-                ColumnData::String(value) => value.as_deref().map(str::to_owned),
-                // Offset-free SQL Server date-times use the ORM's UTC convention.
-                ColumnData::DateTime(_)
-                | ColumnData::SmallDateTime(_)
-                | ColumnData::DateTime2(_) => {
-                    chrono::NaiveDateTime::from_sql(value)?.map(naive_utc_rfc3339)
-                }
-                ColumnData::DateTimeOffset(_) => {
-                    chrono::DateTime::<chrono::FixedOffset>::from_sql(value)?
-                        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
-                }
-                ColumnData::Date(_) => {
-                    chrono::NaiveDate::from_sql(value)?.map(|value| value.to_string())
-                }
-                ColumnData::Time(_) => {
-                    chrono::NaiveTime::from_sql(value)?.map(|value| value.to_string())
-                }
-                ColumnData::Guid(value) => value.map(|value| value.to_string()),
-                _ => {
-                    return Err(incompatible_column(
-                        "could not decode SQL Server column as String",
-                    ));
-                }
-            })
-        })
-        .map_err(|source| sqlx::Error::ColumnDecode {
-            index: index.display(),
-            source: source.into(),
+        decode_column(row, index, decode_string_column).map_err(|source| {
+            sqlx::Error::ColumnDecode {
+                index: index.display(),
+                source: source.into(),
+            }
         })
     }
+}
+
+// TDS counts days from 0001-01-01. The last day of year 9999 fits without
+// time's large-dates feature.
+const LAST_TDS_DAY_IN_TIME_RANGE: u32 = 3_652_058;
+
+fn datetimeoffset_fits_time(value: tiberius::time::DateTimeOffset) -> bool {
+    let utc = value.datetime2();
+    let day = utc.date().days();
+    if day != LAST_TDS_DAY_IN_TIME_RANGE {
+        return day < LAST_TDS_DAY_IN_TIME_RANGE;
+    }
+
+    // TDS dates start at year 1 and the offset is less than a day, so only
+    // an eastward shift from the last UTC day can overflow the local date.
+    const SECONDS_PER_DAY: u64 = 86_400;
+    let clock = utc.time();
+    let utc_second = (clock.increments() / 10_u64.pow(u32::from(clock.scale()))) % SECONDS_PER_DAY;
+    utc_second as i64 + i64::from(value.offset()) * 60 < SECONDS_PER_DAY as i64
+}
+
+fn decode_string_column(value: &ColumnData<'static>) -> tiberius::Result<Option<String>> {
+    use tiberius::FromSql;
+
+    Ok(match value {
+        ColumnData::String(value) => value.as_deref().map(str::to_owned),
+        // Offset-free SQL Server date-times use the ORM's UTC convention.
+        ColumnData::DateTime(legacy) => legacy
+            .map(legacy_datetime)
+            .transpose()?
+            .map(|value| temporal::mssql_rfc3339(value.assume_utc())),
+        // Tiberius's time codecs panic if the date or its offset-adjusted
+        // local date falls outside the supported range.
+        ColumnData::DateTime2(Some(raw)) if raw.date().days() > LAST_TDS_DAY_IN_TIME_RANGE => {
+            chrono::NaiveDateTime::from_sql(value)?.map(naive_utc_rfc3339)
+        }
+        ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            PrimitiveDateTime::from_sql(value)?
+                .map(|value| temporal::mssql_rfc3339(value.assume_utc()))
+        }
+        ColumnData::DateTimeOffset(None) => None,
+        ColumnData::DateTimeOffset(Some(raw)) => {
+            if !(-1439..=1439).contains(&raw.offset()) {
+                return Err(incompatible_column(
+                    "SQL Server datetimeoffset offset is outside the supported range",
+                ));
+            }
+            if datetimeoffset_fits_time(*raw) {
+                OffsetDateTime::from_sql(value)?.map(temporal::mssql_rfc3339)
+            } else {
+                chrono::DateTime::<chrono::FixedOffset>::from_sql(value)?
+                    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            }
+        }
+        ColumnData::Date(Some(raw)) if raw.days() > LAST_TDS_DAY_IN_TIME_RANGE => {
+            chrono::NaiveDate::from_sql(value)?.map(|value| value.to_string())
+        }
+        ColumnData::Date(_) => Date::from_sql(value)?.map(temporal::display_date),
+        ColumnData::Time(_) => Time::from_sql(value)?.map(temporal::clock_text),
+        ColumnData::Guid(value) => value.map(|value| value.to_string()),
+        _ => {
+            return Err(incompatible_column(
+                "could not decode SQL Server column as String",
+            ));
+        }
+    })
 }
 
 macro_rules! impl_mssql_temporal_scalar {
@@ -1872,19 +1912,27 @@ impl MssqlScalar for rust_decimal::Decimal {
     }
 }
 
-/// RFC 3339 text of a date-time that carries no offset, read as UTC.
-///
-/// The legacy `datetime` type counts 1/300 of a second, which the driver
-/// truncates to nanoseconds (`.996666666` for the tick SQL Server shows as
-/// `.997`). Such a value is never a multiple of 100 ns, the unit of every
-/// other date-time type, so it is rounded to the millisecond the server shows.
-fn naive_utc_rfc3339(value: tiberius::time::chrono::NaiveDateTime) -> String {
+/// Decode legacy datetime with signed days (the driver's time codec uses unsigned days).
+/// Round the 1/300-second ticks to the milliseconds that SQL Server displays.
+fn legacy_datetime(value: tiberius::time::DateTime) -> tiberius::Result<PrimitiveDateTime> {
+    let epoch = time::macros::datetime!(1900-01-01 0:00);
+    let millis = (i64::from(value.seconds_fragments()) * 1_000 + 150) / 300;
+    epoch
+        .checked_add(
+            time::Duration::days(i64::from(value.days())) + time::Duration::milliseconds(millis),
+        )
+        .ok_or_else(|| incompatible_column("SQL Server datetime is outside the supported range"))
+}
+
+/// Format an offset-free chrono fallback as UTC, with the legacy datetime
+/// rounding for 1/300-second ticks.
+fn naive_utc_rfc3339(value: chrono::NaiveDateTime) -> String {
     use chrono::Timelike;
+
     let nanos = value.nanosecond();
     let value = if nanos.is_multiple_of(100) {
         value
     } else {
-        // At most 299/300 s, so rounding never reaches the next second.
         value
             .with_nanosecond((nanos + 500_000) / 1_000_000 * 1_000_000)
             .unwrap_or(value)
@@ -2131,26 +2179,31 @@ impl MssqlParamValue {
 }
 
 fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> {
-    use tiberius::IntoSql;
+    use tiberius::ToSql;
 
-    let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
-    let valid_time =
-        |time: chrono::NaiveDateTime| valid_date(time.date()) && time.nanosecond() < 1_000_000_000;
-
+    let valid_date = |date: Date| (1..=9999).contains(&date.year());
+    let date_error =
+        || sqlx::Error::Encode("value is outside the SQL Server date or datetime2 range".into());
     match *value.kind() {
-        TemporalKind::Date(date) if valid_date(date) => Ok(date.into_sql()),
-        TemporalKind::DateTime(time) if valid_time(time) => Ok(time.into_sql()),
+        TemporalKind::Date(date) => temporal::from_chrono_date(date)
+            .filter(|date| valid_date(*date))
+            .map(|date| owned_temporal_column(date.to_sql()))
+            .ok_or_else(date_error),
+        TemporalKind::DateTime(time) => temporal::from_chrono_naive(time)
+            .filter(|(value, leap)| valid_date(value.date()) && !leap)
+            .map(|(value, _)| owned_temporal_column(value.to_sql()))
+            .ok_or_else(date_error),
         TemporalKind::DateTimeOffset(time) => {
-            let offset = time.offset().local_minus_utc();
-            let utc = time.naive_utc();
-            if offset % 60 == 0
-                && offset.abs() <= 14 * 3600
-                && valid_time(utc)
-                && utc
-                    .checked_add_signed(chrono::Duration::seconds(i64::from(offset)))
-                    .is_some_and(valid_time)
+            let seconds = time.offset().local_minus_utc();
+            if seconds % 60 == 0
+                && seconds.abs() <= 14 * 3600
+                && let temporal::Timestamp::Time { utc, offset, leap_second: false } =
+                    temporal::Timestamp::from_chrono(time)
+                && valid_date(utc.date())
+                && let Some(local) = utc.checked_add(time::Duration::seconds(i64::from(seconds)))
+                && valid_date(local.date())
             {
-                Ok(time.into_sql())
+                Ok(owned_temporal_column(local.assume_offset(offset).to_sql()))
             } else {
                 Err(sqlx::Error::Encode(
                     "timestamp is outside the SQL Server datetimeoffset range".into(),
@@ -2160,9 +2213,17 @@ fn encode_temporal(value: &TemporalValue) -> crate::Result<ColumnData<'static>> 
         TemporalKind::Unparsed => Err(sqlx::Error::Encode(
             "SQL Server native temporal parameters require an ISO date or an ISO timestamp with seconds".into(),
         )),
-        _ => Err(sqlx::Error::Encode(
-            "value is outside the SQL Server date or datetime2 range".into(),
-        )),
+    }
+}
+
+// The driver's time codecs expose ToSql rather than IntoSql. All three
+// temporal variants contain only owned data.
+fn owned_temporal_column(data: ColumnData<'_>) -> ColumnData<'static> {
+    match data {
+        ColumnData::Date(value) => ColumnData::Date(value),
+        ColumnData::DateTime2(value) => ColumnData::DateTime2(value),
+        ColumnData::DateTimeOffset(value) => ColumnData::DateTimeOffset(value),
+        _ => unreachable!("time codecs return native temporal data"),
     }
 }
 
@@ -2901,31 +2962,220 @@ mod tests {
         answer.abort();
     }
 
+    fn chrono_temporal_text(column: &ColumnData<'static>) -> Option<String> {
+        use chrono::{SecondsFormat, Timelike};
+        use tiberius::FromSql;
+
+        match column {
+            ColumnData::Date(_) => chrono::NaiveDate::from_sql(column)
+                .unwrap()
+                .map(|v| v.to_string()),
+            ColumnData::Time(_) => chrono::NaiveTime::from_sql(column)
+                .unwrap()
+                .map(|v| v.to_string()),
+            ColumnData::DateTimeOffset(_) => {
+                chrono::DateTime::<chrono::FixedOffset>::from_sql(column)
+                    .unwrap()
+                    .map(|v| v.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+            }
+            _ => chrono::NaiveDateTime::from_sql(column)
+                .unwrap()
+                .map(|value| {
+                    let nanos = value.nanosecond();
+                    let value = if nanos.is_multiple_of(100) {
+                        value
+                    } else {
+                        value
+                            .with_nanosecond((nanos + 500_000) / 1_000_000 * 1_000_000)
+                            .unwrap()
+                    };
+                    value.and_utc().to_rfc3339_opts(SecondsFormat::AutoSi, true)
+                }),
+        }
+    }
+
     #[test]
-    fn date_times_without_an_offset_read_as_rfc3339_utc() {
-        let at = |nanos: u32| {
-            chrono::NaiveDate::from_ymd_opt(2026, 11, 9)
-                .unwrap()
-                .and_hms_nano_opt(12, 34, 56, nanos)
-                .unwrap()
+    fn temporal_column_text_matches_chrono() {
+        use tiberius::time as tds;
+
+        let date = tds::Date::new(3_652_058);
+        let next_day = tds::Date::new(3_652_059);
+        let time = tds::Time::new(863_999_999_999, 7);
+        let datetime2 = tds::DateTime2::new(tds::Date::new(0), tds::Time::new(123_456_700, 7));
+        for column in [
+            ColumnData::Date(Some(date)),
+            ColumnData::Date(Some(next_day)),
+            ColumnData::Date(Some(tds::Date::new(0))),
+            ColumnData::Date(None),
+            ColumnData::Time(Some(time)),
+            ColumnData::Time(Some(tds::Time::new(45_296_123, 3))),
+            ColumnData::Time(Some(tds::Time::new(0, 7))),
+            ColumnData::Time(None),
+            ColumnData::SmallDateTime(Some(tds::SmallDateTime::new(65_535, 1439))),
+            ColumnData::SmallDateTime(None),
+            ColumnData::DateTime2(Some(tds::DateTime2::new(date, time))),
+            ColumnData::DateTime2(Some(tds::DateTime2::new(next_day, time))),
+            ColumnData::DateTime2(None),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, -30))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, 840))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(
+                tds::DateTime2::new(date, time),
+                840,
+            ))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(
+                tds::DateTime2::new(next_day, tds::Time::new(0, 7)),
+                -840,
+            ))),
+            ColumnData::DateTimeOffset(Some(tds::DateTimeOffset::new(datetime2, 0))),
+            ColumnData::DateTimeOffset(None),
+            ColumnData::DateTime(None),
+        ] {
+            assert_eq!(
+                decode_string_column(&column).unwrap(),
+                chrono_temporal_text(&column),
+                "{column:?}"
+            );
+        }
+        for scale in 0..=6 {
+            let ticks = 452_961_234_567 / 10u64.pow(7 - u32::from(scale));
+            let clock = tds::Time::new(ticks, scale);
+            let column = ColumnData::DateTime2(Some(tds::DateTime2::new(date, clock)));
+            assert_eq!(
+                decode_string_column(&column).unwrap(),
+                chrono_temporal_text(&column),
+                "datetime2({scale})"
+            );
+        }
+        for day in [-53_690, -1, 0, 1] {
+            for tick in 0..300 {
+                let column =
+                    ColumnData::DateTime(Some(tds::DateTime::new(day, 12_345 * 300 + tick)));
+                assert_eq!(
+                    decode_string_column(&column).unwrap(),
+                    chrono_temporal_text(&column),
+                    "{column:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_temporal_parameter_bytes_match_chrono_codecs() {
+        use tiberius::IntoSql;
+
+        for text in [
+            "0001-01-01",
+            "9999-12-31",
+            "1970-01-01 00:00:00",
+            "2000-02-29T23:59:59.999999999",
+            "1970-01-01T00:00:00.123456789Z",
+            "2000-02-29T23:59:59.123456789-12:30",
+            "9999-12-31T23:59:59.999999999+14:00",
+        ] {
+            let SqlValue::Temporal(value) = SqlValue::temporal_text(text.to_owned()) else {
+                unreachable!();
+            };
+            let expected = match *value.kind() {
+                TemporalKind::Date(date) => date.into_sql(),
+                TemporalKind::DateTime(date) => date.into_sql(),
+                TemporalKind::DateTimeOffset(date) => date.into_sql(),
+                TemporalKind::Unparsed => panic!("could not parse {text}"),
+            };
+            assert_eq!(encode_temporal(&value).unwrap(), expected, "{text}");
+        }
+
+        use chrono::{Datelike, Timelike};
+
+        for year in [
+            "-262144", "-262143", "-262142", "-10000", "-9999", "9999", "+9999", "+10000",
+            "+262142", "+262143",
+        ] {
+            for suffix in [
+                "-01-01",
+                "-12-31T23:59:59.123456789",
+                "-12-31T23:59:59.123456789-00:01",
+                "-12-31T23:59:59.123456789+00:01",
+            ] {
+                let text = format!("{year}{suffix}");
+                let SqlValue::Temporal(value) = SqlValue::temporal_text(text.clone()) else {
+                    unreachable!();
+                };
+                let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
+                let valid_time = |stamp: chrono::NaiveDateTime| {
+                    valid_date(stamp.date()) && stamp.nanosecond() < 1_000_000_000
+                };
+                let expected = match *value.kind() {
+                    TemporalKind::Date(date) if valid_date(date) => Some(date.into_sql()),
+                    TemporalKind::DateTime(stamp) if valid_time(stamp) => Some(stamp.into_sql()),
+                    TemporalKind::DateTimeOffset(stamp) if valid_time(stamp.naive_utc()) => stamp
+                        .naive_utc()
+                        .checked_add_signed(chrono::TimeDelta::seconds(i64::from(
+                            stamp.offset().local_minus_utc(),
+                        )))
+                        .filter(|stamp| valid_time(*stamp))
+                        .map(|_| stamp.into_sql()),
+                    _ => None,
+                };
+                assert_eq!(encode_temporal(&value).ok(), expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_temporal_parameter_rejections_match_chrono_bounds() {
+        use chrono::{Datelike, Timelike};
+
+        let leap = "2016-12-31T23:59:60.5"
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap();
+        let stamp = "2024-02-29T12:34:56Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let valid_date = |date: chrono::NaiveDate| (1..=9999).contains(&date.year());
+        let valid_time = |time: chrono::NaiveDateTime| {
+            valid_date(time.date()) && time.nanosecond() < 1_000_000_000
         };
-        assert_eq!(naive_utc_rfc3339(at(0)), "2026-11-09T12:34:56Z");
-        assert_eq!(
-            naive_utc_rfc3339(at(125_000_000)),
-            "2026-11-09T12:34:56.125Z"
-        );
-        // `datetime2(7)` keeps its 100 ns digits.
-        assert_eq!(
-            naive_utc_rfc3339(at(123_456_700)),
-            "2026-11-09T12:34:56.123456700Z"
-        );
-        // Legacy `datetime` ticks of 1/300 s, truncated by the driver.
-        assert_eq!(naive_utc_rfc3339(at(3_333_333)), "2026-11-09T12:34:56.003Z");
-        assert_eq!(naive_utc_rfc3339(at(6_666_666)), "2026-11-09T12:34:56.007Z");
-        assert_eq!(
-            naive_utc_rfc3339(at(996_666_666)),
-            "2026-11-09T12:34:56.997Z"
-        );
+        for parameter in [
+            SqlValue::from("0000-01-01".parse::<chrono::NaiveDate>().unwrap()),
+            SqlValue::from("+10000-01-01".parse::<chrono::NaiveDate>().unwrap()),
+            SqlValue::from(
+                "+10000-01-01T00:00:00"
+                    .parse::<chrono::NaiveDateTime>()
+                    .unwrap(),
+            ),
+            SqlValue::from(leap),
+            SqlValue::from(leap.and_utc().fixed_offset()),
+            SqlValue::from(
+                stamp.with_timezone(&chrono::FixedOffset::east_opt(14 * 3600 + 60).unwrap()),
+            ),
+            SqlValue::from(stamp.with_timezone(&chrono::FixedOffset::east_opt(30).unwrap())),
+        ] {
+            let SqlValue::Temporal(value) = parameter else {
+                unreachable!();
+            };
+            let expected = match *value.kind() {
+                TemporalKind::Date(date) => valid_date(date),
+                TemporalKind::DateTime(time) => valid_time(time),
+                TemporalKind::DateTimeOffset(time) => {
+                    let offset = time.offset().local_minus_utc();
+                    offset % 60 == 0
+                        && offset.abs() <= 14 * 3600
+                        && valid_time(time.naive_utc())
+                        && valid_time(time.naive_local())
+                }
+                TemporalKind::Unparsed => unreachable!(),
+            };
+            assert!(
+                !expected,
+                "expected an out-of-range case: {}",
+                value.as_text()
+            );
+            assert!(
+                matches!(encode_temporal(&value), Err(sqlx::Error::Encode(_))),
+                "{}",
+                value.as_text()
+            );
+        }
     }
 
     #[test]

@@ -25,6 +25,9 @@ use hive_router::{
                 OnHttpRequestHookFuture, OnHttpRequestHookPayload, OnHttpRequestHookResult,
             },
             on_plugin_init::{OnPluginInitPayload, OnPluginInitResult},
+            on_subgraph_execute::{
+                OnSubgraphExecuteStartHookPayload, OnSubgraphExecuteStartHookResult,
+            },
             on_subgraph_http_request::{
                 OnSubgraphHttpRequestHookPayload, OnSubgraphHttpRequestHookResult,
             },
@@ -48,6 +51,7 @@ use crate::{
     byte_route::{ByteRouteMiddleware, ByteRouteRuntime},
     federation::ActiveGraph,
     lifecycle::{GraphLifecycle, RouterHandle, fetch_initial},
+    subgraph_errors::{SubgraphErrorLogger, record_client_operation_name},
     subscriptions::{
         INTERNAL_SUBSCRIPTION_HEADER, INTERNAL_SUBSCRIPTION_VARIABLES_EXTENSION,
         InternalSubscriptionEndpoint, SubscriptionGateway, websocket_index,
@@ -369,6 +373,8 @@ impl PreparedRouter {
         } else {
             None
         };
+        let subgraph_error_logger =
+            Arc::new(SubgraphErrorLogger::new(self.config.subgraph_error_logging));
         let runtime = PluginRuntime {
             lifecycle: self.lifecycle.clone(),
             authentication: self.config.authentication.clone(),
@@ -382,6 +388,8 @@ impl PreparedRouter {
             request_limits: self.config.request_limits.clone(),
             introspection: self.config.introspection,
             refusal_outcome: self.config.refusal_outcome,
+            subgraph_error_masking: self.config.subgraph_error_masking.clone(),
+            subgraph_error_logger: subgraph_error_logger.clone(),
             persisted_documents_enabled: self.config.persisted_documents.is_some(),
             persisted_documents: self.config.persisted_documents.clone(),
             verified_runtimes: Arc::new(hive_router::tokio::sync::Mutex::new(BTreeMap::new())),
@@ -439,6 +447,9 @@ impl PreparedRouter {
                 ));
             }
         };
+
+        let logger = subgraph_error_logger.clone();
+        background_tasks.register_handle(async move { logger.report_drops().await });
 
         let listener = self.config.listener;
         let paths = RouterPaths::new(
@@ -576,6 +587,7 @@ impl PreparedRouter {
             Err(error) => Err(error),
         };
         background_tasks.shutdown();
+        subgraph_error_logger.flush_drops();
         telemetry.graceful_shutdown().await;
         hive_router::invoke_shutdown_hooks(&shared_state).await;
         result
@@ -675,6 +687,8 @@ struct PluginRuntime {
     request_limits: crate::RequestLimits,
     introspection: bool,
     refusal_outcome: bool,
+    subgraph_error_masking: crate::SubgraphErrorMasking,
+    subgraph_error_logger: Arc<SubgraphErrorLogger>,
     strict_persisted_documents: bool,
     persisted_documents_enabled: bool,
     persisted_documents: Option<crate::persisted::PersistedDocuments>,
@@ -1006,6 +1020,7 @@ impl RouterPlugin for StaticGraphPlugin {
         &'execution self,
         payload: OnGraphQLParseStartHookPayload<'execution>,
     ) -> OnGraphQLParseHookResult<'execution> {
+        record_client_operation_name(payload.graphql_params.operation_name.as_deref());
         if payload
             .context
             .get_ref::<TrustedInternalSubscription>()
@@ -1233,6 +1248,25 @@ impl RouterPlugin for StaticGraphPlugin {
         )
     }
 
+    async fn on_subgraph_execute<'execution>(
+        &'execution self,
+        payload: OnSubgraphExecuteStartHookPayload<'execution>,
+    ) -> OnSubgraphExecuteStartHookResult<'execution> {
+        let subgraph = payload.subgraph_name;
+        if subgraph == crate::node_lookup::NODE_SUBGRAPH_NAME {
+            return payload.proceed();
+        }
+        payload.on_end(move |mut payload| {
+            if let Some(errors) = &mut payload.execution_result.errors {
+                for error in errors {
+                    self.runtime.subgraph_error_logger.log(subgraph, error);
+                    self.runtime.subgraph_error_masking.prepare(error);
+                }
+            }
+            payload.proceed()
+        })
+    }
+
     async fn on_subgraph_http_request<'execution>(
         &'execution self,
         payload: OnSubgraphHttpRequestHookPayload<'execution>,
@@ -1291,6 +1325,13 @@ impl RouterPlugin for StaticGraphPlugin {
         mut payload: OnGraphQLErrorHookPayload<'request>,
     ) -> OnGraphQLErrorHookResult<'request> {
         self.runtime.lifecycle.metrics().graphql_error();
+        if self
+            .runtime
+            .subgraph_error_masking
+            .finish(&mut payload.error)
+        {
+            return payload.proceed();
+        }
         if self.runtime.persisted_documents_enabled
             && matches!(
                 payload.error.extensions.code.as_deref(),

@@ -325,7 +325,7 @@ pub(super) fn check_canonical_datetime(text: &str) -> Checked<()> {
     if !shaped {
         // A valid RFC 3339 instant in another spelling is non-canonical, not malformed.
         return fail(
-            if text.len() <= 64 && chrono::DateTime::parse_from_rfc3339(text).is_ok() {
+            if text.len() <= 64 && crate::temporal::parse_rfc3339(text).is_ok() {
                 P::NonCanonical
             } else {
                 P::Malformed
@@ -335,11 +335,9 @@ pub(super) fn check_canonical_datetime(text: &str) -> Checked<()> {
     if &text[..4] == "0000" {
         return fail(P::OutOfRange);
     }
-    let parsed = chrono::DateTime::parse_from_rfc3339(text)
+    let canonical = RuntimeDateTime::parse_exact(text)
         .map_err(|_| RuntimeDefaultError::new(P::ImpossibleDateTime))?;
-    let canonical = RuntimeDateTime::parse(text)
-        .map_err(|_| RuntimeDefaultError::new(P::ImpossibleDateTime))?;
-    if canonical.as_str() != text || parsed.timestamp_subsec_nanos() % 1_000 != 0 {
+    if canonical.as_str() != text {
         return fail(P::NonCanonical);
     }
     Ok(())

@@ -1,0 +1,5 @@
+error: default_sort expects comma-separated columns with optional ASC or DESC
+ --> tests/ui/default_sort_unclosed_bracket.rs:4:74
+  |
+4 | #[repository_entity(backend = "mssql", table = "records", default_sort = "[a]]")]
+  |                                                                          ^^^^^^
