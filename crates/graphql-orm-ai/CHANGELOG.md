@@ -10,7 +10,12 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.175.0 (breaking release)
+## Unreleased - 0.176.0 (breaking release)
+
+- Fixed-broker hosts can opt in to an inline description for one explicitly
+  scoped entity with a simple list or keyset ID read. It uses the ordinary
+  describe admission and result bounds, then checks current authority again
+  at execute (#551).
 
 - Discovery streams grouped roots into authorization batches and tracks
   each candidate's roots as a contiguous range, reducing allocations

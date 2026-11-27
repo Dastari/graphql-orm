@@ -15,9 +15,9 @@ use uuid::Uuid;
 use crate::{
     AiApprovalRule, AiCapabilityIndex, AiCapabilityIndexEntry, AiCapabilityIndexSet,
     AiCapabilityIndexSetSearchResult, AiCapabilityKind, AiCapabilityRankedMatch,
-    AiCapabilitySearchQuery, AiError, AiRunId, AiSessionId, AiSharedTypePlanSchema, AiToolId,
-    AiToolRisk, DataClassification, ModelReasoningEffort, ModelToolDefinition,
-    ProviderCapabilities, ProviderKind,
+    AiCapabilitySearchQuery, AiError, AiGraphqlQueryCapability, AiRunId, AiSessionId,
+    AiSharedTypePlanSchema, AiToolCatalog, AiToolId, AiToolRisk, DataClassification,
+    ModelReasoningEffort, ModelToolDefinition, ProviderCapabilities, ProviderKind,
 };
 
 /// Frozen broker tool identifier for bounded capability discovery.
@@ -1170,6 +1170,8 @@ pub struct AiLoadedCapabilityBinding {
     /// Operations of an entity capability current host policy admitted at
     /// load, in operation-name order. Empty for every other kind.
     operations: Vec<AiLoadedCapabilityOperation>,
+    /// Keep only the advertised roots when refreshing an inline description.
+    described_roots_only: bool,
     /// For a root an entity capability groups, the host-policy fingerprint
     /// of the entity entry, which is decided at load and again at execute.
     entity_policy_fingerprint: Option<String>,
@@ -1776,6 +1778,7 @@ impl AiCapabilityDiscoveryBroker {
             })),
             visible_fingerprint: visible_fingerprint(entry, &admitted),
             operations,
+            described_roots_only: false,
             entity_policy_fingerprint,
             nonce,
             principal_reference_fingerprint: principal_reference_fingerprint(principal.reference()),
@@ -2024,6 +2027,17 @@ impl AiCapabilityDiscoveryBroker {
         };
         if current.visible_fingerprint != loaded.visible_fingerprint {
             return Err(stale_capability());
+        }
+        // The visibility hash checks the whole admitted entity view. A
+        // refresh of an inline description must still hold only its advertised roots.
+        if loaded.described_roots_only {
+            current.operations.retain(|operation| {
+                loaded
+                    .operations
+                    .iter()
+                    .any(|described| described.capability_id == operation.capability_id)
+            });
+            current.described_roots_only = true;
         }
         current.nonce = loaded.nonce;
         current.reference.clone_from(&loaded.reference);
@@ -2351,6 +2365,7 @@ pub struct AiCapabilityBrokerSession {
     limits: AiCapabilityDeliveryLimits,
     brokered_static_tools: Arc<BTreeSet<String>>,
     inline_describe_schema: bool,
+    scoped_discovery_descriptions: bool,
     brokered_mutations: bool,
     /// Hierarchical rules a classified coordinator bound for brokered
     /// mutations. Without them no mutation is discoverable or executable.
@@ -2375,6 +2390,7 @@ impl AiCapabilityBrokerSession {
             limits,
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
+            scoped_discovery_descriptions: false,
             brokered_mutations: false,
             mutation_rules: None,
             brokered_subscriptions: false,
@@ -2455,6 +2471,19 @@ impl AiCapabilityBrokerSession {
     /// Whether describe also returns the inline compact plan schema.
     pub const fn uses_inline_describe_schema(&self) -> bool {
         self.inline_describe_schema
+    }
+
+    /// Enables compact descriptions for simple ID reads in scoped fixed-broker discovery.
+    ///
+    /// The caller supplies an exact `namespace` and `entityOrClass`, uses
+    /// `kind: "generated_entity"`, and allows at least two results so a single
+    /// admitted match is unambiguous. Describe remains available for every
+    /// candidate. This setting changes neither the offered tool definitions
+    /// nor retained session identity.
+    #[must_use]
+    pub const fn with_scoped_discovery_descriptions(mut self) -> Self {
+        self.scoped_discovery_descriptions = true;
+        self
     }
 
     fn brokers_static_entry(&self, entry: &AiCapabilityIndexEntry) -> bool {
@@ -2754,9 +2783,13 @@ impl AiCapabilityBrokerSession {
         }
     }
 
-    fn record_loaded(&self, reference: String, binding: AiLoadedCapabilityBinding) {
+    fn record_loaded(&self, binding: AiLoadedCapabilityBinding, described: bool) {
+        let reference = binding.audit_reference();
         let mut state = self.state();
-        state.amplification.describe_calls = state.amplification.describe_calls.saturating_add(1);
+        if described {
+            state.amplification.describe_calls =
+                state.amplification.describe_calls.saturating_add(1);
+        }
         state.loaded.retain(|(existing, _)| existing != &reference);
         state.loaded.push_back((reference, binding));
         while state.loaded.len() > usize::from(self.limits.maximum_loaded_bindings) {
@@ -3662,6 +3695,54 @@ impl AiCapabilityDescription {
         self.with_plan_schema(plan_schema.to_model_schema(), maximum_bytes)
     }
 
+    /// Renders the normal describe metadata for the simple first-page
+    /// operations only.
+    fn for_inline_id_reads(mut self, catalog: &AiToolCatalog, maximum_bytes: u32) -> Option<Self> {
+        let metadata = self.contract["operations"].as_array_mut()?;
+        let mut list = Vec::new();
+        let mut keyset = Vec::new();
+        for (operation, metadata) in self.operations.into_iter().zip(std::mem::take(metadata)) {
+            let shape = metadata["shape"].as_str()?;
+            if !matches!(shape, "list" | "keyset_list") {
+                continue;
+            }
+            let capability = catalog
+                .exact_query_capability(
+                    operation.capability_id(),
+                    operation.capability_fingerprint(),
+                )
+                .ok()?;
+            if shape == "list" {
+                list.push((operation, metadata, capability));
+            } else if capability.supports_continuation() {
+                // An authorization scan shares the shape but has no
+                // compiler-owned continuation contract.
+                keyset.push((operation, metadata, capability));
+            }
+        }
+        self.operations = Vec::new();
+        let mut summaries = Vec::new();
+        for roots in [list, keyset] {
+            let Ok([(operation, operation_metadata, capability)]) = <[_; 1]>::try_from(roots)
+            else {
+                continue;
+            };
+            let Some(summary) = inline_id_read_summary(capability) else {
+                continue;
+            };
+            self.operations.push(operation);
+            metadata.push(operation_metadata);
+            summaries.push(summary);
+        }
+        if summaries.is_empty() {
+            return None;
+        }
+        let description = self
+            .with_operation_signatures(summaries, maximum_bytes)
+            .ok()?;
+        (description.contract["signaturesAvailable"] != false).then_some(description)
+    }
+
     /// Consumes the description and returns the one bounded model result.
     pub fn into_model_result(self) -> serde_json::Value {
         self.contract
@@ -3986,6 +4067,33 @@ impl AiCapabilityDescribedOperation {
     }
 }
 
+// Prove the advertised ID read fits the exact registered compiler contract
+// without supplying filters, relationship selections or cursors.
+fn inline_id_read_summary(capability: &AiGraphqlQueryCapability) -> Option<serde_json::Value> {
+    let mut summary = capability.capability_signature().ok()?.summary();
+    let mut ids = summary["select"]
+        .as_str()?
+        .split(", ")
+        .filter(|path| path.eq_ignore_ascii_case("id"));
+    let id = ids.next()?;
+    if ids.next().is_some() || !summary["maximumItems"].is_object() {
+        return None;
+    }
+    let recipe = json!({"selections": [id], "maximumItems": 1});
+    let mut plan = recipe.clone();
+    plan["arguments"] = json!({});
+    plan["relationshipArguments"] = json!({});
+    plan["relationshipMaximumItems"] = json!({});
+    if capability.supports_continuation() {
+        capability.compile_compact_page(plan, None).ok()?;
+        summary["continuation"] = json!(true);
+    } else {
+        capability.compile_compact(plan).ok()?;
+    }
+    summary["idRead"] = recipe;
+    Some(summary)
+}
+
 /// Authorized `describe_type` request: one named type of one loaded
 /// operation's signature.
 ///
@@ -4168,6 +4276,106 @@ impl AiCapabilityDiscoveryBroker {
         self.cache_discovery(&issued);
         session.record_search(issued);
         Ok(value)
+    }
+
+    /// Dispatches fixed-broker discovery with the registered query catalog.
+    ///
+    /// If the session opts in with
+    /// [`AiCapabilityBrokerSession::with_scoped_discovery_descriptions`],
+    /// discovery can attach an `inlineDescription` to one explicitly scoped
+    /// entity candidate. It describes unambiguous list and continuable
+    /// keyset ID reads. The complete response must fit both 8 KiB and
+    /// `maximum_output_bytes`; the description also fits the session's
+    /// describe bound. Otherwise callers can use ordinary describe.
+    ///
+    /// An attached `loadedReference` is a genuine run-bound describe
+    /// reference. Execution still checks the current principal, current
+    /// capability and host policy, and ordinary resolver authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_discover`].
+    pub async fn dispatch_discover_with_catalog(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        arguments: &serde_json::Value,
+        catalog: &AiToolCatalog,
+        maximum_output_bytes: usize,
+    ) -> Result<serde_json::Value, AiError> {
+        const MAXIMUM_INLINE_DISCOVERY_BYTES: usize = 8 * 1024;
+        let mut result = self
+            .dispatch_discover(principal_reference, run, session, arguments)
+            .await?;
+        if !session.scoped_discovery_descriptions
+            || session.uses_inline_describe_schema()
+            || arguments["kind"] != "generated_entity"
+            || arguments["maximumResults"]
+                .as_u64()
+                .is_none_or(|limit| limit < 2)
+        {
+            return Ok(result);
+        }
+        let (Some(namespace), Some(entity)) = (
+            arguments["namespace"].as_str(),
+            arguments["entityOrClass"].as_str(),
+        ) else {
+            return Ok(result);
+        };
+        let Some([candidate]) = result["candidates"].as_array().map(Vec::as_slice) else {
+            return Ok(result);
+        };
+        if candidate["namespace"] != namespace || candidate["entity"] != entity {
+            return Ok(result);
+        }
+        let (Some(capability_id), Some(candidate_reference)) = (
+            candidate["capabilityId"].as_str(),
+            candidate["candidateReference"].as_str(),
+        ) else {
+            return Ok(result);
+        };
+        // Re-admit the exact held candidate as describe would. A failed load
+        // leaves the already-admitted discovery response intact.
+        let parsed = BrokerDescribeArguments {
+            capability_id: capability_id.to_owned(),
+            candidate_reference: Some(candidate_reference.to_owned()),
+        };
+        let Ok((description, mut loaded)) = self
+            .prepare_description(principal_reference, run, session, parsed)
+            .await
+        else {
+            return Ok(result);
+        };
+        let Some(description) =
+            description.for_inline_id_reads(catalog, session.limits().maximum_describe_bytes)
+        else {
+            return Ok(result);
+        };
+        let candidate = result["candidates"][0]
+            .as_object_mut()
+            .expect("candidate is an object");
+        loaded.operations.retain(|operation| {
+            description
+                .operations()
+                .iter()
+                .any(|described| described.capability_id() == &operation.capability_id)
+        });
+        loaded.described_roots_only = true;
+        candidate.insert(
+            "inlineDescription".to_owned(),
+            description.into_model_result(),
+        );
+        let limit = maximum_output_bytes.min(MAXIMUM_INLINE_DISCOVERY_BYTES);
+        if serde_json::to_vec(&result).is_ok_and(|bytes| bytes.len() <= limit) {
+            session.record_loaded(loaded, false);
+        } else {
+            result["candidates"][0]
+                .as_object_mut()
+                .expect("candidate is an object")
+                .remove("inlineDescription");
+        }
+        Ok(result)
     }
 
     /// Dispatches one frozen `graphql.capabilities.browse` call.
@@ -4520,6 +4728,20 @@ impl AiCapabilityDiscoveryBroker {
         }
         let parsed: BrokerDescribeArguments =
             serde_json::from_value(arguments.clone()).map_err(|_| malformed_broker_arguments())?;
+        let (description, loaded) = self
+            .prepare_description(principal_reference, run, session, parsed)
+            .await?;
+        session.record_loaded(loaded, true);
+        Ok(description)
+    }
+
+    async fn prepare_description(
+        &self,
+        principal_reference: &PrincipalReference,
+        run: &AiCapabilityRunBinding,
+        session: &AiCapabilityBrokerSession,
+        parsed: BrokerDescribeArguments,
+    ) -> Result<(AiCapabilityDescription, AiLoadedCapabilityBinding), AiError> {
         let reference = parsed
             .candidate_reference
             .filter(|reference| crate::valid_sha256(reference))
@@ -4593,15 +4815,14 @@ impl AiCapabilityDiscoveryBroker {
             }]
         };
         let description = AiCapabilityDescription {
-            loaded_reference: loaded_reference.clone(),
+            loaded_reference,
             capability_id: loaded.capability_id.clone(),
             capability_kind: loaded.capability_kind,
             capability_fingerprint: loaded.capability_fingerprint.clone(),
             operations,
             contract,
         };
-        session.record_loaded(loaded_reference, loaded);
-        Ok(description)
+        Ok((description, loaded))
     }
 
     /// Dispatches one frozen `graphql.capabilities.describe_type` call up to
@@ -8266,6 +8487,7 @@ mod tests {
             limits: session.limits,
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
+            scoped_discovery_descriptions: false,
             brokered_mutations: false,
             mutation_rules: None,
             brokered_subscriptions: false,
@@ -8745,6 +8967,7 @@ mod tests {
             limits: session.limits,
             brokered_static_tools: Arc::new(BTreeSet::new()),
             inline_describe_schema: false,
+            scoped_discovery_descriptions: false,
             brokered_mutations: true,
             mutation_rules: Some(Arc::new(mutation_rules(Some(BTreeSet::new())))),
             brokered_subscriptions: false,

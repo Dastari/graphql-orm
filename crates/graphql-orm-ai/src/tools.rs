@@ -848,10 +848,7 @@ impl AiToolCatalog {
         expected_capability_fingerprint: &str,
         mut plan: serde_json::Value,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
-        let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
-        if capability.fingerprint() != expected_capability_fingerprint {
-            return Err(AiError::Forbidden);
-        }
+        let capability = self.exact_query_capability(id, expected_capability_fingerprint)?;
         if capability.is_aggregate() {
             normalize_broker_ungrouped_count(&mut plan, capability.compact_argument_schema());
         }
@@ -885,11 +882,19 @@ impl AiToolCatalog {
         plan: serde_json::Value,
         after: Option<&str>,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
-        let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
-        if capability.fingerprint() != expected_capability_fingerprint {
-            return Err(AiError::Forbidden);
-        }
+        let capability = self.exact_query_capability(id, expected_capability_fingerprint)?;
         capability.compile_compact_page(plan, after)
+    }
+
+    pub(crate) fn exact_query_capability(
+        &self,
+        id: &AiToolId,
+        fingerprint: &str,
+    ) -> Result<&AiGraphqlQueryCapability, AiError> {
+        self.query_capabilities
+            .get(id)
+            .filter(|capability| capability.fingerprint() == fingerprint)
+            .ok_or(AiError::Forbidden)
     }
 
     /// Projects one registered classified mutation capability for a provider.

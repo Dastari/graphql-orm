@@ -12,6 +12,16 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Scoped discovery descriptions (#551)
+
+**No action.** To enable the additive discovery result, set
+`AiCapabilityBrokerSession::with_scoped_discovery_descriptions` on a fixed
+broker session. Hosts dispatching discovery directly supply their registered
+catalog to `dispatch_discover_with_catalog`. Instruct callers to scope simple
+ID queries to the known namespace and entity and to use ordinary describe
+when discovery omits the relevant operation. No data migration or provider
+session rebind is needed for this opt-in.
+
 ### Grouped-root discovery allocation reduction (#551)
 
 **No action.** Discovery streams grouped roots into the existing policy
