@@ -133,6 +133,12 @@ impl GraphqlResolverCatalogBindingV1 {
         export: &str,
         semantic: &GraphqlSemanticCatalog,
     ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+        // Keep the typed decoder's duplicate-field checks on the original input.
+        if !export.trim_start().starts_with('{') {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue must be an object",
+            ));
+        }
         self.check_decoded(GraphqlResolverCatalog::from_export_json(export)?, semantic)
     }
 
@@ -167,6 +173,11 @@ impl GraphqlResolverCatalogBindingV1 {
         if extension.version != RESOLVER_CATALOG_WIRE_V1 {
             return Err(GraphqlSemanticError::new(
                 "resolver catalogue extension version is unsupported",
+            ));
+        }
+        if !extension.payload.is_object() {
+            return Err(GraphqlSemanticError::new(
+                "resolver catalogue must be an object",
             ));
         }
         let verified = DescriptorExtension::new(
@@ -1531,6 +1542,36 @@ mod tests {
         assert_eq!(serde_json::to_vec(&after).unwrap(), bytes);
         assert_eq!(after.fingerprint, fingerprint);
         before.validate().unwrap();
+    }
+
+    #[test]
+    fn receiver_rejects_positional_array_with_the_reviewed_fields() {
+        let semantic = catalog();
+        let resolvers = composed();
+        let binding = GraphqlResolverCatalogBindingV1::new(&resolvers.fingerprint).unwrap();
+        let array = serde_json::json!([
+            resolvers.version,
+            resolvers.semantic_catalog_fingerprint,
+            resolvers.relations,
+            resolvers.entities,
+            resolvers.fingerprint,
+        ]);
+        assert!(
+            binding
+                .decode_export_json(&array.to_string(), &semantic)
+                .is_err()
+        );
+
+        #[cfg(feature = "router-protocol")]
+        {
+            let extension = graphql_orm_router_protocol::DescriptorExtension::new(
+                GRAPHQL_RESOLVER_CATALOG_EXTENSION_NAME,
+                1,
+                array,
+            )
+            .unwrap();
+            assert!(binding.decode_extensions(&[extension], &semantic).is_err());
+        }
     }
 
     #[test]
