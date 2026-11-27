@@ -13,24 +13,25 @@ supersedes: []
 ## 0.237.0 to 0.238.0: Nested closure targets
 
 **No action.** Upgrade ORM and macros together. A read-predicate closure
-whose target holds another closure now writes that target once, whatever the
-target is built from: hand-written and generated filters, `related` and
-`not_related`, and their `and`, `or` and `not`, as well as the column tests
-0.233.0 covered. The closure computes the target's truth as one value per
-row. A relation's truth is the greatest truth among its related rows, FALSE
-when there is none and UNKNOWN when a key column is NULL. Every row still
-gets the same TRUE, FALSE or UNKNOWN verdict, and the same rows are admitted.
+whose target holds another closure can share the target's SQL when the
+target is built from stable column tests, generated filters, relations and
+their `and`, `or` and `not` combinations. The closure computes one
+three-valued verdict per row. A relation contributes the greatest truth
+among its related rows, FALSE when there is none and UNKNOWN when a key
+column is NULL.
 
-- **Evaluation.** A hand-written fragment in such a target is evaluated once
-  per row, where the original rendering tested it for TRUE and for FALSE at
-  two sites. An expression that depends only on the row and its bind values
-  gives the same result.
-- **Unchanged renderings.** A closure whose target holds no closure. A target
-  that `not()` would refuse, such as one with an empty `in_list`. On SQL
-  Server, a target that reads a column whose name is not ASCII, or two
-  columns whose names differ only by case. SQL Server has no boolean values,
-  so it still tests a filter for TRUE and for FALSE: a filter appears twice
-  there and once elsewhere.
+- **Handwritten SQL.** The ORM preserves separate TRUE and FALSE evaluation
+  sites by default, even when the fragment is inside a nested closure, a
+  relation, or a generated relation filter. A host may implement
+  `ReadVisibilityFilter::is_stable_for_closure` to enable sharing when
+  repeated evaluations for the same row and binds always give the same
+  verdict and have no side effects.
+- **Eligibility.** Sharing also requires a target with supported negation,
+  without the deny fallback `1 = 0`, whose row columns can be projected.
+  Generated calendar-relative date filters keep the original sites because
+  they depend on the database clock. On SQL Server, names outside ASCII or
+  names that differ only by case prevent sharing. SQL Server tests each
+  scalar condition for TRUE and FALSE when it encodes the target verdict.
 - **Limits.** `READ_PREDICATE_CLOSURE_MAX_NESTING` (2),
   `READ_PREDICATE_MAX_RENDERED_BYTES` (1 MiB) and
   `READ_PREDICATE_MSSQL_MAX_NESTING` (75) are unchanged: they bound execution

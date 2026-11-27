@@ -132,6 +132,15 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
         None
     }
 
+    /// Whether the filter's SQL can share its evaluation sites in a closure.
+    ///
+    /// Return true only when repeated evaluations for the same row and binds
+    /// produce the same TRUE, FALSE or UNKNOWN result and have no side effects.
+    /// This guarantee includes every SQL fragment the filter incorporates.
+    fn is_stable_for_closure(&self) -> bool {
+        false
+    }
+
     /// Macro-only. The entity derive implements this for generated where
     /// inputs, whose SQL is trusted generated code: it is rendered for the
     /// row it is given and is not read by the hand-written validator. A
@@ -190,6 +199,9 @@ enum RowPiece {
 #[derive(Clone, Default)]
 pub struct RowBoundSql {
     pieces: Vec<RowPiece>,
+    // Set on a prepared relation clause when all incorporated policies
+    // and filters can share their closure evaluation sites.
+    stable_relation_clause: bool,
 }
 
 impl std::fmt::Debug for RowBoundSql {
@@ -257,6 +269,13 @@ impl RowBoundSql {
             .any(|piece| !matches!(piece, RowPiece::Sql(_)))
     }
 
+    /// Macro support: whether this prepared relation clause can share
+    /// its evaluation sites in a closure.
+    #[doc(hidden)]
+    pub fn is_stable_relation_clause(&self) -> bool {
+        self.stable_relation_clause
+    }
+
     /// This SQL with `row`, a rendered table path or alias, written at each
     /// reference to the governed row.
     pub fn bind(&self, row: &str) -> String {
@@ -322,6 +341,7 @@ impl RowBoundFilter {
         Some(Policy::Sql {
             sql: RowBoundSql {
                 pieces: vec![RowPiece::Rendered(renderer)],
+                stable_relation_clause: false,
             },
             values: values.into_iter().map(SqlValue::into_policy_bind).collect(),
         })
@@ -1279,9 +1299,9 @@ pub struct ReadPredicate {
     /// alone does not give it. `None` while `negation` is supported means
     /// that `policy` is three-valued SQL as written.
     logic: Option<Logic>,
-    /// A closure over this predicate keeps the original rendering, with a
-    /// separate TRUE and FALSE test of the target for the governed row and
-    /// for the reached rows. See [`Self::__gom_original_closure_rendering`].
+    /// A closure over this predicate keeps the original TRUE and FALSE
+    /// sites. Handwritten SQL requires them by default, including through
+    /// generated relation filters that incorporate a row policy.
     original_sites: bool,
 }
 
@@ -1497,15 +1517,21 @@ fn sql_truth(
         (DatabaseBackend::Postgres, _) => {
             let (sql, values) = policy.flatten();
             binds.extend(values);
-            sql.wrapped("COALESCE(2 * ((", ")::integer), 1)")
+            if boolean {
+                sql.wrapped("COALESCE(2 * ((", ")::integer), 1)")
+            } else {
+                // Resolve untyped literals and parameters in Boolean context
+                // before converting the verdict to an integer.
+                sql.wrapped("COALESCE(2 * (NOT NOT (", "))::integer, 1)")
+            }
         }
         _ => {
             let (sql, values) = policy.flatten();
             binds.extend(values);
-            // SQLite accepts any value as a condition: a hand-written
-            // `flags & 4` is TRUE for 4. `NOT NOT` gives its truth as 0, 1
-            // or NULL in one evaluation. `AND`, `OR` and `NOT` already do.
-            if boolean || !matches!(policy, Policy::Sql { .. }) {
+            // A singleton AND or OR flattens to its operand in parentheses.
+            // SQLite treats a value such as `flags & 4` as a condition, so
+            // normalize it to 0, 1 or NULL before encoding the verdict.
+            if boolean {
                 sql.wrapped("COALESCE(2 * (", "), 1)")
             } else {
                 sql.wrapped("COALESCE(2 * (NOT NOT (", ")), 1)")
@@ -2953,6 +2979,7 @@ impl ReadPredicate {
         }
         Ok(Self {
             unbound: !bound,
+            original_sites: !filter.is_stable_for_closure(),
             ..Self::measured(
                 F::entity_type_id(),
                 B::DIALECT,
@@ -3234,29 +3261,28 @@ impl ReadPredicate {
     ///
     /// **Rendering.** A correlated scalar subquery, used wherever the policy
     /// clause is applied: reads, counts, aggregates, keyset and connection
-    /// pages, search and subscription delivery re-reads. A closure whose
-    /// target holds another closure writes that target once: the target's
-    /// truth is one number per row, evaluated over the governed row and the
-    /// reached rows from a single projection of the columns it reads. This
-    /// covers column comparisons and NULL tests, generated and hand-written
-    /// filters, relations (the greatest truth among the related rows) and
-    /// their `and`, `or` and `not`, so the rendered size grows by a constant
-    /// per nested closure. SQL Server has no boolean values and tests a
-    /// filter for TRUE and for FALSE, so a filter appears twice there. A
-    /// closure whose target holds no closure, a target that [`Self::not`]
-    /// would refuse, and a SQL Server target with a column name outside
-    /// ASCII or two column names that differ only by case keep the
-    /// original rendering, which tests the target separately for TRUE and
-    /// for FALSE, for the governed row and for the reached rows. SQLite and
-    /// PostgreSQL carry the truth in the recursive tuple so collation-equal
-    /// pointers with distinct truths are followed separately.
+    /// pages, search and subscription delivery re-reads. A stable target
+    /// that holds another closure can be written once: its verdict is
+    /// computed per governed or reached row from one projection of the
+    /// columns it reads. This covers built-in column comparisons and NULL
+    /// tests, stable filters, relations and their `and`, `or` and `not`.
+    /// Handwritten fragments keep separate TRUE and FALSE evaluation
+    /// sites unless the host supplies a stability guarantee via
+    /// [`ReadVisibilityFilter::is_stable_for_closure`]. That requirement
+    /// applies to fragments inside an inner closure, relation or generated
+    /// relation filter. Targets with unsupported negation or a deny fallback
+    /// also keep the original rendering. SQL Server tests scalar conditions
+    /// for TRUE and FALSE and requires projected column names to be ASCII
+    /// and distinct without regard to case. SQLite and PostgreSQL carry
+    /// the truth in the recursive tuple so collation-equal pointers with
+    /// distinct truths are followed separately.
     /// SQLite and PostgreSQL render a
     /// `WITH RECURSIVE` common table expression. SQL Server does not allow a
     /// common table expression inside a subquery, so there the walk is
     /// unrolled into a breadth-first search with one nested derived table and
     /// one correlated `OUTER APPLY` lookup per hop. Each level keeps only the
     /// distinct pointers reached so far.
-    /// Both forms admit the same rows. No backend evaluates the closure in
+    /// No backend evaluates the closure in
     /// memory or for the whole table. Other backends are refused.
     ///
     /// **Composition limits.** A closure inside a closure evaluates the inner
@@ -3308,12 +3334,8 @@ impl ReadPredicate {
         reserve(0, 0, overhead)?;
         let closures = target.cost.closures;
         let relation = Relation::new::<B, T, T>(keys, &target)?;
-        if relation
-            .predicate
-            .bind(READ_PREDICATE_ROW)
-            .trim()
-            .is_empty()
-        {
+        let target_sql = relation.predicate.bind(READ_PREDICATE_ROW);
+        if target_sql.trim().is_empty() {
             return Err(invalid());
         }
         let negation = match &target.negation {
@@ -3352,18 +3374,15 @@ impl ReadPredicate {
             }
         };
 
-        // A target that holds a closure is written once: its truth is one
-        // number per row, evaluated over the governed row and the reached
-        // rows from a single projection. Column tests, filters, hand-written
-        // fragments and closures are three-valued SQL; a relation gives the
-        // greatest truth among its related rows. A target that cannot be
-        // negated has no defined FALSE rows, and keeps the original
-        // rendering, as does one whose truth does not read the governed
-        // row through `row.column` alone.
+        // Share the nested target's verdict only when its SQL is stable and
+        // has defined FALSE rows. Keep match-nothing terms (including empty
+        // disjunctions) in the original rendering so negation still refuses
+        // them, and SQL Server never aggregates an empty VALUES list.
         if closures != 0
             && !target.original_sites
-            && (target.column_tests_only || !matches!(target.negation, Negation::Unsupported))
+            && !matches!(target.negation, Negation::Unsupported)
             && reserve(target.cost.bytes, 1, overhead).is_ok()
+            && !contains_match_nothing(&target_sql)
         {
             let logic = target
                 .logic
@@ -3435,9 +3454,9 @@ impl ReadPredicate {
         predicate.negation = negation;
         predicate.column_tests_only = target.column_tests_only;
         predicate.original_sites = target.original_sites;
-        // SQLite's standalone and fallback forms use the original
-        // rendering, including the target truth in the recursive tuple.
-        if dialect == DatabaseBackend::Sqlite {
+        // SQLite keeps the original standalone and fallback forms, and
+        // an unstable target keeps the original sites on every backend.
+        if dialect == DatabaseBackend::Sqlite || target.original_sites {
             return Ok(predicate);
         }
 
@@ -3456,12 +3475,17 @@ impl ReadPredicate {
                 (sql.wrapped(prefix, ", 1)"), values.clone())
             }
             _ if closures != 0 => return Ok(predicate),
-            _ if dialect == DatabaseBackend::Postgres && uses_native_truth => (
-                relation
-                    .predicate
-                    .wrapped("COALESCE(2 * ((", ")::integer), 1)"),
-                relation.values,
-            ),
+            _ if dialect == DatabaseBackend::Postgres && uses_native_truth => {
+                let mut values = Vec::new();
+                let sql = sql_truth(
+                    dialect,
+                    &target.policy,
+                    &cte,
+                    target.column_tests_only,
+                    &mut values,
+                );
+                (sql, values)
+            }
             _ if dialect == DatabaseBackend::Postgres => return Ok(predicate),
             _ => (legacy_truth, legacy_values),
         };
@@ -3680,6 +3704,7 @@ where
         return Err(invalid());
     }
     let mut policies = Vec::new();
+    let mut stable = true;
     for filter in alternatives {
         filter.validate().map_err(query_error)?;
         if filter.requires_in_memory_filtering(B::DIALECT) {
@@ -3690,6 +3715,7 @@ where
         if !bound {
             return Err(PolicySqlRefusal::UnboundColumn.into());
         }
+        stable &= filter.is_stable_for_closure();
         policies.push(policy.unwrap_or_else(|| Policy::sql("1 = 1")));
     }
     let mut policy = if policies.is_empty() {
@@ -3707,6 +3733,7 @@ where
             return Err(PolicySqlRefusal::UnboundColumn.into());
         }
         closures = closures.max(target.cost.closures);
+        stable &= !target.original_sites;
         policy = Policy::And(vec![policy, target.policy.clone()]);
     }
     let predicate = ReadPredicate::related::<B, S, T>(
@@ -3725,7 +3752,10 @@ where
     // The source keys refer to the governed row: the generated filter binds
     // them to the source table at the root of a statement, or to the row an
     // enclosing read predicate renders it for (#796).
-    let (clause, values) = predicate.policy.flatten();
+    let (mut clause, values) = predicate.policy.flatten();
+    // A generated filter can embed this clause under any Boolean operator.
+    // Preserve the provenance of every request-authorized SQL fragment.
+    clause.stable_relation_clause = stable;
     if values.len() > 512 {
         return Err(input_error());
     }

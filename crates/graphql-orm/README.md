@@ -10,8 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.238.0 writes the target of a nested closure read predicate once
-for filter, hand-written and relation targets.
+Version 0.238.0 shares the SQL of nested closure read predicates over stable
+filters and relations. Handwritten SQL shares evaluation sites only with an
+explicit host guarantee.
 [Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
 
 Version 0.235.0 preserves authorized direct queries for generated

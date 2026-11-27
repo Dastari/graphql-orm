@@ -378,24 +378,22 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
   search and subscription delivery re-reads. A closure whose target holds
-  another closure writes that target once (#785). The target's truth is one
-  number per row (FALSE, UNKNOWN or TRUE), evaluated over the governed row
-  and the reached rows from a single projection of the columns it reads.
-  This covers column comparisons and NULL tests, generated and hand-written
-  filters, relations and their `and`, `or` and `not`: `and` is the least
-  truth, `or` the greatest, and a relation is the greatest truth among its
-  related rows. So rendered SQL grows by one closure per nesting level. SQL
-  Server has no boolean values and tests a filter for TRUE and for FALSE,
-  so a filter appears twice there. SQLite and PostgreSQL carry the target's
-  truth in the recursive tuple. This keeps collation-equal pointers with
-  different truths distinct even when the pointer and key use different
-  collations (#876). The original rendering, with separate TRUE and FALSE
-  tests for the governed row and for the reached rows, remains for a
-  closure whose target holds no closure, for a target that `not()` would
-  refuse, and on SQL Server for a target that reads a column whose name is
-  not ASCII or two columns whose names differ only by case. Nested
-  closures get distinct names. The database evaluates the closure per row.
-  Unsupported backends are refused with
+  another closure can share stable target SQL (#785). It computes one
+  three-valued verdict per row from a projection of the columns the target
+  reads. This covers column comparisons and NULL tests, stable filters,
+  relations and their `and`, `or` and `not` combinations. A relation's
+  verdict is the greatest truth among its related rows. A handwritten
+  fragment keeps separate TRUE and FALSE evaluation sites by default,
+  including inside an inner closure or generated relation filter. A host
+  can opt in through `ReadVisibilityFilter::is_stable_for_closure` when the
+  SQL is stable and side-effect-free. A deny fallback or unsupported
+  negation also keeps the original rendering. SQL Server tests scalar
+  conditions for TRUE and FALSE and requires projected column names to be
+  ASCII and distinct without regard to case. SQLite and PostgreSQL carry
+  the target's truth in the recursive tuple, keeping collation-equal
+  pointers with distinct truths separate (#876). Nested closures get
+  distinct names. The database evaluates each closure per row. Unsupported
+  backends are refused with
   `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
