@@ -27,7 +27,7 @@ cd "${repository_root}"
 
 run_backup_postgres() {
   cargo test -p graphql-orm-backup --locked --no-default-features --features local,orm-postgres,canonical-journal-keys,graphql-orm/change-journal \
-    --test orm_016_postgres_conformance -- --include-ignored --test-threads=1
+    --test backup_postgres -- --include-ignored --test-threads=1
 }
 
 run_dependent_deletes() {

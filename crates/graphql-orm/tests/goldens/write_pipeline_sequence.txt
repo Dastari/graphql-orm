@@ -1,0 +1,1559 @@
+== create / Nothing
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred new
+data {"createSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Created new
+rows orders[new:west:n o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / Scope
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / Assurance
+assurance Mutation createSeqOrder order.assured
+data null
+error "additional authentication is required" path=[Field("createSeqOrder")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / Entity
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / EntityAtHook
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+deferred new
+data {"createSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Created new
+rows orders[new:west:n o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / ChildEntity
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred new
+data {"createSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Created new
+rows orders[new:west:n o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / RowWrite
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / RowReadWrite
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / Field
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+data null
+error "write denied for field id" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN","deniedWriteField":"id"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / HookBefore
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("createSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / HookAfter
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("createSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create / Transform
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+data null
+error "transform refused" path=[Field("createSeqOrder")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / Nothing
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+hook Before Created SeqLine table=seq_lines id=c1 changes=[id,order_id,note,tenant] before=false after=false field=createSeqLine
+  entity SeqLine Some("line.write") Write Repository hook_request=operator
+row-write SeqLine Some("line.write") GraphqlMutation line:c1 field=createSeqLine
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+hook After Created SeqLine table=seq_lines id=c1 changes=[id,order_id,note,tenant] before=false after=true field=createSeqLine
+  entity SeqLine Some("line.write") Write Repository hook_request=operator
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+hook Before Created SeqLine table=seq_lines id=c2 changes=[id,order_id,note,tenant] before=false after=false field=createSeqLine
+  entity SeqLine Some("line.write") Write Repository hook_request=operator
+row-write SeqLine Some("line.write") GraphqlMutation line:c2 field=createSeqLine
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+hook After Created SeqLine table=seq_lines id=c2 changes=[id,order_id,note,tenant] before=false after=true field=createSeqLine
+  entity SeqLine Some("line.write") Write Repository hook_request=operator
+deferred new
+deferred c1
+deferred c2
+data {"createSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Created new
+changed SeqLine Created c1
+changed SeqLine Created c2
+rows orders[new:west:n o1:west:- o2:west:kept o3:east:-] lines[c1:new:west:x:0 c2:new:west:-:0] devices[ack:mack:second d1:m1:first]
+== create with children / Scope
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / Assurance
+assurance Mutation createSeqOrder order.assured
+data null
+error "additional authentication is required" path=[Field("createSeqOrder")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / Entity
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / EntityAtHook
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / ChildEntity
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / RowWrite
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / RowReadWrite
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+data null
+error "forbidden" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / Field
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+data null
+error "write denied for field id" path=[Field("createSeqOrder")] extensions={"code":"FORBIDDEN","deniedWriteField":"id"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / HookBefore
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("createSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / HookAfter
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+field-write SeqOrder.id None record=- value=true field=createSeqOrder
+field-write SeqOrder.tenant None record=- value=true field=createSeqOrder
+field-write SeqOrder.note Some("guard") record=- value=true field=createSeqOrder
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+assurance Mutation createSeqLine line.assured
+entity SeqLine Some("line.write") Write GraphqlMutation field=createSeqLine
+transform create SeqLine GraphqlMutation existing=false field=createSeqLine
+field-write SeqLine.id None record=- value=true field=createSeqLine
+field-write SeqLine.orderId None record=- value=true field=createSeqLine
+field-write SeqLine.note Some("guard") record=- value=true field=createSeqLine
+field-write SeqLine.tenant None record=- value=true field=createSeqLine
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook Before Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=false field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:new field=createSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+hook After Created SeqOrder table=seq_orders id=new changes=[id,tenant,note] before=false after=true field=createSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("createSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== create with children / Transform
+assurance Mutation createSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=createSeqOrder
+transform create SeqOrder GraphqlMutation existing=false field=createSeqOrder
+data null
+error "transform refused" path=[Field("createSeqOrder")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Nothing
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"updateSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Updated o1
+rows orders[o1:west:changed o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Scope
+data null
+error "forbidden" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Assurance
+assurance Mutation updateSeqOrder order.assured
+data null
+error "additional authentication is required" path=[Field("updateSeqOrder")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Entity
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+data null
+error "forbidden" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / EntityAtHook
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+deferred o1
+data {"updateSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Updated o1
+rows orders[o1:west:changed o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / ChildEntity
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"updateSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Updated o1
+rows orders[o1:west:changed o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / RowWrite
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.read") Read GraphqlMutation field=updateSeqOrder
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=updateSeqOrder
+data null
+error "forbidden" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / RowReadWrite
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.read") Read GraphqlMutation field=updateSeqOrder
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Field
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+data null
+error "write denied for field note" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN","deniedWriteField":"note"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / HookBefore
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("updateSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / HookAfter
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("updateSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update / Transform
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrder
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrder
+data null
+error "transform refused" path=[Field("updateSeqOrder")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Nothing
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Scope
+data null
+error "forbidden" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Assurance
+assurance Mutation updateSeqOrder order.assured
+data null
+error "additional authentication is required" path=[Field("updateSeqOrder")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Entity
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+data null
+error "forbidden" path=[Field("updateSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / EntityAtHook
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / ChildEntity
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / RowWrite
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / RowReadWrite
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Field
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / HookBefore
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / HookAfter
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update missing / Transform
+assurance Mutation updateSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrder
+data {"updateSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Nothing
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o2 value=true field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"updateSeqOrders":{"affectedCount":2,"error":null,"success":true}}
+changed SeqOrder Updated o1
+changed SeqOrder Updated o2
+rows orders[o1:west:bulk o2:west:bulk o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Scope
+data null
+error "forbidden" path=[Field("updateSeqOrders")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Assurance
+assurance Mutation updateSeqOrders order.assured
+data null
+error "additional authentication is required" path=[Field("updateSeqOrders")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Entity
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+data {"updateSeqOrders":{"affectedCount":0,"error":"forbidden","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / EntityAtHook
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o2 value=true field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+deferred o1
+deferred o2
+data {"updateSeqOrders":{"affectedCount":2,"error":null,"success":true}}
+changed SeqOrder Updated o1
+changed SeqOrder Updated o2
+rows orders[o1:west:bulk o2:west:bulk o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / ChildEntity
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o2 value=true field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"updateSeqOrders":{"affectedCount":2,"error":null,"success":true}}
+changed SeqOrder Updated o1
+changed SeqOrder Updated o2
+rows orders[o1:west:bulk o2:west:bulk o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / RowWrite
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=updateSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=updateSeqOrders
+data {"updateSeqOrders":{"affectedCount":0,"error":"forbidden","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / RowReadWrite
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=updateSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=updateSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o2 field=updateSeqOrders
+data {"updateSeqOrders":{"affectedCount":0,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Field
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+data {"updateSeqOrders":{"affectedCount":0,"error":"write denied for field note","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / HookBefore
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o2 value=true field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data {"updateSeqOrders":{"affectedCount":0,"error":"hook refused","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / HookAfter
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o1 value=true field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+field-write SeqOrder.note Some("guard") record=order:o2 value=true field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook Before Updated SeqOrder table=seq_orders id=o2 changes=[note] before=true after=false field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+hook After Updated SeqOrder table=seq_orders id=o1 changes=[note] before=true after=true field=updateSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data {"updateSeqOrders":{"affectedCount":0,"error":"hook refused","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== update many / Transform
+assurance Mutation updateSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+field-read SeqOrder.tenant None record=- field=updateSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=updateSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=updateSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=updateSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=updateSeqOrders
+transform update SeqOrder GraphqlMutation existing=true field=updateSeqOrders
+data {"updateSeqOrders":{"affectedCount":0,"error":"transform refused","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Nothing
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"deleteSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Deleted o1
+rows orders[o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Scope
+data null
+error "forbidden" path=[Field("deleteSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Assurance
+assurance Mutation deleteSeqOrder order.assured
+data null
+error "additional authentication is required" path=[Field("deleteSeqOrder")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Entity
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+data null
+error "forbidden" path=[Field("deleteSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / EntityAtHook
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+deferred o1
+data {"deleteSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Deleted o1
+rows orders[o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / ChildEntity
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"deleteSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Deleted o1
+rows orders[o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / RowWrite
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.read") Read GraphqlMutation field=deleteSeqOrder
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=deleteSeqOrder
+data null
+error "forbidden" path=[Field("deleteSeqOrder")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / RowReadWrite
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.read") Read GraphqlMutation field=deleteSeqOrder
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=deleteSeqOrder
+data {"deleteSeqOrder":{"error":"Entity not found","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Field
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"deleteSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Deleted o1
+rows orders[o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / HookBefore
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("deleteSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / HookAfter
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("deleteSeqOrder")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete / Transform
+assurance Mutation deleteSeqOrder order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrder
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrder
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrder
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrder
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+data {"deleteSeqOrder":{"error":null,"success":true}}
+changed SeqOrder Deleted o1
+rows orders[o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Nothing
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"deleteSeqOrders":{"deletedCount":2,"error":null,"success":true}}
+changed SeqOrder Deleted o1
+changed SeqOrder Deleted o2
+rows orders[o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Scope
+data null
+error "forbidden" path=[Field("deleteSeqOrders")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Assurance
+assurance Mutation deleteSeqOrders order.assured
+data null
+error "additional authentication is required" path=[Field("deleteSeqOrders")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Entity
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"forbidden","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / EntityAtHook
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=none
+deferred o1
+deferred o2
+data {"deleteSeqOrders":{"deletedCount":2,"error":null,"success":true}}
+changed SeqOrder Deleted o1
+changed SeqOrder Deleted o2
+rows orders[o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / ChildEntity
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"deleteSeqOrders":{"deletedCount":2,"error":null,"success":true}}
+changed SeqOrder Deleted o1
+changed SeqOrder Deleted o2
+rows orders[o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / RowWrite
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=deleteSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"forbidden","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / RowReadWrite
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=deleteSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.read") Read GraphqlMutation field=deleteSeqOrders
+row-read SeqOrder Some("order.read") GraphqlMutation order:o2 field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Field
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"deleteSeqOrders":{"deletedCount":2,"error":null,"success":true}}
+changed SeqOrder Deleted o1
+changed SeqOrder Deleted o2
+rows orders[o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / HookBefore
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data {"deleteSeqOrders":{"deletedCount":0,"error":"hook refused","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / HookAfter
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+data {"deleteSeqOrders":{"deletedCount":0,"error":"hook refused","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many / Transform
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+field-read SeqOrder.tenant None record=- field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+row-prefilter SeqOrder Some("order.write") GraphqlMutation field=deleteSeqOrders
+row-visibility SeqOrder Some("order.read") GraphqlMutation field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o1 field=deleteSeqOrders
+row-write SeqOrder Some("order.write") GraphqlMutation order:o2 field=deleteSeqOrders
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook Before Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o1 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+hook After Deleted SeqOrder table=seq_orders id=o2 changes=[] before=true after=false field=deleteSeqOrders
+  entity SeqOrder Some("order.write") Write Repository hook_request=operator
+deferred o1
+deferred o2
+data {"deleteSeqOrders":{"deletedCount":2,"error":null,"success":true}}
+changed SeqOrder Deleted o1
+changed SeqOrder Deleted o2
+rows orders[o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Nothing
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Scope
+data null
+error "forbidden" path=[Field("deleteSeqOrders")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Assurance
+assurance Mutation deleteSeqOrders order.assured
+data null
+error "additional authentication is required" path=[Field("deleteSeqOrders")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Entity
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"forbidden","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / EntityAtHook
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / ChildEntity
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / RowWrite
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / RowReadWrite
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Field
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / HookBefore
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / HookAfter
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== delete many without a filter / Transform
+assurance Mutation deleteSeqOrders order.assured
+entity SeqOrder Some("order.write") Write GraphqlMutation field=deleteSeqOrders
+data {"deleteSeqOrders":{"deletedCount":0,"error":"Where filter is required for bulk delete and must not be empty","success":false}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / Nothing
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+deferred d9
+data {"upsertSeqDevice":{"action":"CREATED","error":null,"success":true}}
+changed SeqDevice Created d9
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first d9:m9:fresh]
+== upsert new / Scope
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / Assurance
+assurance Mutation upsertSeqDevice device.assured
+data null
+error "additional authentication is required" path=[Field("upsertSeqDevice")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / Entity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / EntityAtHook
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=none
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=none
+deferred d9
+data {"upsertSeqDevice":{"action":"CREATED","error":null,"success":true}}
+changed SeqDevice Created d9
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first d9:m9:fresh]
+== upsert new / ChildEntity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+deferred d9
+data {"upsertSeqDevice":{"action":"CREATED","error":null,"success":true}}
+changed SeqDevice Created d9
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first d9:m9:fresh]
+== upsert new / RowWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / RowReadWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / Field
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+data null
+error "write denied for field id" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN","deniedWriteField":"id"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / HookBefore
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("upsertSeqDevice")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / HookAfter
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+field-write SeqDevice.id None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.mac None record=- value=true field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=- value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d9 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Created SeqDevice table=seq_devices id=d9 changes=[id,mac,name] before=false after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("upsertSeqDevice")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert new / Transform
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+data null
+error "transform refused" path=[Field("upsertSeqDevice")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / Nothing
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+deferred d1
+data {"upsertSeqDevice":{"action":"UPDATED","error":null,"success":true}}
+changed SeqDevice Updated d1
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:renamed]
+== upsert existing / Scope
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / Assurance
+assurance Mutation upsertSeqDevice device.assured
+data null
+error "additional authentication is required" path=[Field("upsertSeqDevice")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / Entity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / EntityAtHook
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=none
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=none
+deferred d1
+data {"upsertSeqDevice":{"action":"UPDATED","error":null,"success":true}}
+changed SeqDevice Updated d1
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:renamed]
+== upsert existing / ChildEntity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+deferred d1
+data {"upsertSeqDevice":{"action":"UPDATED","error":null,"success":true}}
+changed SeqDevice Updated d1
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:renamed]
+== upsert existing / RowWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / RowReadWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / Field
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+data null
+error "write denied for field name" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN","deniedWriteField":"name"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / HookBefore
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("upsertSeqDevice")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / HookAfter
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:d1 value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+row-write SeqDevice Some("device.write") GraphqlMutation device:d1 field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook After Updated SeqDevice table=seq_devices id=d1 changes=[name] before=true after=true field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("upsertSeqDevice")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert existing / Transform
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+data null
+error "transform refused" path=[Field("upsertSeqDevice")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Nothing
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=ack changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+  acknowledge
+data {"upsertSeqDevice":{"action":null,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Scope
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Assurance
+assurance Mutation upsertSeqDevice device.assured
+data null
+error "additional authentication is required" path=[Field("upsertSeqDevice")] extensions={"code":"STEP_UP_REQUIRED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Entity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / EntityAtHook
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=ack changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=none
+  acknowledge
+data {"upsertSeqDevice":{"action":null,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / ChildEntity
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=ack changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+  acknowledge
+data {"upsertSeqDevice":{"action":null,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / RowWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / RowReadWrite
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+data null
+error "forbidden" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Field
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+data null
+error "write denied for field name" path=[Field("upsertSeqDevice")] extensions={"code":"FORBIDDEN","deniedWriteField":"name"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / HookBefore
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=ack changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+data null
+error "hook refused" path=[Field("upsertSeqDevice")] extensions={"code":"HOOK_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / HookAfter
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+row-write SeqDevice Some("device.write") GraphqlMutation device:ack field=upsertSeqDevice
+field-write SeqDevice.name Some("guard") record=device:ack value=true field=upsertSeqDevice
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+hook Before Updated SeqDevice table=seq_devices id=ack changes=[name] before=true after=false field=upsertSeqDevice
+  entity SeqDevice Some("device.write") Write Repository hook_request=operator
+  acknowledge
+data {"upsertSeqDevice":{"action":null,"error":null,"success":true}}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]
+== upsert acknowledged / Transform
+assurance Mutation upsertSeqDevice device.assured
+entity SeqDevice Some("device.write") Write GraphqlMutation field=upsertSeqDevice
+transform upsert SeqDevice GraphqlMutation existing=false field=upsertSeqDevice
+data null
+error "transform refused" path=[Field("upsertSeqDevice")] extensions={"code":"TRANSFORM_REFUSED"}
+rows orders[o1:west:- o2:west:kept o3:east:-] lines[] devices[ack:mack:second d1:m1:first]

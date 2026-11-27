@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-storage
 
+Version 0.20.0 gives the discarded-stream warning from
+`StorageByteStream::into_inner` an explicit message for Rust 1.99 Clippy
+compatibility.
+
+Version 0.19.0 groups integration tests by lane. See the
+[migration guide](MIGRATION.md#0183-to-0190-integration-test-binaries).
+
 Version 0.18.2 adds a seeded property suite for blob key validation: each validator
 matches an independent model of its documented contract, accepted keys stay below their
 root, and the local provider round-trips them without writing outside its root
@@ -131,6 +138,9 @@ SMB and Azure return `UnsupportedOperation`. `StorageError` gains the
 Version 0.7.5 retains the SMB 0.10.2 dependency family with a narrow,
 owner-local directory-stream backport. See the [native SMB reference](docs/native-smb.md#client-selection)
 and [migration guide](MIGRATION.md) before updating a consuming lockfile.
+
+The library forbids unsafe Rust except for the Windows local provider’s
+atomic no-replace rename.
 
 ## Install
 

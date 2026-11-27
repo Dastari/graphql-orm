@@ -79,6 +79,8 @@ jobs:
         run: python3 scripts/check-documentation.py --base "${BASE_SHA}"
       - name: Check generated workspace inventory
         run: python3 scripts/generate-workspace-inventory.py --check
+      - name: Check dependency stacks
+        run: python3 scripts/check-dependency-stacks.py
       - name: Check Git-only release metadata
         run: |
           python3 scripts/check-release-state.py
@@ -264,6 +266,12 @@ jobs:
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
           done
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --test zero_public_write_inputs_backends
+      - name: Verify generated default sorts on native backends
+        run: |
+          for backend in postgres mssql; do
+            cargo test -p graphql-orm --locked --no-default-features --features "$backend" --test query_ir --test runtime_default_sort
+          done
+          cargo test -p graphql-orm --locked --no-default-features --features mssql --test compile_ui default_sort_ui::
       - name: Verify nested create on owned PostgreSQL
         run: |
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test nested_create -- --include-ignored --test-threads=1

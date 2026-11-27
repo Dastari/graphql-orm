@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+/// Failures reported by backup, restore, verification, and retention operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BackupError {
@@ -20,25 +21,46 @@ pub enum BackupError {
         source: Box<BackupError>,
     },
 
+    /// The selected storage provider cannot be used for backup.
     #[error("unsupported backup provider: {provider}")]
-    UnsupportedProvider { provider: String },
+    UnsupportedProvider {
+        /// Name of the selected provider.
+        provider: String,
+    },
 
+    /// A key cannot address a blob within the repository.
     #[error("invalid backup repository key: {key}")]
-    InvalidRepositoryKey { key: String },
+    InvalidRepositoryKey {
+        /// Rejected key.
+        key: String,
+    },
 
+    /// The local repository root is missing or cannot be used as a directory.
     #[error("invalid backup repository root: {path:?}")]
-    InvalidRepositoryRoot { path: PathBuf },
+    InvalidRepositoryRoot {
+        /// Rejected root path.
+        path: PathBuf,
+    },
 
+    /// A requested blob could not be found.
     #[error("backup blob is missing: {key}")]
-    MissingBlob { key: String },
+    MissingBlob {
+        /// Key of the missing blob.
+        key: String,
+    },
 
+    /// A computed checksum differs from the expected checksum.
     #[error("checksum mismatch for {key}: expected {expected}, actual {actual}")]
     ChecksumMismatch {
+        /// Key or diagnostic identifier of the checked content.
         key: String,
+        /// Checksum recorded for the content.
         expected: String,
+        /// Checksum computed from the content read.
         actual: String,
     },
 
+    /// A restore that requires an empty database found existing data.
     #[error("restore target is not empty")]
     RestoreTargetNotEmpty,
 
@@ -49,12 +71,20 @@ pub enum BackupError {
 
     /// Host key material was rejected.
     #[error("invalid manifest key: {reason}")]
-    InvalidManifestKey { reason: String },
+    InvalidManifestKey {
+        /// Validation rule that rejected the key material.
+        reason: String,
+    },
 
     /// A manifest's seal is missing, malformed, made with an unknown key, or
     /// does not match its contents.
     #[error("manifest authentication failed for {key}: {reason}")]
-    ManifestAuthenticationFailed { key: String, reason: String },
+    ManifestAuthenticationFailed {
+        /// Repository key of the manifest.
+        key: String,
+        /// Reason the seal could not be verified.
+        reason: String,
+    },
 
     /// The host's snapshot records do not admit this snapshot: it is on the
     /// revocation list, or missing from the known-snapshot list, of the
@@ -71,43 +101,70 @@ pub enum BackupError {
     /// An unauthenticated legacy manifest was refused by the configured
     /// [`crate::LegacyManifestPolicy`].
     #[error("unauthenticated legacy manifest for snapshot {snapshot_id} refused by policy")]
-    LegacyManifestRefused { snapshot_id: uuid::Uuid },
+    LegacyManifestRefused {
+        /// Snapshot refused by the policy.
+        snapshot_id: uuid::Uuid,
+    },
 
+    /// The manifest uses a version outside the supported snapshot formats.
     #[error("unsupported manifest format version {format_version} at {key}")]
-    UnsupportedManifestFormat { key: String, format_version: u32 },
+    UnsupportedManifestFormat {
+        /// Repository key of the manifest.
+        key: String,
+        /// Format version declared in the manifest.
+        format_version: u32,
+    },
 
     /// A manifest names a different snapshot than the path it was read from.
     #[error("manifest at {key} names snapshot {actual}, expected {expected}")]
     ManifestSnapshotMismatch {
+        /// Repository key used to load the manifest.
         key: String,
+        /// Snapshot ID derived from the repository key.
         expected: uuid::Uuid,
+        /// Snapshot ID declared inside the manifest.
         actual: uuid::Uuid,
     },
 
     /// A manifest entry points outside the namespace it owns.
     #[error("invalid manifest entry in snapshot {snapshot_id}: {reason}")]
     InvalidManifestEntry {
+        /// Snapshot containing the rejected entry.
         snapshot_id: uuid::Uuid,
+        /// Entry validation failure.
         reason: String,
     },
 
     /// An object's live-store key is not a valid key, or is outside the
     /// sink's [`crate::RestoreKeyScope`].
     #[error("restore target key {storage_key} rejected: {reason}")]
-    RestoreTargetRejected { storage_key: String, reason: String },
+    RestoreTargetRejected {
+        /// Rejected live-store key.
+        storage_key: String,
+        /// Key validation or scope failure.
+        reason: String,
+    },
 
     /// The live store already holds different content at an object's key.
     /// Object restore never overwrites it.
     #[error("restore target already holds different content at {storage_key}")]
-    RestoreObjectConflict { storage_key: String },
+    RestoreObjectConflict {
+        /// Live-store key holding the conflicting object.
+        storage_key: String,
+    },
 
+    /// The snapshot's database backend or schema identity differs from the target.
     #[error(
         "restore schema is incompatible: backup backend/hash {backup_backend}/{backup_schema_hash}, target backend/hash {target_backend}/{target_schema_hash}"
     )]
     RestoreSchemaMismatch {
+        /// Backend recorded in the snapshot.
         backup_backend: String,
+        /// Schema hash recorded in the snapshot.
         backup_schema_hash: String,
+        /// Backend reported by the restore target.
         target_backend: String,
+        /// Schema hash computed for the restore target.
         target_schema_hash: String,
     },
 
@@ -122,22 +179,37 @@ pub enum BackupError {
         column_name: String,
     },
 
+    /// A column policy override failed validation.
     #[error("invalid column backup policy override for {table_name}.{column_name}: {reason}")]
     InvalidColumnBackupPolicyOverride {
+        /// Table named by the override.
         table_name: String,
+        /// Column named by the override.
         column_name: String,
+        /// Reason the override was refused.
         reason: String,
     },
 
+    /// The requested restore inputs violate the adapter's restore contract.
     #[error("invalid restore context: {reason}")]
-    InvalidRestoreContext { reason: String },
+    InvalidRestoreContext {
+        /// Explanation of the inconsistent inputs.
+        reason: String,
+    },
 
     /// Repository enumeration omitted a parent or changed between reads.
     #[error("incomplete repository listing: {reason}")]
-    IncompleteRepositoryListing { reason: String },
+    IncompleteRepositoryListing {
+        /// Inconsistency detected during enumeration.
+        reason: String,
+    },
 
+    /// The snapshots do not form a valid chain from a full or synthetic-full base.
     #[error("invalid manifest chain: {reason}")]
-    InvalidManifestChain { reason: String },
+    InvalidManifestChain {
+        /// Chain invariant that failed validation.
+        reason: String,
+    },
 
     /// Another run holds the repository lock. `owner` is its owner record, or
     /// `None` when the lock has no readable record (for example a lock written
@@ -145,7 +217,9 @@ pub enum BackupError {
     /// [`crate::break_repository_lock`].
     #[error("backup repository is locked by {lock_key}{}", describe_owner(.owner.as_deref()))]
     RepositoryLocked {
+        /// Key at which the existing lock was found.
         lock_key: String,
+        /// Current owner record, when readable.
         owner: Option<Box<crate::RepositoryLockOwner>>,
     },
 
@@ -153,7 +227,9 @@ pub enum BackupError {
     /// in place. An operator broke the lock, or the record was replaced.
     #[error("repository lock {lock_key} is not held by run {run_id}; it was left in place")]
     RepositoryLockNotHeld {
+        /// Key at which the lock was expected.
         lock_key: String,
+        /// Run that attempted to release the lock.
         run_id: uuid::Uuid,
         /// Record found at the lock key, if one was readable.
         found: Option<Box<crate::RepositoryLockOwner>>,
@@ -161,11 +237,19 @@ pub enum BackupError {
 
     /// Lock options were rejected before any repository write.
     #[error("invalid repository lock options: {reason}")]
-    InvalidRepositoryLockOptions { reason: String },
+    InvalidRepositoryLockOptions {
+        /// Lock option validation failure.
+        reason: String,
+    },
 
     /// [`crate::break_repository_lock`] refused to remove a lock.
     #[error("refusing to break repository lock {lock_key}: {reason}")]
-    BreakLockRefused { lock_key: String, reason: String },
+    BreakLockRefused {
+        /// Key of the lock the operator requested to break.
+        lock_key: String,
+        /// Reason the lock was left in place.
+        reason: String,
+    },
 
     /// The operation completed, but releasing the repository lock failed, so
     /// the repository may still be locked by `run_id`.
@@ -176,9 +260,13 @@ pub enum BackupError {
         "operation completed but repository lock {lock_key} held by run {run_id} was not released"
     )]
     LockReleaseFailed {
+        /// Key of the lock whose release failed.
         lock_key: String,
+        /// Run whose lock may still be held.
         run_id: uuid::Uuid,
+        /// Snapshot sealed by the completed operation, if it created one.
         committed_snapshot_id: Option<uuid::Uuid>,
+        /// Error reported while releasing the lock.
         #[source]
         source: Box<BackupError>,
     },
@@ -196,10 +284,14 @@ pub enum BackupError {
          confirm no writer is running, then break the lock for run {run_id}"
     )]
     LockNotReleased {
+        /// Key of the lock whose release failed.
         lock_key: String,
+        /// Run whose lock may still be held.
         run_id: uuid::Uuid,
+        /// Failure that stopped the operation.
         #[source]
         operation: Box<BackupError>,
+        /// Additional failure encountered while releasing the lock.
         release: Box<BackupError>,
     },
 
@@ -211,11 +303,17 @@ pub enum BackupError {
     /// A backup or compaction named a snapshot id that the repository already
     /// uses. Nothing was written.
     #[error("snapshot {snapshot_id} already exists; snapshots are never overwritten")]
-    SnapshotExists { snapshot_id: uuid::Uuid },
+    SnapshotExists {
+        /// Snapshot ID whose repository namespace is already in use.
+        snapshot_id: uuid::Uuid,
+    },
 
     /// A retention policy would delete every snapshot, or is otherwise unsafe.
     #[error("invalid retention policy: {reason}")]
-    InvalidRetentionPolicy { reason: String },
+    InvalidRetentionPolicy {
+        /// Retention rule or deletion precondition that failed.
+        reason: String,
+    },
 
     /// A backup payload would exceed a limit that restoring it enforces.
     /// The snapshot was not sealed.
@@ -227,25 +325,34 @@ pub enum BackupError {
         payload: String,
         /// Limit that would be exceeded.
         limit: crate::BackupCapacityLimitKind,
+        /// Configured maximum in bytes.
         limit_bytes: u64,
         /// Bytes observed when the limit was hit; may stop short of the full size.
         observed_bytes: u64,
     },
 
+    /// A payload could not be compressed or decompressed.
     #[error("backup payload compression error")]
     Compression {
+        /// Error from the codec or its reader or writer.
         #[source]
         source: std::io::Error,
     },
 
+    /// The storage provider returned an error.
     #[error("backup storage error")]
     Storage {
+        /// Provider error returned by the storage crate.
         #[source]
         source: graphql_orm_storage::StorageError,
     },
 
+    /// The configured adapter or repository lacks a required capability.
     #[error("unsupported operation: {operation}")]
-    UnsupportedOperation { operation: String },
+    UnsupportedOperation {
+        /// Name or description of the unavailable operation.
+        operation: String,
+    },
 
     /// Another product owns backup and restore for this database.
     #[cfg(feature = "orm")]
@@ -254,15 +361,23 @@ pub enum BackupError {
         #[from] graphql_orm::graphql::orm::BackupRestoreExternallyManaged,
     ),
 
+    /// The database adapter could not complete its part of the operation.
     #[error("database adapter error: {message}")]
-    Database { message: String },
+    Database {
+        /// Diagnostic returned by the adapter.
+        message: String,
+    },
 
+    /// A JSON manifest or payload could not be encoded or decoded.
     #[error("serialization error")]
     Serialization(#[from] serde_json::Error),
 
+    /// A local file-system operation failed.
     #[error("backup io error at {path:?}")]
     Io {
+        /// Path associated with the failed operation.
         path: PathBuf,
+        /// Underlying I/O error.
         #[source]
         source: std::io::Error,
     },

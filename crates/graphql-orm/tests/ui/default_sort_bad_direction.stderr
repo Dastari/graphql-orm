@@ -1,0 +1,5 @@
+error: default_sort direction `sideways` must be ASC or DESC
+ --> tests/ui/default_sort_bad_direction.rs:4:75
+  |
+4 | #[repository_entity(backend = "sqlite", table = "records", default_sort = "id sideways")]
+  |                                                                           ^^^^^^^^^^^^^

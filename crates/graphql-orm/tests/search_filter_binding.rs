@@ -22,7 +22,7 @@ use graphql_orm::prelude::*;
 // The native helper normally uses the alias `s`.
 #[cfg_attr(
     not(feature = "mssql"),
-    graphql_entity(table = "s", auth = "none", default_sort = "__gom_search_pk + 0 DESC")
+    graphql_entity(table = "s", auth = "none", default_sort = "s.__gom_search_pk DESC")
 )]
 #[cfg_attr(
     feature = "mssql",

@@ -22,6 +22,9 @@ engine, ORM, database, URL parsing, DNS/network I/O, credential, deployment
 override, or application type belongs here. Endpoint strings are inert
 advertisements; a router owns SSRF, DNS, credential, and network policy.
 
+Workspace lints forbid unsafe Rust in this crate. The library requires
+documentation for its public API.
+
 ## Install
 
 Find the package manifest in the

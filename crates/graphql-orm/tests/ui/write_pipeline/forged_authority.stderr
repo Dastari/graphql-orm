@@ -1,0 +1,11 @@
+error[E0451]: field `_admitted` of struct `graphql_orm::prelude::GeneratedWriteRequest` is private
+  --> tests/ui/write_pipeline/forged_authority.rs:14:44
+   |
+14 |     let _request = GeneratedWriteRequest { _admitted: () };
+   |                                            ^^^^^^^^^ private field
+
+error[E0451]: field `entity` of struct `graphql_orm::prelude::GeneratedWriteAuthority` is private
+  --> tests/ui/write_pipeline/forged_authority.rs:15:48
+   |
+15 |     let _authority = GeneratedWriteAuthority { entity };
+   |                                                ^^^^^^ private field
