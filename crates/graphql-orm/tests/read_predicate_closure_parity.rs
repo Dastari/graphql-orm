@@ -301,9 +301,9 @@ impl Target {
             Below(value) => score(ReadPredicateOp::Lt, "<", *value),
             ScoreIsNull if legacy => closure_legacy::null_test::<B, Node>("score", true),
             ScoreIsNull => ReadPredicate::is_null::<B, Node>("score").unwrap(),
-            Written(target) => original(
-                ReadPredicate::from_filter::<B, _>(&Fragment(target.fragment())).unwrap(),
-            ),
+            Written(target) => {
+                original(ReadPredicate::from_filter::<B, _>(&Fragment(target.fragment())).unwrap())
+            }
             #[cfg(feature = "sqlite")]
             Target::ScoreBit => {
                 original(ReadPredicate::from_filter::<B, _>(&Fragment(self.fragment())).unwrap())
@@ -653,7 +653,8 @@ fn target_shape_cases() -> Vec<(String, Target)> {
     let mut cases = Vec::new();
     for outer in [Any, All] {
         for inner in [Any, All] {
-            let walk = |keys, target, depth| Box::new(Closure(inner, keys, Box::new(target), depth));
+            let walk =
+                |keys, target, depth| Box::new(Closure(inner, keys, Box::new(target), depth));
             let written = |target| Written(Box::new(target));
             let related = |keys, target| Box::new(Related(keys, target));
             let shapes = [
@@ -675,11 +676,7 @@ fn target_shape_cases() -> Vec<(String, Target)> {
                 (
                     "not walk over not written",
                     Keys::Parent,
-                    Not(walk(
-                        Keys::Parent,
-                        Not(Box::new(written(Below(5)))),
-                        2,
-                    )),
+                    Not(walk(Keys::Parent, Not(Box::new(written(Below(5)))), 2)),
                 ),
                 // A relation around the inner closure: its truth is
                 // aggregated over the related rows.

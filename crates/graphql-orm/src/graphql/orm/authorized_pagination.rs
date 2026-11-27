@@ -1469,7 +1469,8 @@ fn extreme_truth(
         (_, false) => "MAX",
     };
     let (left, right) = truths.split_at(truths.len() / 2);
-    let mut sql = extreme_truth(dialect, prefix, left, least).wrapped(&format!("{function}("), ", ");
+    let mut sql =
+        extreme_truth(dialect, prefix, left, least).wrapped(&format!("{function}("), ", ");
     sql.push(&extreme_truth(dialect, prefix, right, least));
     sql.push_str(")");
     sql
