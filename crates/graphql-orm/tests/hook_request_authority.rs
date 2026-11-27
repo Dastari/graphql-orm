@@ -76,7 +76,7 @@ impl HostMutation {
             .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
         let admission = match admitted.as_deref() {
             Some("HookOrder") => {
-                let admission = __admit_generated_write_request::<HookOrder, Sqlite>(
+                let admission = __admit_generated_write_request::<HookOrder>(
                     ctx,
                     GeneratedWriteKind::Delete,
                     &[],
@@ -95,7 +95,7 @@ impl HostMutation {
                 Some(admission)
             }
             Some(_) => {
-                let admission = __admit_generated_write_request::<HookLine, Sqlite>(
+                let admission = __admit_generated_write_request::<HookLine>(
                     ctx,
                     GeneratedWriteKind::Delete,
                     &[],

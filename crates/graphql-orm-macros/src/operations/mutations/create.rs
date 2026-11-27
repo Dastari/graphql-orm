@@ -118,17 +118,12 @@ pub(in crate::operations) fn create(
     };
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit_parent = admit_request(
-        struct_name,
-        backend_marker,
-        "Create",
-        create_scope_arguments,
-    );
+    let admit_parent = admit_request(struct_name, "Create", create_scope_arguments);
     // A child row is admitted through its parent's admission, under its own
     // field context, which carries the parent's request and database. It
     // enforces its entity's own create root.
     let admit_child = {
-        let admit_request = admit_nested_create_request(struct_name, backend_marker);
+        let admit_request = admit_nested_create_request(struct_name);
         quote! {
             #entity
             #admit_request

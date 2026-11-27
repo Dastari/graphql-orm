@@ -21,18 +21,17 @@ pub(super) fn write_entity(struct_name: &syn::Ident) -> TokenStream {
 
 /// Bind `__gom_request`: request admission of the operation `kind` (a
 /// `GeneratedWriteKind` variant) of the entity. The runtime reads the
-/// authentication mode, the scope declarations and the operation's
-/// coordinate from the entity's `GeneratedWriteConfig`; `scope_arguments` are
+/// backend, the authentication mode, the scope declarations and the
+/// operation's coordinate from the entity's `GeneratedWriteConfig`; `scope_arguments` are
 /// the request's values of the scalar arguments a scope template names.
 pub(super) fn admit_request(
     struct_name: &syn::Ident,
-    backend_marker: &TokenStream,
     kind: &str,
     scope_arguments: &TokenStream,
 ) -> TokenStream {
     let kind = format_ident!("{}", kind);
     quote! {
-        let __gom_request = ::graphql_orm::graphql::orm::__admit_generated_write_request::<#struct_name, #backend_marker>(
+        let __gom_request = ::graphql_orm::graphql::orm::__admit_generated_write_request::<#struct_name>(
             ctx,
             ::graphql_orm::graphql::orm::GeneratedWriteKind::#kind,
             #scope_arguments,
@@ -43,12 +42,9 @@ pub(super) fn admit_request(
 /// Bind `__gom_request`: request admission of a nested child row's create,
 /// through its parent's admission (`__gom_parent`), whose invocation it
 /// inherits.
-pub(super) fn admit_nested_create_request(
-    struct_name: &syn::Ident,
-    backend_marker: &TokenStream,
-) -> TokenStream {
+pub(super) fn admit_nested_create_request(struct_name: &syn::Ident) -> TokenStream {
     quote! {
-        let __gom_request = ::graphql_orm::graphql::orm::__admit_generated_nested_create_request::<#struct_name, #backend_marker>(
+        let __gom_request = ::graphql_orm::graphql::orm::__admit_generated_nested_create_request::<#struct_name>(
             ctx,
             __gom_parent,
         )?;

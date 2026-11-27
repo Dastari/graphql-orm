@@ -18,14 +18,15 @@ repository API, `Database::transaction` and
 checks of a generated GraphQL write, their order, the refusals, the SDL and
 the catalogues are unchanged (#921).
 
-The hidden write pipeline now reads a generated write's authentication
-mode, scope declarations and assurance coordinate from the entity's generated
-configuration. It issues the `GeneratedWriteAuthority` only when the
-admission the operation needs is complete, which for an update, a delete, an
-upsert and a bulk write means after target admission, which the pipeline runs
-itself, once per admission. It binds the authority to one request and
-invocation, one operation, one `Database` handle, one transaction and the
-rows that were admitted.
+The hidden write pipeline now reads a generated write's backend,
+authentication mode, scope declarations and assurance coordinate from the
+entity's generated configuration. The pipeline issues
+`GeneratedWriteAuthority` after entity admission for creates and after target
+admission for updates, deletes, upserts and bulk writes. The pipeline runs
+target admission once per request admission. It binds the authority to one
+request and invocation, one operation, one `Database` handle, one transaction and the
+rows that were admitted. In an upsert's create branch, both hook events must
+carry the same conflict-key columns and values used in the locked lookup.
 
 Two details of generated mutations change in narrow cases:
 
@@ -46,10 +47,10 @@ Two details of generated mutations change in narrow cases:
 pipeline functions directly, against their documentation. Their signatures
 changed, so that code no longer compiles:
 
-- `__admit_generated_write_request` takes a `GeneratedWriteKind` and the
-  scope template argument values. It no longer takes an authentication mode,
-  a scope closure or an assurance coordinate, and the request it returns is
-  typed by its backend.
+- `__admit_generated_write_request` takes an entity type,
+  a `GeneratedWriteKind` and the scope template argument values. The request
+  it returns is typed by the entity's backend. Authentication mode, scope
+  declarations and the assurance coordinate come from that entity.
 - `GeneratedWriteEntity::new` is replaced by `GeneratedWriteEntity::of::<T>()`.
 - `__admit_entity` and `__admit_entity_bulk` take no entity and no backend,
   and `__admit_entity_on` is removed. A nested child is admitted through its

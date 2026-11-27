@@ -350,10 +350,11 @@ type has no public constructor: only the pipeline's own admission produces
 one.
 
 - **Admission is derived from the entity.** Request admission is told which
-  entity, which operation (create, update, bulk update, delete, bulk delete
-  or upsert) and which backend. It reads the authentication mode, the scope
-  declarations and the operation's coordinate from the configuration
-  `GraphQLOperations` generates for that entity:
+  entity and which operation (create, update, bulk update, delete, bulk
+  delete or upsert). It reads the backend, the authentication mode, the
+  scope declarations and the operation's coordinate from the configuration
+  `GraphQLOperations` generates for that entity, once. An upsert is admitted
+  only for an entity that generates the upsert root:
   - the scope declarations, fixed scopes or scope templates, come from the
     configuration. The values a template's placeholders take are the
     request's scalar arguments, which the caller supplies, because only the
@@ -361,8 +362,9 @@ one.
   - the assurance requirement is the one declared for the operation's own
     root field, whatever field is being resolved. A resolver that is not the
     operation's root cannot substitute its own field's requirement;
-  - the admitted request is typed by the backend whose RLS request context
-    was checked, and entity admission runs on that backend's `Database`.
+  - the backend is the entity's own. The RLS request context is checked for
+    it, the admitted request is typed by it, and entity admission, target
+    admission and an upsert's lookup run on that backend's `Database`.
 - **The authority is issued when admission is complete.** A create has no
   target, so entity admission issues it. For an update, a delete, an upsert
   and a bulk write, target admission issues it. A target that is absent or
@@ -370,9 +372,10 @@ one.
   `dependent_deletes` root issue nothing.
 - **Target admission is the pipeline's, once.** The pipeline reads the target
   itself: it locks the row of a single-row write, selects the rows of a bulk
-  write, and runs the locked lookup of an upsert's conflict key. It does not
-  take a row or a lookup result from its caller. An admission admits a
-  target once, whatever the attempt finds. The attempt is claimed before its
+  write, and runs the locked lookup of an upsert's conflict key, which is the
+  lookup the entity's derive generates for the entity's own backend. The
+  lookup returns the exact conflict-key values it bound. An admission admits
+  a target once, whatever the attempt finds. The attempt is claimed before its
   first await, so of two callers that share an admission one is refused and
   cannot replace what the other was issued.
 - **The authority is bound to what it was earned under:**
@@ -393,7 +396,9 @@ one.
   - one transaction: the one target admission ran in, or for a create the one
     that carries its invocation;
   - the admitted rows: the row a single-row target admission locked, the
-    branch an upsert's lookup decided (a new row, or the row it found), or the
+    branch an upsert's lookup decided (a new row whose hook events carry the
+    conflict key that was looked up, with one entry per key column, or the
+    row it found), or the
     rows a bulk target admission selected. Each row dispatches one `Before`
     and one `After`, so each nested child row needs its own admission.
 - **A mismatch is refused.** Entity admission, target admission, the bulk

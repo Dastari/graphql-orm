@@ -115,8 +115,7 @@ pub(in crate::operations) fn update(
     } = input;
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit =
-        |kind, scope_arguments| admit_request(struct_name, backend_marker, kind, scope_arguments);
+    let admit = |kind, scope_arguments| admit_request(struct_name, kind, scope_arguments);
     let admit_update = admit("Update", update_scope_arguments);
     let admit_update_many = admit("UpdateMany", update_many_scope_arguments);
     let before_hook = Hook {

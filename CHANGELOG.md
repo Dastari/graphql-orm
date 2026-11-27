@@ -20,8 +20,10 @@ for historical context.
   mutation's hook present its originating request is now derived from the
   entity's generated configuration, issued only after a target admission the
   pipeline runs itself, and bound to one request and invocation, one
-  operation, one `Database` handle, one transaction and the admitted rows. A dispatch that does not match its
-  admission is refused. The SDL and the catalogues are unchanged. A
+  operation, one `Database` handle, one transaction and the admitted rows.
+  Upsert uses the entity's configured backend. Its create hooks must carry
+  the conflict key used in the locked lookup. Dispatch requires a matching
+  admission. The SDL and the catalogues are unchanged. A
   generated write always enforces the assurance requirement of its own root
   field, and the `Before` hook event of a single-row update names the stored
   key. **No action** unless a custom resolver calls a generated mutation

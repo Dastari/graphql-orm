@@ -16,6 +16,7 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) create_input: &'a syn::Ident,
+    pub(in crate::operations) upsert_key_columns: &'a [String],
     pub(in crate::operations) create_client_supplied: &'a TokenStream,
     pub(in crate::operations) unsigned_checks: &'a TokenStream,
     pub(in crate::operations) upsert_policy_checks_graphql: &'a [TokenStream],
@@ -72,6 +73,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
         entity_name_lit,
         struct_name,
         create_input,
+        upsert_key_columns,
         create_client_supplied,
         unsigned_checks,
         upsert_policy_checks_graphql,
@@ -132,12 +134,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
     };
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        "Upsert",
-        upsert_scope_arguments,
-    );
+    let admit = admit_request(struct_name, "Upsert", upsert_scope_arguments);
     let before_hook = Hook {
         request: &request,
         phase: "Before",
@@ -162,14 +159,25 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
         return (quote! {}, quote! {});
     }
     let lookup = quote! {
-        impl ::graphql_orm::graphql::orm::GeneratedUpsertLookup<#backend_marker> for #struct_name {
+        impl ::graphql_orm::graphql::orm::GeneratedUpsertLookup for #struct_name {
             type Input = #create_input;
 
             fn __gom_upsert_lookup<'a, 'tx: 'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'tx, #backend_marker>,
                 input: &'a Self::Input,
-            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::std::option::Option<Self>>> {
-                ::std::boxed::Box::pin(Self::__gom_fetch_by_upsert_on(hook_ctx, input))
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<(
+                ::std::option::Option<Self>,
+                ::std::vec::Vec<(&'static str, ::graphql_orm::graphql::orm::SqlValue)>,
+            )>> {
+                ::std::boxed::Box::pin(async move {
+                    let bind_values = Self::__gom_upsert_key_values(input)?;
+                    let row = Self::__gom_fetch_by_upsert_key_on(hook_ctx, &bind_values).await?;
+                    let key = ::std::iter::Iterator::collect(::std::iter::Iterator::zip(
+                        ::std::iter::IntoIterator::into_iter([#(#upsert_key_columns),*]),
+                        bind_values,
+                    ));
+                    ::std::result::Result::Ok((row, key))
+                })
             }
         }
     };

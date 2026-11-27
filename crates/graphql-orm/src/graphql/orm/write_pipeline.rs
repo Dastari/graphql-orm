@@ -11,8 +11,8 @@
 //!    coordinate are read from the entity's generated
 //!    [`GeneratedWriteConfig`]; the caller names only the operation
 //!    ([`GeneratedWriteKind`]) and passes the request's values of the scalar
-//!    arguments a scope template names. The admitted request is typed by the
-//!    backend whose RLS context was checked.
+//!    arguments a scope template names. The backend is the entity's own,
+//!    from the same configuration, and the admitted request is typed by it.
 //! 2. **Entity admission** ([`GeneratedWriteRequest::__admit_entity`] and its
 //!    bulk variant): the request's `Database`, the entity write policy on the
 //!    `GraphqlMutation` surface, then the row-policy provider check. It
@@ -67,8 +67,9 @@
 //! - **one transaction**: the transaction target admission ran in, or for a
 //!   create the transaction that carries its invocation;
 //! - **the admitted rows**: the key of the row a single-row target admission
-//!   locked, the branch an upsert's own lookup decided (a new row, or the
-//!   key of the row it found), or the keys of the rows a bulk target admission
+//!   locked, the branch an upsert's own lookup decided (a new row that
+//!   carries the conflict key it looked up, or the key of the row it found),
+//!   or the keys of the rows a bulk target admission
 //!   selected. Each row dispatches one `Before` and one `After`, and a new
 //!   row its `After` only after its `Before`.
 //!
@@ -207,33 +208,50 @@ impl GeneratedWriteOperation {
 }
 
 /// The generated write configuration of an entity. `GraphQLOperations`
-/// implements it; the pipeline reads it instead of taking the authentication
-/// mode, scopes, coordinate or row key from its caller.
+/// implements it, once; the pipeline reads it instead of taking the backend,
+/// authentication mode, scopes, coordinate or row key from its caller.
 #[doc(hidden)]
 pub trait GeneratedWriteConfig {
+    /// The entity's backend. Admission, target admission and an upsert's
+    /// lookup all run on it.
     #[doc(hidden)]
-    fn __gom_write_operation(kind: GeneratedWriteKind) -> GeneratedWriteOperation;
+    type Backend: OrmBackend;
+
+    /// The operation `kind` as the entity declares it. Upsert returns
+    /// `None` unless the entity generates that root.
+    #[doc(hidden)]
+    fn __gom_write_operation(kind: GeneratedWriteKind) -> Option<GeneratedWriteOperation>;
 
     /// The id a hook event of this row carries.
     #[doc(hidden)]
     fn __gom_write_key(&self) -> String;
 }
 
-/// The locked lookup of an upsert's conflict key. `GraphQLOperations`
-/// implements it for an entity with a generated upsert; target admission
-/// runs it instead of trusting a row its caller reports.
+/// An upsert's conflict key: each key column with the value an input gives
+/// it, as a hook event's changes name and carry them.
+type UpsertKey = Vec<(&'static str, super::SqlValue)>;
+type UpsertLookup<T> = (Option<T>, UpsertKey);
+
+/// The locked lookup of an upsert's conflict key, on the entity's own
+/// backend. `GraphQLOperations` implements it for an entity with a generated
+/// upsert, once; target admission runs it instead of trusting a row its
+/// caller reports.
 #[doc(hidden)]
-pub trait GeneratedUpsertLookup<B: WriteBackend>: Sized {
+pub trait GeneratedUpsertLookup: GeneratedWriteConfig + Sized
+where
+    Self::Backend: WriteBackend,
+{
     /// The upsert's input, which carries the conflict key.
     #[doc(hidden)]
     type Input;
 
-    /// The row `input`'s conflict key selects in `hook_ctx`, locked.
+    /// Lock and return the row selected in `hook_ctx`, together with the
+    /// conflict key actually bound by the lookup.
     #[doc(hidden)]
     fn __gom_upsert_lookup<'a, 'tx: 'a>(
-        hook_ctx: &'a mut MutationContext<'tx, B>,
+        hook_ctx: &'a mut MutationContext<'tx, Self::Backend>,
         input: &'a Self::Input,
-    ) -> futures::future::BoxFuture<'a, crate::Result<Option<Self>>>;
+    ) -> futures::future::BoxFuture<'a, crate::Result<UpsertLookup<Self>>>;
 }
 
 /// The entity a generated write names in its policy decisions and hook events.
@@ -386,6 +404,7 @@ enum Admitted {
     /// `row`; the row write decision is still to be asked.
     Looked {
         transaction: u64,
+        key: UpsertKey,
         row: Option<Box<dyn Any + Send + Sync>>,
     },
     /// The target admission admitted nothing, failed or was abandoned, or
@@ -393,9 +412,11 @@ enum Admitted {
     Inert,
     /// A row the write creates: a create, or an upsert whose key found no
     /// row. `transaction` is the admitting transaction; a create has none
-    /// and dispatches in the transaction that carries its invocation.
+    /// and dispatches in the transaction that carries its invocation. `key`
+    /// is the conflict key an upsert looked up: its events must carry it.
     NewRow {
         transaction: Option<u64>,
+        key: Option<UpsertKey>,
         phases: u8,
     },
     /// Existing rows admitted in `transaction`, by hook event id, with the
@@ -544,8 +565,9 @@ impl GeneratedWriteAuthority {
     /// for `entity` under the request and field of `ctx`, on the
     /// transaction's `Database`, and issued in this transaction for that row
     /// and an event that reports `action`; a create must dispatch in the
-    /// transaction that carries its invocation. Each row dispatches each
-    /// phase once.
+    /// transaction that carries its invocation, and the row an upsert
+    /// creates must carry, in `changes`, the conflict key its lookup used.
+    /// Each row dispatches each phase once.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn __require_dispatch<B: OrmBackend>(
         &self,
@@ -557,6 +579,7 @@ impl GeneratedWriteAuthority {
         phase: &MutationPhase,
         action: ChangeAction,
         id: &str,
+        changes: &[super::MutationFieldValue],
     ) -> async_graphql::Result<()> {
         if !self.binds(entity, ctx, transaction_db) {
             return Err(mismatch());
@@ -571,6 +594,7 @@ impl GeneratedWriteAuthority {
             }
             Admitted::NewRow {
                 transaction: admitting,
+                key,
                 phases,
             } => {
                 let admitted = match admitting {
@@ -579,10 +603,26 @@ impl GeneratedWriteAuthority {
                     None => transaction_invocation
                         .is_some_and(|carried| Arc::ptr_eq(carried, &self.invocation)),
                 };
-                // A new row has no key to tell its `After` from another
-                // row's: it follows its own `Before`.
+                // The row an upsert creates carries the conflict key its
+                // lookup missed on.
+                let carries_key = key.as_ref().is_none_or(|key| {
+                    key.iter().all(|(column, value)| {
+                        let mut values = changes.iter().filter(|change| change.field == *column);
+                        values
+                            .next()
+                            .is_some_and(|change| match (&change.value, value) {
+                                (super::SqlValue::Float(actual), super::SqlValue::Float(bound)) => {
+                                    actual.to_bits() == bound.to_bits()
+                                }
+                                (actual, bound) => actual == bound,
+                            })
+                            && values.next().is_none()
+                    })
+                });
+                // A new row's After follows its Before.
                 (action == ChangeAction::Created
                     && admitted
+                    && carries_key
                     && (phase == BEFORE || *phases & BEFORE != 0))
                     .then_some(phases)
             }
@@ -620,19 +660,18 @@ pub struct GeneratedWriteRequest<B: OrmBackend> {
     _backend: PhantomData<fn() -> B>,
 }
 
-fn admit_request<T, B>(
+fn admit_request<T>(
     ctx: &async_graphql::Context<'_>,
     kind: GeneratedWriteKind,
     scope_arguments: &[(&str, &str)],
     invocation: Arc<Invocation>,
-) -> async_graphql::Result<GeneratedWriteRequest<B>>
+) -> async_graphql::Result<GeneratedWriteRequest<T::Backend>>
 where
     T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
-    B: OrmBackend,
 {
-    let operation = T::__gom_write_operation(kind);
+    let operation = T::__gom_write_operation(kind).ok_or_else(mismatch)?;
     let _auth_subject = crate::graphql::auth::enforce_resolver_auth(ctx, operation.auth_mode)?;
-    super::ensure_rls_request_context::<T, B>(ctx, <T as Entity>::entity_name())?;
+    super::ensure_rls_request_context::<T, T::Backend>(ctx, <T as Entity>::entity_name())?;
     operation.scopes.enforce(ctx, scope_arguments)?;
     // The operation's own coordinate, whatever field is being resolved: a
     // nested child row enforces its entity's create root, a dependent-delete
@@ -652,47 +691,45 @@ where
     })
 }
 
-/// Request admission of the generated write `kind` of `T` on the backend
-/// `B`, in this order: resolver authentication, the RLS request context of
-/// `T`, the operation's declared scopes, then the assurance declared for the
-/// operation's own root field. It starts a new invocation.
+/// Request admission of the generated write `kind` of `T`, on `T`'s own
+/// backend, in this order: resolver authentication, the RLS request context
+/// of `T`, the operation's declared scopes, then the assurance declared for
+/// the operation's own root field. It starts a new invocation.
 ///
-/// The authentication mode, the scope declarations and the operation's
-/// coordinate come from `T`'s [`GeneratedWriteConfig`]. `scope_arguments` are
-/// the request's values of the scalar arguments a scope template names: the
-/// caller supplies them, as it holds the resolver's arguments.
+/// The backend, the authentication mode, the scope declarations and the
+/// operation's coordinate come from `T`'s [`GeneratedWriteConfig`]. Upsert
+/// requires a generated upsert root. The caller supplies `scope_arguments`,
+/// the request's values of the scalar arguments a scope template names.
 #[doc(hidden)]
-pub fn __admit_generated_write_request<T, B>(
+pub fn __admit_generated_write_request<T>(
     ctx: &async_graphql::Context<'_>,
     kind: GeneratedWriteKind,
     scope_arguments: &[(&str, &str)],
-) -> async_graphql::Result<GeneratedWriteRequest<B>>
+) -> async_graphql::Result<GeneratedWriteRequest<T::Backend>>
 where
     T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
-    B: OrmBackend,
 {
-    admit_request::<T, B>(ctx, kind, scope_arguments, Arc::default())
+    admit_request::<T>(ctx, kind, scope_arguments, Arc::default())
 }
 
 /// [`__admit_generated_write_request`] for a child row of a nested create:
 /// the create of `T` under the child's own synthetic field context `ctx`,
 /// admitted through the admission of its parent's create. The child inherits
-/// the parent's invocation and backend, and must belong to the parent's
-/// request and root field.
+/// the parent's invocation, shares its backend, and must belong to the
+/// parent's request and root field.
 #[doc(hidden)]
-pub fn __admit_generated_nested_create_request<T, B>(
+pub fn __admit_generated_nested_create_request<T>(
     ctx: &async_graphql::Context<'_>,
-    parent: &GeneratedWriteAdmission<'_, B>,
-) -> async_graphql::Result<GeneratedWriteRequest<B>>
+    parent: &GeneratedWriteAdmission<'_, T::Backend>,
+) -> async_graphql::Result<GeneratedWriteRequest<T::Backend>>
 where
     T: DatabaseRls + Entity + GeneratedWriteConfig + 'static,
-    B: OrmBackend,
 {
     let parent = &parent.authority;
     if parent.kind != GeneratedWriteKind::Create || !parent.request.shares_root(ctx) {
         return Err(mismatch());
     }
-    admit_request::<T, B>(
+    admit_request::<T>(
         ctx,
         GeneratedWriteKind::Create,
         &[],
@@ -751,6 +788,7 @@ impl<B: OrmBackend> GeneratedWriteRequest<B> {
                     // A create has no target: its admission is complete here.
                     Admitted::NewRow {
                         transaction: None,
+                        key: None,
                         phases: 0,
                     }
                 } else {
@@ -929,7 +967,7 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
         B: WriteBackend,
         T: Entity
             + DatabaseEntity
-            + GeneratedWriteConfig
+            + GeneratedWriteConfig<Backend = B>
             + FromSqlRow<B>
             + Clone
             + Send
@@ -995,9 +1033,10 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
 
     /// The first step of an upsert's target admission: the locked lookup of
     /// the conflict key of `input` in `hook_ctx`, which the pipeline runs
-    /// itself. It returns the row the key found and keeps it for
-    /// [`Self::__admit_upsert_target`], which decides the branch from it. An
-    /// admission looks its key up once.
+    /// itself, through the lookup the entity generates for its own backend.
+    /// It returns the row the key found and keeps it for
+    /// [`Self::__admit_upsert_target`], which decides the branch from it.
+    /// An admission looks its key up once.
     #[doc(hidden)]
     pub async fn __lookup_upsert_target<T>(
         &self,
@@ -1007,7 +1046,7 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     ) -> async_graphql::Result<Option<T>>
     where
         B: WriteBackend,
-        T: GeneratedUpsertLookup<B> + Clone + Send + Sync + 'static,
+        T: GeneratedUpsertLookup<Backend = B> + Clone + Send + Sync + 'static,
     {
         let claim = self.claim_target::<T>(
             ctx,
@@ -1015,11 +1054,12 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
             &[GeneratedWriteKind::Upsert],
         )?;
         let transaction = hook_ctx.__identity();
-        let row = T::__gom_upsert_lookup(hook_ctx, input)
+        let (row, key) = T::__gom_upsert_lookup(hook_ctx, input)
             .await
             .map_err(graphql_error_from_sqlx)?;
         claim.complete(Admitted::Looked {
             transaction,
+            key,
             row: row
                 .clone()
                 .map(|row| Box::new(row) as Box<dyn Any + Send + Sync>),
@@ -1030,21 +1070,25 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
     /// The second step of an upsert's target admission: the row write
     /// decision on the row [`Self::__lookup_upsert_target`] found, if any.
     /// Success issues the authority for the branch the lookup decided, in
-    /// the lookup's transaction: an update of that row, or a create when the
-    /// key found no row.
+    /// the lookup's transaction: an update of that row, or, when the key
+    /// found no row, the create of a row that carries that key.
     #[doc(hidden)]
     pub async fn __admit_upsert_target<T>(
         &self,
         ctx: &async_graphql::Context<'_>,
     ) -> async_graphql::Result<()>
     where
-        T: GeneratedWriteConfig + Send + Sync + 'static,
+        T: GeneratedWriteConfig<Backend = B> + Send + Sync + 'static,
     {
-        let (claim, (transaction, row)) = self
+        let (claim, (transaction, key, row)) = self
             .admits::<T>(ctx, None, &[GeneratedWriteKind::Upsert])
             .then(|| {
                 self.authority.claim(|admitted| match admitted {
-                    Admitted::Looked { transaction, row } => Ok((transaction, row)),
+                    Admitted::Looked {
+                        transaction,
+                        key,
+                        row,
+                    } => Ok((transaction, key, row)),
                     other => Err(other),
                 })
             })
@@ -1053,6 +1097,7 @@ impl<'a, B: OrmBackend> GeneratedWriteAdmission<'a, B> {
         let Some(row) = row else {
             claim.complete(Admitted::NewRow {
                 transaction: Some(transaction),
+                key: Some(key),
                 phases: 0,
             });
             return Ok(());

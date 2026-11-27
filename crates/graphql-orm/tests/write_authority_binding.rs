@@ -65,17 +65,18 @@ struct BindLine {
     table = "bind_devices",
     plural = "BindDevices",
     auth = "optional",
-    upsert = "mac"
+    upsert = "mac, name",
+    unique_composite = "mac, name"
 )]
 struct BindDevice {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     #[sortable]
     id: String,
-    #[unique]
     #[filterable(type = "string")]
     mac: String,
     name: String,
+    label: String,
 }
 
 fn device(id: &str, mac: &str) -> CreateBindDeviceInput {
@@ -83,6 +84,7 @@ fn device(id: &str, mac: &str) -> CreateBindDeviceInput {
         id: id.to_owned(),
         mac: mac.to_owned(),
         name: "probe".to_owned(),
+        label: "Example".to_owned(),
     }
 }
 
@@ -183,13 +185,16 @@ fn admit<T>(
     kind: GeneratedWriteKind,
 ) -> graphql_orm::async_graphql::Result<GeneratedWriteRequest<Sqlite>>
 where
-    T: DatabaseRls + Entity + graphql_orm::graphql::orm::GeneratedWriteConfig + 'static,
+    T: DatabaseRls
+        + Entity
+        + graphql_orm::graphql::orm::GeneratedWriteConfig<Backend = Sqlite>
+        + 'static,
 {
-    __admit_generated_write_request::<T, Sqlite>(ctx, kind, &[])
+    __admit_generated_write_request::<T>(ctx, kind, &[])
 }
 
 /// One `Before` or `After` dispatch of the row `id` of `entity`, presenting
-/// `authority`.
+/// `authority`, with no changes.
 async fn dispatch(
     tx: &mut MutationContext<'_>,
     entity: GeneratedWriteEntity,
@@ -199,6 +204,21 @@ async fn dispatch(
     action: ChangeAction,
     id: &str,
 ) -> String {
+    dispatch_changes(tx, entity, ctx, authority, phase, action, id, &[]).await
+}
+
+/// [`dispatch`] of an event whose changes give these columns these values.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_changes(
+    tx: &mut MutationContext<'_>,
+    entity: GeneratedWriteEntity,
+    ctx: &Context<'_>,
+    authority: &GeneratedWriteAuthority,
+    phase: MutationPhase,
+    action: ChangeAction,
+    id: &str,
+    changes: &[(&str, &str)],
+) -> String {
     outcome(
         tx.__run_generated_write_hook(
             &entity,
@@ -206,7 +226,13 @@ async fn dispatch(
             phase,
             action,
             id.to_owned(),
-            Vec::new(),
+            changes
+                .iter()
+                .map(|(field, value)| MutationFieldValue {
+                    field: (*field).to_owned(),
+                    value: SqlValue::String((*value).to_owned()),
+                })
+                .collect(),
             None,
             None,
         )
@@ -277,16 +303,17 @@ impl HostMutation {
             "config" => {
                 out.push(outcome(admit::<BindOrder>(ctx, Delete)));
                 for id in ["o1", "o2"] {
-                    out.push(outcome(
-                        __admit_generated_write_request::<BindOrder, Sqlite>(
-                            ctx,
-                            Update,
-                            &[("id", id)],
-                        ),
-                    ));
+                    out.push(outcome(__admit_generated_write_request::<BindOrder>(
+                        ctx,
+                        Update,
+                        &[("id", id)],
+                    )));
                 }
                 out.push(outcome(admit::<BindOrder>(ctx, Create)));
                 out.push(outcome(admit::<BindLine>(ctx, Create)));
+                // Lines generate no upsert root: there is none to admit, and
+                // so no lookup a caller could supply for one.
+                out.push(outcome(admit::<BindLine>(ctx, Upsert)));
             }
             // The assurance coordinate is the operation's, not this field's.
             "assurance" => {
@@ -421,9 +448,23 @@ impl HostMutation {
                     admission.__admit_upsert_target::<Devices>(ctx).await,
                 ));
                 out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Created, "d9").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
+                let looked_up = [("mac", "m9"), ("name", "probe")];
+                let other = [("mac", "m9"), ("name", "other")];
+                let duplicate = [("mac", "m9"), ("mac", "m7"), ("name", "probe")];
+                let mut created = async |phase, changes: &[(&str, &str)]| {
+                    dispatch_changes(
+                        &mut tx, devices, ctx, authority, phase, Created, "d9", changes,
+                    )
+                    .await
+                };
+                out.push(created(After, &looked_up).await);
+                // Both key columns must match, and each must occur once.
+                out.push(created(Before, &looked_up[..1]).await);
+                out.push(created(Before, &other).await);
+                out.push(created(Before, &duplicate).await);
+                out.push(created(Before, &looked_up).await);
+                out.push(created(After, &other).await);
+                out.push(created(After, &looked_up).await);
                 rollback(tx).await?;
             }
             // Two callers share an admission: one target admission wins,
@@ -747,7 +788,7 @@ impl HostMutation {
                     __nested_create_field(ctx, name, "input", Value::Object(Default::default()))
                 };
                 let nested = |child: &Context<'_>, parent| {
-                    __admit_generated_nested_create_request::<BindLine, Sqlite>(child, parent)
+                    __admit_generated_nested_create_request::<BindLine>(child, parent)
                 };
                 let parent = admit::<BindOrder>(ctx, Create)?.__admit_entity(ctx).await?;
                 let field = child_field("createBindLine");
@@ -930,8 +971,8 @@ async fn fixture() -> Fixture {
     for sql in [
         "CREATE TABLE bind_orders (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE bind_lines (id TEXT PRIMARY KEY, order_id TEXT NOT NULL)",
-        "CREATE TABLE bind_devices (id TEXT PRIMARY KEY, mac TEXT NOT NULL UNIQUE, name TEXT NOT NULL)",
-        "INSERT INTO bind_devices VALUES ('d1', 'm1', 'first'), ('d2', 'm2', 'second')",
+        "CREATE TABLE bind_devices (id TEXT PRIMARY KEY, mac TEXT NOT NULL, name TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (mac, name))",
+        "INSERT INTO bind_devices VALUES ('d1', 'm1', 'probe', 'First'), ('d2', 'm2', 'probe', 'Second')",
         "INSERT INTO bind_orders VALUES ('o1', 'first'), ('o2', 'second')",
         "INSERT INTO bind_lines VALUES ('l1', 'o1'), ('l2', 'o1'), ('l3', 'o3')",
     ] {
@@ -1026,11 +1067,18 @@ async fn admission_inputs_come_from_the_entity_configuration() {
     // scopes declared), create line (`auth = "optional"`).
     assert_eq!(
         run(Some(operator(&ALL_SCOPES))).await,
-        ["ok", "ok", "error: forbidden", "ok", "ok"]
+        ["ok", "ok", "error: forbidden", "ok", "ok", "refused"]
     );
     assert_eq!(
         run(Some(operator(&["orders.o2.update"]))).await,
-        ["error: forbidden", "error: forbidden", "ok", "ok", "ok"]
+        [
+            "error: forbidden",
+            "error: forbidden",
+            "ok",
+            "ok",
+            "ok",
+            "refused"
+        ]
     );
     // `auth = "required"` is the order entity's own declaration.
     let anonymous = run(None).await;
@@ -1040,7 +1088,7 @@ async fn admission_inputs_come_from_the_entity_configuration() {
             .all(|step| step.starts_with("error: ")),
         "{anonymous:?}"
     );
-    assert_eq!(anonymous[4], "ok");
+    assert_eq!(anonymous[4..], ["ok", "refused"]);
     assert!(fixture.hooks().is_empty());
 }
 
@@ -1138,8 +1186,13 @@ async fn an_upsert_authority_is_the_branch_its_target_admission_decided() {
             // update; decided once.
             "refused", "refused", "ok", "refused",
             // No row: the decision; not an update; no `After` before
-            // `Before`; the create's two phases.
-            "ok", "refused", "refused", "ok", "ok",
+            // `Before`.
+            "ok", "refused", "refused",
+            // `Before`: partial key; different key; duplicate key column;
+            // then the complete key used by the lookup.
+            "refused", "refused", "refused", "ok",
+            // `After`: with another device's key; with the looked-up key.
+            "refused", "ok",
         ],
         3,
     );
@@ -1323,6 +1376,14 @@ async fn generated_mutations_present_their_own_authority() {
     let fixture = fixture().await;
     let schema = fixture.schema();
     for (query, hooks) in [
+        (
+            r#"mutation { upsertBindDevice(input: { id: "d3", mac: "m3", name: "probe", label: "Third" }) { success } }"#,
+            2,
+        ),
+        (
+            r#"mutation { upsertBindDevice(input: { id: "d3", mac: "m3", name: "probe", label: "Updated" }) { success } }"#,
+            2,
+        ),
         (
             r#"mutation { createBindLine(input: { id: "l9", orderId: "o1" }) { success } }"#,
             2,
