@@ -10,6 +10,30 @@ supersedes: []
 
 # Migration Guide
 
+## 0.241.0: Opt-in host timestamps with `time`
+
+**No action** for existing entities. The `chrono` feature is implied by
+`postgres` and `mssql`, and the existing chrono APIs remain available.
+To opt in, enable `graphql-orm/time`, add a direct `time = "0.3"`
+dependency, and mark each persisted `OffsetDateTime` or
+`Option<OffsetDateTime>` with `#[graphql_orm(time_offset_datetime)]`.
+See the [field example](crates/graphql-orm/README.md#host-timestamps-with-time).
+
+Before converting an existing text column, plan a schema and data migration
+to `TIMESTAMPTZ` on PostgreSQL or `DATETIMEOFFSET` on SQL Server. SQLite
+stores RFC 3339 text. PostgreSQL returns timestamps in UTC at microsecond
+precision and rejects infinities and values outside the Rust type's range
+on read. SQL Server retains the stored offset at 100 ns precision and
+requires both the local and UTC dates to be in years 0001–9999 with an
+offset in whole minutes within ±14 hours. SQLite preserves the offset and
+uses text ordering, which can differ from instant ordering.
+
+The async-graphql `DateTime` scalar for `time` parses RFC 3339 and emits UTC
+with `Z`. Review this wire spelling if you switch a field from chrono.
+The SQL Server text-temporal option still controls text binds from
+`#[date_field]`, date filters and `SqlValue::temporal_text`. Opted-in Rust
+offset timestamp fields bind as typed values, including nulls.
+
 ## 0.240.0: Shared create and upsert field policies
 
 **No action.** Upgrade ORM and macros together. The generated GraphQL

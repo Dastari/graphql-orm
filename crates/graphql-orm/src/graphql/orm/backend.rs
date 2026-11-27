@@ -1220,7 +1220,15 @@ fn bind_sqlite_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
     match value {
         SqlValue::String(value) => query.bind(value),
-        SqlValue::Temporal(value) => query.bind(value.as_text()),
+        SqlValue::Temporal(value) => {
+            #[cfg(feature = "time")]
+            if let Some(stamp) = value.time_offset() {
+                return query.bind(stamp);
+            }
+            query.bind(value.as_text())
+        }
+        #[cfg(feature = "time")]
+        SqlValue::OffsetDateTimeNull => query.bind(Option::<time::OffsetDateTime>::None),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
@@ -1268,6 +1276,57 @@ async fn apply_postgres_auth_context(
     Ok(())
 }
 
+// SQLx's time decoder adds a binary timestamp to the PostgreSQL epoch
+// unchecked. Use checked arithmetic for data outside time's representable range.
+#[cfg(all(feature = "postgres", feature = "time"))]
+struct PostgresOffsetDateTime(time::OffsetDateTime);
+
+#[cfg(all(feature = "postgres", feature = "time"))]
+impl sqlx::Type<sqlx::Postgres> for PostgresOffsetDateTime {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <time::OffsetDateTime as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+}
+
+#[cfg(all(feature = "postgres", feature = "time"))]
+impl sqlx::Encode<'_, sqlx::Postgres> for PostgresOffsetDateTime {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let utc = self
+            .0
+            .checked_to_offset(time::UtcOffset::UTC)
+            .ok_or("timestamp UTC instant is outside the time range")?;
+        <time::OffsetDateTime as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(&utc, buf)
+    }
+}
+
+#[cfg(all(feature = "postgres", feature = "time"))]
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for PostgresOffsetDateTime {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        if value.format() != sqlx::postgres::PgValueFormat::Binary {
+            return <time::OffsetDateTime as sqlx::Decode<sqlx::Postgres>>::decode(value).map(Self);
+        }
+        let micros = <i64 as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        crate::temporal::postgres_to_primitive_datetime(micros)
+            .map(|value| Self(value.assume_utc()))
+            .ok_or_else(|| "PostgreSQL timestamp is outside the time range".into())
+    }
+}
+
+/// Read an opted-in PostgreSQL timestamp with range-checked decoding.
+#[cfg(all(feature = "postgres", feature = "time"))]
+#[doc(hidden)]
+pub fn postgres_offset_datetime(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> crate::Result<Option<time::OffsetDateTime>> {
+    use sqlx::Row;
+    row.try_get::<Option<PostgresOffsetDateTime>, _>(column)
+        .map(|value| value.map(|value| value.0))
+}
+
 #[cfg(feature = "postgres")]
 pub(super) fn bind_postgres_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
@@ -1275,7 +1334,15 @@ pub(super) fn bind_postgres_value<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     match value {
         SqlValue::String(value) => query.bind(value),
-        SqlValue::Temporal(value) => query.bind(value.as_text()),
+        SqlValue::Temporal(value) => {
+            #[cfg(feature = "time")]
+            if let Some(stamp) = value.time_offset() {
+                return query.bind(PostgresOffsetDateTime(stamp));
+            }
+            query.bind(value.as_text())
+        }
+        #[cfg(feature = "time")]
+        SqlValue::OffsetDateTimeNull => query.bind(Option::<PostgresOffsetDateTime>::None),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),

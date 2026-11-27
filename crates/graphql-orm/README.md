@@ -1105,6 +1105,38 @@ select `TransactionMode::StateMachine` automatically; an upsert composed inside
 decision is fenced across every backend. See [runtime writes and repository
 operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
 
+### Host timestamps with `time`
+
+Add `"time"` to the ORM dependency's features alongside your backend (for
+example, `features = ["postgres", "time"]`) and add
+`time = { version = "0.3", features = ["serde"] }` for entity serialization.
+The ORM feature enables the SQLx and async-graphql `time` integrations.
+PostgreSQL and SQL Server continue to imply the ORM's `chrono` feature.
+Both host features can be enabled together. Hosts that expose chrono scalars
+continue selecting async-graphql's `chrono` feature directly.
+
+```rust
+use graphql_orm::prelude::*;
+use time::OffsetDateTime;
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "reservations", plural = "Reservations", lifetime(field = "expires_at"))]
+struct Reservation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    #[graphql_orm(time_offset_datetime)]
+    expires_at: Option<OffsetDateTime>,
+}
+```
+
+The attribute selects `TIMESTAMPTZ` on PostgreSQL, `DATETIMEOFFSET` on
+SQL Server, and RFC 3339 `TEXT` on SQLite. Fields without the attribute
+keep their previous column mapping. An opted-in field can declare
+`rfc3339_utc` lifetime metadata. See the
+[migration notes](../../MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+for storage, precision and GraphQL wire behavior.
+
 ## Read snapshot transactions
 
 Use `Database::read_snapshot_transaction` for related reads that need one

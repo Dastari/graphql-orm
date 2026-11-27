@@ -21,6 +21,11 @@ pub(crate) fn is_default_time_year(year: i32) -> bool {
     (-9999..=9999).contains(&year)
 }
 
+#[cfg(feature = "postgres")]
+pub(crate) fn postgres_to_primitive_datetime(micros: i64) -> Option<PrimitiveDateTime> {
+    time::macros::datetime!(2000-01-01 0:00).checked_add(Duration::microseconds(micros))
+}
+
 /// Preserve the full chrono range alongside the internal time engine.
 #[derive(Clone, Copy)]
 pub(crate) enum Timestamp {

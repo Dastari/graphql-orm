@@ -91,6 +91,8 @@ run_keyset_decimals() {
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,time \
+    --test time_host_fields -- --include-ignored --test-threads=1
   run_nested_create postgres
   run_bounded_set_delete postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
@@ -206,6 +208,8 @@ run_migration_journal() {
 }
 
 run_mssql() {
+  cargo test -p graphql-orm --locked --no-default-features --features mssql,time \
+    --test time_host_fields -- --include-ignored --test-threads=1
   run_nested_create mssql
   run_bounded_set_delete mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \

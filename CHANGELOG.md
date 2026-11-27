@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.241.0
+
+- **No action** (refs #768). Hosts can enable `time` and opt individual
+  `OffsetDateTime` fields into timestamp mapping and lifetime metadata.
+  [Migration](MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+
 ## Unreleased - ORM/macros 0.240.0
 
 - **No action** (refs #677, #724). Generated GraphQL upserts and creates on

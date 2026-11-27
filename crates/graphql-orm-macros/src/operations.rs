@@ -1406,6 +1406,14 @@ fn integer_bind_tokens(
     }
 }
 
+fn scalar_null_bind_tokens(meta: &FieldMetadata) -> proc_macro2::TokenStream {
+    if meta.time_offset_datetime {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::OffsetDateTimeNull }
+    } else {
+        quote! { ::graphql_orm::graphql::orm::SqlValue::StringNull }
+    }
+}
+
 fn push_create_input_sql_value_tokens(
     backend: BackendKind,
     struct_name: &syn::Ident,
@@ -1572,11 +1580,12 @@ fn push_create_input_sql_value_tokens(
         }
     } else if is_option_type(field_type) {
         let value_expr = scalar_text_bind_tokens(field_type, meta, quote! { value });
+        let null_expr = scalar_null_bind_tokens(meta);
 
         quote! {
             match &#field_access {
                 ::std::option::Option::Some(value) => bind_values.push(#value_expr),
-                ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
+                ::std::option::Option::None => bind_values.push(#null_expr),
             }
         }
     } else {
@@ -4057,11 +4066,12 @@ fn generate_graphql_operations_unfiltered(
                 insert_binds_repo.push(bind_tokens);
             } else if is_option_type(field_type) {
                 let value_expr = scalar_text_bind_tokens(field_type, &meta, quote! { v });
+                let null_expr = scalar_null_bind_tokens(&meta);
 
                 let bind_tokens = quote! {
                     match &input.#field_name {
                         ::std::option::Option::Some(v) => bind_values.push(#value_expr),
-                        ::std::option::Option::None => bind_values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
+                        ::std::option::Option::None => bind_values.push(#null_expr),
                     }
                 };
                 insert_binds_graphql.push(bind_tokens.clone());
@@ -4511,6 +4521,7 @@ fn generate_graphql_operations_unfiltered(
             } else if is_already_optional {
                 // Field type is already Option<T>, update type is Option<Option<T>>
                 let value_expr = scalar_text_bind_tokens(field_type, &meta, quote! { v });
+                let null_expr = scalar_null_bind_tokens(&meta);
 
                 let update_tokens = quote! {
                     if let ::std::option::Option::Some(ref val) = input.#field_name {
@@ -4518,7 +4529,7 @@ fn generate_graphql_operations_unfiltered(
                         set_clauses.push(::std::format!("{} = ?", #db_col_sql));
                         match val {
                             ::std::option::Option::Some(v) => values.push(#value_expr),
-                            ::std::option::Option::None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
+                            ::std::option::Option::None => values.push(#null_expr),
                         }
                     }
                 };

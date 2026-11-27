@@ -173,6 +173,7 @@ jobs:
       # The fixture runner tests run in orm-fixtures; scripts/check-ci-orm-split.py
       # requires this list to be exactly the tests those binaries define.
       - run: cargo test -p graphql-orm -- --exact --skip backend_coexistence_fixture::sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip backend_coexistence_fixture::direct_host_dependency_resolves_one_exact_agql_auth_universe --skip cross_crate_relations_fixture::generated_relationships_execute_across_real_crate_boundaries --skip federation_end_to_end_fixture::two_orm_subgraphs_compose_and_join_through_the_router --skip migration_api_compatibility_fixture::external_legacy_migration_surface_compiles --skip relationship_capability_fixture::pascal_relationship_semantics_compile_as_a_complete_query_capability --skip repository_aggregate_consumer_fixture::external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
+      - run: cargo test -p graphql-orm --locked --features time --test time_host_fields
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --test operation_catalog_sdl_conformance --test sqlite_input_disclosure
       - run: cargo test -p graphql-orm --no-default-features --features sqlite --test federation_entity_keys_case_features
         env:

@@ -497,6 +497,15 @@ pub fn date_filter_matches_at(
     date_filter_truth_at(value, filter, today) == Some(true)
 }
 
+/// Encode an opted-in SQLite timestamp as the SQLx text binder does.
+#[cfg(all(feature = "sqlite", feature = "time"))]
+#[doc(hidden)]
+pub fn sqlite_offset_datetime_text(value: &time::OffsetDateTime) -> Option<String> {
+    value
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
 /// Evaluate a date filter with SQL's true/false/unknown semantics.
 #[doc(hidden)]
 pub fn date_filter_truth_at(

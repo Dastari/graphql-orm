@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm-macros"
-version = "0.240.0"
+version = "0.241.0"
 edition = "2024"
 authors = ["Toby Martin"]
 description = "Procedural macros for async-graphql and ORM-backed entities, relations, and CRUD operations."
@@ -27,6 +27,7 @@ schema-export-only = []
 sqlite = []
 postgres = []
 mssql = []
+time = []
 
 [dependencies]
 convert_case = "0.7"

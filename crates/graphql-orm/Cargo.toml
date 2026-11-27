@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.97.1"
 name = "graphql-orm"
-version = "0.240.0"
+version = "0.241.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -27,7 +27,7 @@ postgres = [
   "graphql-orm-macros/postgres",
   "sqlx/runtime-tokio-rustls",
   "sqlx/postgres",
-  "sqlx/chrono",
+  "chrono",
   "sqlx/json",
   "sqlx/rust_decimal",
   "sqlx/uuid",
@@ -35,6 +35,8 @@ postgres = [
 mssql = [
   "graphql-orm-macros/mssql",
   "dep:tiberius",
+  "chrono",
+  "tiberius/chrono",
   "tiberius/time",
   "dep:quick-xml",
   "dep:connection-string",
@@ -42,6 +44,8 @@ mssql = [
   "tokio/net",
   "tokio/rt",
 ]
+chrono = ["sqlx/chrono"]
+time = ["async-graphql/time", "graphql-orm-macros/time", "sqlx/time"]
 runtime-graphql = ["async-graphql/dynamic-schema", "dep:async-trait"]
 change-journal = []
 owned-planning-replay = []
@@ -66,7 +70,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.240.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.241.0", default-features = false }
 graphql-orm-operation-catalog = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }
@@ -89,6 +93,7 @@ jsonwebtoken = { workspace = true }
 graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }
+time = { version = "0.3.53", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util"] }
 trybuild = "1"
 proptest = { workspace = true }
