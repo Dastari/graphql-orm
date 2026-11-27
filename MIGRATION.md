@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.242.0: Shared dispatch for generated entity fields
+
+**No action.** Upgrade ORM and macros together. Ordinary generated entity
+objects use shared GraphQL field dispatch with the same generated getters,
+field policies, schema and metadata.
+
 ## 0.240.0: Shared create and upsert field policies
 
 **No action.** Upgrade ORM and macros together. The generated GraphQL

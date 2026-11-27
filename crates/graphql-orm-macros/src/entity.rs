@@ -5090,6 +5090,14 @@ fn generate_entity_tokens(
     let mut order_by_graphql_names = std::collections::BTreeSet::new();
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
+    let mut scalar_object_fields = Vec::new();
+    // Only ordinary objects owned by this derive use the shared dispatch.
+    // Spatial conversions and generated identity methods retain the existing renderer.
+    let plain_object = !schema_only
+        && !legacy_graphql_complex
+        && !hosts_object_fields
+        && !has_repository_entity_attribute(&input.attrs)
+        && entity_meta.federation_keys.is_empty();
     let mut identity_field_methods = Vec::new();
     let mut identity_field_names = Vec::new();
     // GraphQL name of the managed record version field, also served as
@@ -6793,6 +6801,25 @@ fn generate_entity_tokens(
                 )
             };
             object_field_names.push(graphql_name.clone());
+            if plain_object && field_meta.spatial.is_none() {
+                let subscribable = field_meta.subscribe;
+                let policy = quote! {
+                    ::graphql_orm::graphql::wrapper_object::ScalarFieldPolicy {
+                        entity: #entity_name_lit,
+                        field: #graphql_name,
+                        key: #policy_key,
+                        subscribable: #subscribable,
+                    }
+                };
+                scalar_object_fields.push(crate::scalar_object::Field {
+                    getter: getter_name.clone(),
+                    name: graphql_name.clone(),
+                    description: description.to_owned(),
+                    output_type: return_type.clone(),
+                    read: return_expr.clone(),
+                    policy,
+                });
+            }
             object_field_methods.push(quote! {
                 #[doc = #description]
                 #[graphql(name = #graphql_name)]
@@ -7362,6 +7389,21 @@ fn generate_entity_tokens(
             &object_field_names,
             &declared_field_names,
             &object_field_methods,
+        )
+    } else if identity_field_methods.is_empty()
+        && !scalar_object_fields.is_empty()
+        && scalar_object_fields.len() == object_field_methods.len()
+        && object_field_names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == object_field_names.len()
+    {
+        crate::scalar_object::expand(
+            struct_name,
+            &entity_description,
+            &backend_marker,
+            &scalar_object_fields,
         )
     } else {
         quote! {
@@ -10960,4 +11002,48 @@ fn lifetime_tokens(
             ::graphql_orm::graphql::orm::GraphqlLifetimeEncoding::#encoding,
         ))
     })
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod scalar_object_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_generated_object_uses_shared_scalar_dispatch() {
+        let input = syn::parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "records")]
+            struct Record {
+                #[primary_key]
+                id: String,
+                value: Option<i64>,
+            }
+        };
+        let output = generate_graphql_entity(&input).unwrap().to_string();
+        assert!(output.contains("wrapper_object :: resolve_scalar"));
+        assert!(output.contains("async fn value"));
+        assert!(!output.contains("async_graphql :: Object]"));
+    }
+
+    #[test]
+    fn objects_with_extra_generated_fields_retain_the_object_renderer() {
+        for field in [
+            quote! { #[graphql_orm(version = "managed", default = "0")] version: i64 },
+            quote! {
+                #[graphql_orm(spatial(kind = "geometry", geometry_type = "Point", srid = 4326))]
+                geometry: serde_json::Value
+            },
+        ] {
+            let input = syn::parse_quote! {
+                #[graphql_entity(backend = "sqlite", table = "records")]
+                struct Record {
+                    #[primary_key]
+                    id: String,
+                    #field,
+                }
+            };
+            let output = generate_graphql_entity(&input).unwrap().to_string();
+            assert!(output.contains("async_graphql :: Object]"));
+            assert!(!output.contains("wrapper_object :: resolve_scalar"));
+        }
+    }
 }

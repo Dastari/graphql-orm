@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.242.0
+
+- **No action** (refs #677, #358). Ordinary generated entity objects share
+  GraphQL field dispatch, schema registration and field-policy handling to
+  reduce the amount of code compiled per entity.
+  [Migration](MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
+
 ## Unreleased - ORM/macros 0.240.0
 
 - **No action** (refs #677, #724). Generated GraphQL upserts and creates on
