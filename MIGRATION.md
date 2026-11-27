@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.239.0: Plural-name diagnostics
+
+**No action.** Upgrade ORM and macros together. An invalid
+`#[graphql_entity(plural = "...")]` value that caused `GraphQLOperations`
+to panic while generating bulk mutation result types now produces a
+compile error at the string literal.
+
 ## 0.236.0 to 0.237.0: Bound generated write authority
 
 **No action** for supported callers: hosts that use the derives, the
