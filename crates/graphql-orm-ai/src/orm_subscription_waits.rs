@@ -5761,10 +5761,80 @@ mod tests {
         );
     }
 
+    impl WaitFixture {
+        fn set_rules(&mut self, configure: impl FnOnce(&mut crate::AiRuleConstraints)) {
+            let mut constraints = self.rules.constraints().clone();
+            configure(&mut constraints);
+            self.rules = crate::AiResolvedRuleSet::new(self.scope.clone(), constraints, Vec::new())
+                .expect("test rules");
+            Arc::get_mut(&mut self.service)
+                .expect("fixture owns the wait service")
+                .rule_service = Arc::new(TestRules(self.rules.clone()));
+        }
+    }
+
     #[tokio::test]
-    async fn sqlite_event_limit_queues_one_typed_outcome_and_fresh_attempt_consumes_once() {
-        let fixture = wait_fixture().await;
-        let registered = fixture.register().await;
+    async fn sqlite_allowlisted_subscription_refuses_descriptor_fingerprint() {
+        let mut fixture = wait_fixture().await;
+        let unrestricted = fixture.register().await;
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &unrestricted.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        assert_ne!(
+            waiter.compiled_descriptor_fingerprint,
+            fixture.capability_fingerprint
+        );
+        fixture.set_rules(|rules| {
+            rules.allowed_tool_fingerprints =
+                Some(BTreeSet::from([waiter.compiled_descriptor_fingerprint]));
+        });
+
+        assert!(matches!(
+            fixture.register_mode(false).await,
+            Err(AiError::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_allowlisted_subscription_respects_other_rule_denials() {
+        use crate::AiRuleApprovalRequirement::{
+            DescriptorPolicy, NeverApplicationTools, OneShotForAllApplicationTools,
+        };
+        for (enabled, approval) in [
+            (false, DescriptorPolicy),
+            (true, OneShotForAllApplicationTools),
+            (true, NeverApplicationTools),
+        ] {
+            let mut fixture = wait_fixture().await;
+            let fingerprint = fixture.capability_fingerprint.clone();
+            fixture.set_rules(|rules| {
+                rules.allowed_tool_fingerprints = Some(BTreeSet::from([fingerprint]));
+                rules.enabled = enabled;
+                rules.approval_requirement = approval;
+            });
+
+            let result = fixture.register_mode(false).await;
+            if enabled {
+                assert!(matches!(result, Err(AiError::Forbidden)));
+            } else {
+                assert!(matches!(result, Err(AiError::Conflict)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_allowlisted_subscription_registers_queues_at_event_limit_and_adopts_once() {
+        let mut fixture = wait_fixture().await;
+        let fingerprint = fixture.capability_fingerprint.clone();
+        fixture.set_rules(|rules| {
+            rules.allowed_tool_fingerprints = Some(BTreeSet::from([fingerprint]));
+        });
+        let registered = fixture
+            .register_mode(false)
+            .await
+            .expect("the capability allowlist admits the direct subscription wait");
         fixture.source.push(fixture.event(1, "other-1"));
         assert!(matches!(
             fixture.service.process_next("limit-worker-a").await,

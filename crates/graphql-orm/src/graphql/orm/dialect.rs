@@ -1671,7 +1671,7 @@ impl DatabaseBackend {
     }
 
     /// Whether two path parts name the same identifier on this backend.
-    fn same_identifier_part(self, left: &str, right: &str) -> bool {
+    pub(super) fn same_identifier_part(self, left: &str, right: &str) -> bool {
         match self {
             Self::Postgres => {
                 postgres_resolved_identifier(left) == postgres_resolved_identifier(right)

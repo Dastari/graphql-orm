@@ -115,7 +115,7 @@ supersedes: []
   `AiToolCatalog::subscription_capability` and
   `subscription_capability_signature`.
 
-## Unreleased - 0.169.0 (breaking release)
+## Unreleased - 0.170.0 (breaking release)
 
 - The fixed broker admits generated mutations from indexes built in process
   from a mutation catalogue checked against the finished SDL. A mutation
@@ -236,6 +236,13 @@ supersedes: []
   triggers a forced tree kill, and attempted writes retire their request IDs.
   The protocol actor still allowlists lifecycle metadata in thread and turn
   snapshots and user-message echoes. No data migration is needed.
+
+## Unreleased - 0.168.0
+
+- **Fixed (#937).** Direct subscription waits check
+  `allowed_tool_fingerprints` against the registered subscription capability
+  at registration, event processing and adoption.
+  [Migration](MIGRATION.md#01670-to-01680-subscription-wait-allowlists)
 
 ## Unreleased - 0.167.0
 

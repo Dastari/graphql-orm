@@ -1251,7 +1251,7 @@ where
         let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
         let base_columns = T::POSTGRES_SEARCH_BASE_COLUMNS;
         let use_projected_key = !base_columns.is_empty()
-            && super::query::postgres_sort_uses_projected_columns(T::DEFAULT_SORT, base_columns);
+            && super::query::postgres_default_sort_uses_projected_columns::<T>(base_columns);
         let mut values = Vec::new();
         let (source, qualifier, document_key) = if use_projected_key {
             let alias = B::DIALECT.delimit_raw_identifier(
@@ -1315,7 +1315,11 @@ where
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
-                if !crate::graphql::orm::sort_clause_orders_by_column(T::DEFAULT_SORT, column) {
+                if !super::query::entity_sort_orders_by_column::<T>(
+                    B::DIALECT,
+                    T::DEFAULT_SORT,
+                    column,
+                ) {
                     let column = B::DIALECT.render_identifier_path(column);
                     sql.push_str(&format!(", {qualifier}.{column} ASC"));
                 }
@@ -1375,7 +1379,11 @@ where
                 sql.push_str(T::DEFAULT_SORT);
             }
             for column in T::PRIMARY_KEYS {
-                if !crate::graphql::orm::sort_clause_orders_by_column(T::DEFAULT_SORT, column) {
+                if !super::query::entity_sort_orders_by_column::<T>(
+                    B::DIALECT,
+                    T::DEFAULT_SORT,
+                    column,
+                ) {
                     sql.push_str(&format!(", {} ASC", self.entity_column(column)));
                 }
             }

@@ -562,7 +562,9 @@ Mutation and subscription execution do not use the query path. The
 backend-neutral profile package can compile a bounded `ReplayThenLive`
 subscription observation. `OrmAiSubscriptionWaitService` binds that plan to an
 authenticated registered replay source and the existing run queue; it
-rehydrates current authority at open, event and adoption boundaries. See
+rehydrates current authority at open, event and adoption boundaries. For a
+direct subscription wait, the rule's `allowed_tool_fingerprints` allowlist
+matches the registered subscription capability fingerprint. See
 [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
 ## Actionable application refusals

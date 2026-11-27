@@ -1269,7 +1269,7 @@ macro_rules! sqlx_backup_runtime {
                     BackupValueKind::DateTime => row.try_get::<Option<String>, _>(column).and_then(|value| {
                         value
                             .map(|value| {
-                                parse_backup_date_time(&value).map(BackupValue::String)
+                                parse_backup_date_time(&value).map(|stamp| BackupValue::String(stamp.into_canonical()))
                             })
                             .unwrap_or(Ok(BackupValue::Null))
                     }),

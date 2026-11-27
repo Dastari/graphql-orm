@@ -705,11 +705,9 @@ where
     query = query.with_read_visibility(visibility)?;
     // Stable source batches must not depend on non-unique caller ordering alone.
     for column in T::PRIMARY_KEYS {
-        if !query
-            .order_clauses
-            .iter()
-            .any(|clause| crate::graphql::orm::sort_clause_orders_by_column(clause, column))
-        {
+        if !query.order_clauses.iter().any(|clause| {
+            crate::graphql::orm::entity_sort_orders_by_column::<T>(B::DIALECT, clause, column)
+        }) {
             query
                 .order_clauses
                 .push(format!("{} ASC", B::DIALECT.render_identifier_path(column)));
@@ -1260,31 +1258,43 @@ where
             values: Vec::new(),
         })
         .collect::<Vec<_>>();
-    if sample.sorts.is_empty() {
-        // No caller order: the target's declared default order applies,
-        // as on the direct (non-batched) relation path and on root lists.
-        // It is the entity's own trusted `default_sort` text, so it binds
-        // nothing and needs no further authorization. A term that orders by
-        // a grouping key column adds nothing within one parent and is left
-        // out: SQL Server refuses an `ORDER BY` that names a column twice.
-        if let Some(default_sort) =
-            crate::graphql::orm::sort_terms_not_ordered_by(T::DEFAULT_SORT, &sorts)
-        {
-            sorts.push(SortExpression::unbound(default_sort));
-        }
-    } else {
-        sorts.extend(sample.sorts.clone());
-    }
-    for primary_key in T::PRIMARY_KEYS {
-        if !sorts.iter().any(|sort| {
-            crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
-        }) {
-            sorts.push(SortExpression::unbound(format!(
+    let primary_key_tiebreakers = T::PRIMARY_KEYS
+        .iter()
+        .filter(|primary_key| {
+            let orders_by_key = |clause: &str| {
+                crate::graphql::orm::entity_sort_orders_by_column::<T>(
+                    B::DIALECT,
+                    clause,
+                    primary_key,
+                )
+            };
+            let grouped_by_key = sorts.iter().any(|sort| orders_by_key(&sort.clause));
+            let already_ordered = if sample.sorts.is_empty() {
+                orders_by_key(T::DEFAULT_SORT)
+            } else {
+                sample.sorts.iter().any(|sort| orders_by_key(&sort.clause))
+            };
+            !grouped_by_key && !already_ordered
+        })
+        .map(|primary_key| {
+            SortExpression::unbound(format!(
                 "{} ASC",
                 B::DIALECT.render_identifier_path(primary_key)
-            )));
-        }
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // SQL Server refuses a column repeated in the ORDER BY. A default term
+    // that names a grouping key adds nothing to the order within each parent.
+    if sample.sorts.is_empty() {
+        sorts.extend(crate::graphql::orm::default_sort_terms_not_ordered_by::<T>(
+            B::DIALECT,
+            &sample.fk_columns,
+        ));
+    } else {
+        sorts.extend_from_slice(&sample.sorts);
     }
+    sorts.extend(primary_key_tiebreakers);
     let sort_sql = sorts
         .iter()
         .map(|sort| sort.clause.clone())
@@ -1699,7 +1709,11 @@ where
     sorts.retain(|sort| !sort.clause.trim().is_empty());
     for primary_key in T::PRIMARY_KEYS {
         if !sorts.iter().any(|sort| {
-            crate::graphql::orm::sort_clause_orders_by_column(&sort.clause, primary_key)
+            crate::graphql::orm::entity_sort_orders_by_column::<T>(
+                dialect,
+                &sort.clause,
+                primary_key,
+            )
         }) {
             sorts.push(SortExpression::unbound(format!(
                 "{} ASC",

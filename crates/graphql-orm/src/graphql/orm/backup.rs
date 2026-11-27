@@ -1,6 +1,6 @@
 use super::{
     BackupValueKind, ColumnBackupPolicy, DatabaseBackend, EntityBackupDescriptor, EntityMetadata,
-    GraphqlOrmSchemaSnapshot, OrmBackend, SqlValue,
+    GraphqlOrmSchemaSnapshot, OrmBackend, RuntimeDateTime, SqlValue,
 };
 use std::collections::BTreeMap;
 
@@ -357,7 +357,7 @@ fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> 
 /// Reject parsed leap seconds before the record engine's canonicalization can round them away,
 /// then keep the UTC result inside the range both backup backends can store. Offsets and
 /// microsecond rounding can move a four-digit input outside this range, so check the output year.
-fn parse_backup_date_time(text: &str) -> crate::Result<String> {
+fn parse_backup_date_time(text: &str) -> crate::Result<RuntimeDateTime> {
     let parsed = crate::temporal::parse_rfc3339(text)
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
     // Rounding .9999995 within a leap second carries into the next minute.
@@ -366,9 +366,8 @@ fn parse_backup_date_time(text: &str) -> crate::Result<String> {
             "backup date-time cannot contain a leap second".to_owned(),
         ));
     }
-    let canonical = parsed.canonical_utc();
-    // Canonical UTC text has exactly 27 bytes for a four-digit year.
-    if canonical.len() != 27 || canonical.starts_with("0000-") {
+    let canonical = RuntimeDateTime::from_timestamp(parsed);
+    if !canonical.is_portable() {
         return Err(sqlx::Error::Protocol(
             "backup date-time is outside the portable range 0001-9999".to_owned(),
         ));
@@ -875,11 +874,7 @@ fn backup_value_to_sql_value(
             if backend == DatabaseBackend::Postgres
                 && logical_type == BackupValueKind::DateTime =>
         {
-            let canonical = parse_backup_date_time(value)?;
-            let timestamp = canonical
-                .parse::<chrono::DateTime<chrono::Utc>>()
-                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-            SqlValue::native_timestamp(canonical, timestamp)
+            parse_backup_date_time(value)?.native_timestamp_bind()
         }
         BackupValue::String(value) => SqlValue::String(value.clone()),
         BackupValue::Uuid(value) => SqlValue::Uuid(*value),
@@ -1274,10 +1269,7 @@ mod tests {
         ] {
             let parsed = parse_backup_date_time(raw).unwrap();
             assert_eq!(parsed.as_str(), expected, "{raw}");
-            assert_eq!(
-                parsed,
-                super::super::RuntimeDateTime::parse(raw).unwrap().as_str()
-            );
+            assert_eq!(parsed, RuntimeDateTime::parse(raw).unwrap());
         }
         assert!(parse_backup_date_time("9999-12-31T23:59:59.9999995Z").is_err());
     }

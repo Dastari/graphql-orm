@@ -12,15 +12,19 @@ supersedes: []
 
 Runtime schema conversion uses structured default order terms emitted by the
 entity derives.
-See the [migration guide](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942).
 
 SQL Server index introspection and migration plans distinguish covering
 indexes from their plain-key equivalents.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
 
 In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
-fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
+
+Version 0.235.0 preserves authorized direct queries for generated
+relations without a compatible registered loader. See
+[generated relation loaders](../../docs/reference/graphql-orm/entities-and-relations.md#current-authority-for-generated-relationship-targets).
 
 Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
 chrono fields and stored date-time formats carry forward without migration.
