@@ -1484,13 +1484,22 @@ impl AiCapabilityDiscoveryBroker {
         };
         ranked.retain(|candidate| admit(candidate.index(), candidate.entry()));
         let kept = Box::pin(self.admit_ranked(&principal, run, &ranked, per_root)).await?;
-        // Rank again on each entity's own metadata and its admitted roots,
-        // so a denied root's text decides neither whether nor where its
-        // entity appears. Per-root ranks depend on the root alone already.
-        let order = if per_root {
-            (0..kept.len()).collect::<Vec<_>>()
-        } else {
+        // Admission preserves the initial order. Whole-entry removals
+        // affect neither other entries' fixed scores nor their ID ties.
+        // Only a retained entity with a denied root can change its match
+        // or rank. Per-root ranks already depend on the root alone.
+        let needs_rerank = !per_root
+            && kept.iter().any(|(candidate, admitted)| {
+                candidate
+                    .entry()
+                    .operations
+                    .iter()
+                    .any(|member| !admitted.contains(&member.capability_id))
+            });
+        let order = if needs_rerank {
             indexes.rank_admitted(query, &kept)?
+        } else {
+            (0..kept.len()).collect::<Vec<_>>()
         };
         let (candidates, visible) = order
             .into_iter()
@@ -10280,6 +10289,118 @@ mod tests {
                 )
                 .await
                 .expect("discovery")
+        }
+    }
+
+    #[tokio::test]
+    async fn search_matches_legacy_ranking_after_admission() {
+        let first = two_root_entity_index("target-policy-v1");
+        let second = generated_index_for("other-application", "other", "target-policy-v1");
+        let indexes = Arc::new(AiCapabilityIndexSet::compile([first, second]).expect("index set"));
+        let principal = principal();
+        let reference = principal.reference();
+        let run = run_binding();
+        let all = indexes.browse_matches(None, None).expect("entries");
+        let first_entity = all
+            .iter()
+            .find(|candidate| candidate.entry().operations.len() == 2)
+            .expect("two-root entity");
+        let denied_root = first_entity
+            .operations()
+            .into_iter()
+            .find(|root| root.entry().operation_name == "RecordBySubject")
+            .expect("root with a unique search term")
+            .entry()
+            .id
+            .as_str();
+        let denied_entity = first_entity.entry().id.as_str();
+        let admitted_ids = all
+            .iter()
+            .copied()
+            .flat_map(|candidate| std::iter::once(candidate).chain(candidate.operations()))
+            .map(|candidate| candidate.entry().id.as_str())
+            .collect::<BTreeSet<_>>();
+        let current = Arc::new(CurrentIndexes(RwLock::new(indexes.clone())));
+        for (text, entity_or_operation, maximum_results, match_count) in [
+            ("record", None, 2, 2),
+            ("heading", None, 1, 1),
+            ("record", Some("RecordBySubject"), 1, 1),
+            ("unmatchedword", None, 2, 0),
+        ] {
+            let query = AiCapabilitySearchQuery {
+                text: text.to_owned(),
+                namespace: None,
+                kind: Some(AiCapabilityKind::GeneratedEntity),
+                entity_or_operation: entity_or_operation.map(str::to_owned),
+                maximum_results,
+            };
+            let ranked = indexes.ranked_matches(&query).expect("ranked matches");
+            assert_eq!(ranked.len(), match_count);
+            let expected_calls: usize = ranked
+                .iter()
+                .map(|candidate| 1 + candidate.operations().len())
+                .sum();
+            for scope in [
+                admitted_ids.clone(),
+                admitted_ids
+                    .difference(&BTreeSet::from([denied_root]))
+                    .copied()
+                    .collect(),
+                admitted_ids
+                    .difference(&BTreeSet::from([denied_entity]))
+                    .copied()
+                    .collect(),
+                BTreeSet::new(),
+            ] {
+                let admitted = ranked
+                    .iter()
+                    .filter_map(|&candidate| {
+                        let roots = candidate
+                            .operations()
+                            .iter()
+                            .filter(|root| scope.contains(root.entry().id.as_str()))
+                            .map(|root| root.entry().id.clone())
+                            .collect::<BTreeSet<_>>();
+                        (scope.contains(candidate.entry().id.as_str()) && !roots.is_empty())
+                            .then_some((candidate, roots))
+                    })
+                    .collect::<Vec<_>>();
+                let legacy = indexes
+                    .rank_admitted(&query, &admitted)
+                    .expect("legacy ranking")
+                    .into_iter()
+                    .take(usize::from(maximum_results))
+                    .map(|position| {
+                        let (candidate, roots) = &admitted[position];
+                        (
+                            candidate.admitted_candidate(roots),
+                            visible_fingerprint(candidate.entry(), roots),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let authority = Arc::new(PermittedSet::new(scope));
+                let broker = AiCapabilityDiscoveryBroker::new(
+                    Arc::new(Resolver(principal.clone())),
+                    current.clone(),
+                    authority.clone(),
+                    Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+                    Duration::seconds(30),
+                )
+                .expect("broker");
+                let (result, visible) = broker
+                    .search_admitted(&reference, &run, &query, false, |_, _| true)
+                    .await
+                    .expect("authorized search");
+                assert_eq!(
+                    result
+                        .candidates
+                        .into_iter()
+                        .zip(visible)
+                        .collect::<Vec<_>>(),
+                    legacy
+                );
+                assert_eq!(authority.calls.load(Ordering::SeqCst), expected_calls);
+            }
         }
     }
 

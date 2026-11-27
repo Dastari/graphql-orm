@@ -12,6 +12,12 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Capability discovery ranking reuse (#551)
+
+**No action.** Discovery reuses the initial rank of admitted entries when
+every retained entity keeps all its roots. Hosts continue to decide admission
+on every request. No data migration is needed.
+
 ### Ungrouped counts through the capability broker (#551)
 
 **No action.** For an ungrouped count, send the `COUNT` metrics as dotted

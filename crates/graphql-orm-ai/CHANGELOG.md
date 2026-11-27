@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.173.0 (breaking release)
+## Unreleased - 0.174.0 (breaking release)
+
+- Capability discovery reuses the initial ranking after fresh policy
+  admission when every retained entity keeps all its grouped roots (#551).
 
 - Fixed broker execution of ungrouped counts on generated aggregate roots
   (#551). The catalog supplies the empty grouping list before compiling the

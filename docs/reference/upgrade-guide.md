@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI 0.174.0 (#551). Discovery reuses ranking when retained entities keep all grouped roots after fresh policy admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#capability-discovery-ranking-reuse-551)
+
 - **No action** — AI 0.173.0 (#551). Generated aggregate roots accept ungrouped counts through the capability broker. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#ungrouped-counts-through-the-capability-broker-551)
 
 - **No action** — AI 0.172.0 (#551). The capability context benchmark adds deterministic question-to-execute measurements at 400 and 40,000 entries. [Benchmark](../../crates/graphql-orm-ai/docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark)
