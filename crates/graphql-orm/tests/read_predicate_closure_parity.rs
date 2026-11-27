@@ -933,6 +933,15 @@ async fn every_backend_admits_the_reference_sets() {
             }
         }
         admitted.sort();
+        for id in admitted.iter().chain([&-1]) {
+            fingerprint = (fingerprint ^ *id as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        if admitted != expected {
+            mismatches.push(format!(
+                "{name}: admitted {admitted:?}, expected {expected:?}"
+            ));
+        }
+
         if index >= first_shape_case {
             let candidate_sql = text.0.lock().unwrap().clone();
             // A relation directly in the outer target is aggregated.
@@ -975,14 +984,6 @@ async fn every_backend_admits_the_reference_sets() {
             let original_sql = text.0.lock().unwrap();
             assert!(!original_sql.contains("AS __gom_closure_2_i"), "{name}");
             assert_nested_rendering(name, &original_sql, &candidate_sql);
-        }
-        for id in admitted.iter().chain([&-1]) {
-            fingerprint = (fingerprint ^ *id as u64).wrapping_mul(0x0100_0000_01b3);
-        }
-        if admitted != expected {
-            mismatches.push(format!(
-                "{name}: admitted {admitted:?}, expected {expected:?}"
-            ));
         }
     }
     eprintln!(
