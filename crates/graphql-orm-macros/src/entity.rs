@@ -6730,9 +6730,17 @@ fn generate_entity_tokens(
                     filter_type.as_str(),
                     "date" | "int64" | "string" | "number" | "uuid" | "bytes"
                 ) {
+                    let validate = if filter_type == "date"
+                        && backend == BackendKind::Postgres
+                        && field_meta.time_offset_datetime
+                    {
+                        quote! { filter.validate_postgres_offset_datetime()?; }
+                    } else {
+                        quote! { filter.validate()?; }
+                    };
                     filter_validation_checks.push(quote! {
                         if let Some(filter) = &self.#filter_field_name {
-                            filter.validate()?;
+                            #validate
                         }
                     });
                 }
@@ -9471,13 +9479,14 @@ fn generate_row_field_assignment(
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
     if meta.time_offset_datetime {
-        let read = if backend == BackendKind::Postgres {
+        let decoded = if backend == BackendKind::Postgres {
             quote! { ::graphql_orm::graphql::orm::postgres_offset_datetime(row, #db_col)? }
         } else {
-            quote! { row.try_get(#db_col)? }
-        };
-        let decoded = quote! {
-            ::graphql_orm::graphql::orm::validate_decoded_offset_datetime(#read, #db_col)?
+            quote! {
+                ::graphql_orm::graphql::orm::validate_decoded_offset_datetime(
+                    row.try_get(#db_col)?, #db_col,
+                )?
+            }
         };
         let value = if is_option_type(field_type) {
             decoded

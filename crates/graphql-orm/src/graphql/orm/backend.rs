@@ -1352,20 +1352,27 @@ impl sqlx::Encode<'_, sqlx::Postgres> for CheckedOffsetDateTime {
 #[cfg(all(feature = "postgres", feature = "time"))]
 impl<'r> sqlx::Decode<'r, sqlx::Postgres> for CheckedOffsetDateTime {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        if value.format() != sqlx::postgres::PgValueFormat::Binary {
-            if matches!(value.as_str()?, "infinity" | "-infinity") {
-                return Err("infinite PostgreSQL timestamp".into());
+        let utc = match value.format() {
+            sqlx::postgres::PgValueFormat::Text => {
+                let text = value.as_str()?;
+                if matches!(text, "infinity" | "-infinity") {
+                    return Err("infinite PostgreSQL timestamp".into());
+                }
+                crate::temporal::postgres_text_timestamp(text)
             }
-            return <time::OffsetDateTime as sqlx::Decode<sqlx::Postgres>>::decode(value).map(Self);
+            sqlx::postgres::PgValueFormat::Binary => {
+                let micros = <i64 as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+                if matches!(micros, i64::MIN | i64::MAX) {
+                    return Err("infinite PostgreSQL timestamp".into());
+                }
+                // SQLx adds the binary timestamp to the PostgreSQL epoch unchecked.
+                crate::temporal::postgres_to_primitive_datetime(micros)
+                    .map(time::PrimitiveDateTime::assume_utc)
+            }
         }
-        let micros = <i64 as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
-        if matches!(micros, i64::MIN | i64::MAX) {
-            return Err("infinite PostgreSQL timestamp".into());
-        }
-        // SQLx adds the binary timestamp to the PostgreSQL epoch unchecked.
-        crate::temporal::postgres_to_primitive_datetime(micros)
-            .map(|value| Self(value.assume_utc()))
-            .ok_or_else(|| "PostgreSQL timestamp is outside the time range".into())
+        .ok_or("PostgreSQL timestamp is outside the time range")?;
+        validate_offset_datetime(utc)?;
+        Ok(Self(utc))
     }
 }
 

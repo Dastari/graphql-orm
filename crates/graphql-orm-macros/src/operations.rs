@@ -5549,13 +5549,14 @@ fn generate_graphql_operations_unfiltered(
     };
     let upsert_sql_expression = if upsert_config.is_some() {
         quote! {
-            ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
+            ::graphql_orm::graphql::orm::render_upsert_sql_with_clock(
+                #sql_dialect,
                 #table_name,
                 &[#(#upsert_insert_column_literals),*],
                 &[#(#upsert_insert_value_literals),*],
                 &[#(#upsert_conflict_column_literals),*],
                 &[#(#upsert_update_column_literals),*],
-                #has_updated_at_column,
+                #has_updated_at_column.then(#struct_name::__gom_current_updated_at_expr),
                 #managed_version_column_option,
             )
         }
@@ -5575,13 +5576,14 @@ fn generate_graphql_operations_unfiltered(
                     .filter(|(column, _)| !__gom_denied_upsert_columns.contains(column))
                     .map(|(_, rendered)| *rendered)
                     .collect();
-                ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
+                ::graphql_orm::graphql::orm::render_upsert_sql_with_clock(
+                    #sql_dialect,
                     #table_name,
                     &[#(#upsert_insert_column_literals),*],
                     &[#(#upsert_insert_value_literals),*],
                     &[#(#upsert_conflict_column_literals),*],
                     &__gom_update_columns,
-                    #has_updated_at_column,
+                    #has_updated_at_column.then(#struct_name::__gom_current_updated_at_expr),
                     #managed_version_column_option,
                 )
             }

@@ -33,15 +33,19 @@ If the text column has a default, drop it before the type change and
 recreate it with a timestamp expression if needed. Generated PostgreSQL
 date comparisons and both `between` bounds cast their parameters to
 `TIMESTAMPTZ`. PostgreSQL interprets date-only operands and timestamps
-without an explicit offset in the session time zone.
+without an explicit offset in the session time zone. For a range with a
+session-local bound, PostgreSQL resolves both endpoints before comparing them.
+A reversed range with a session-local bound matches no rows.
 
 PostgreSQL returns timestamps in UTC at microsecond precision and
-rejects both infinities on read. SQL Server retains the stored offset at
-100 ns precision and requires offsets in whole minutes within ±14 hours.
+rejects both infinities on read. Simple-query decoding normalizes the session's
+rendered offset to UTC using PostgreSQL's ISO date style, the SQLx default.
+SQL Server retains the stored offset at 100 ns precision and requires offsets
+in whole minutes within ±14 hours.
 SQLite stores RFC 3339 text, preserves the offset and uses text ordering,
 which can differ from instant ordering. Generated `created_at` and
 `updated_at` defaults and automatic `updated_at` assignments use the
-backend's timestamp clock for opted-in fields.
+backend's timestamp clock for opted-in fields, including on upsert conflicts.
 
 The async-graphql `DateTime` scalar for `time` parses RFC 3339 and emits UTC
 with `Z`. Opted-in values must have years in 0001–9999 both as stored or

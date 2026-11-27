@@ -580,7 +580,7 @@ pub fn date_filter_truth_at(
     if filter.has_calendar_predicate() {
         use crate::temporal;
 
-        let Some(value) = temporal::parse_calendar(value) else {
+        let Some((value, _)) = temporal::parse_calendar(value) else {
             return Some(false);
         };
         let value = value.ordering_key();

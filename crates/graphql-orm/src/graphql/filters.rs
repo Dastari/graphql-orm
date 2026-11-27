@@ -565,6 +565,17 @@ impl DateFilter {
 
     /// Validate bounds shared by GraphQL-decoded and programmatically built filters.
     pub fn validate(&self) -> crate::Result<()> {
+        self.validate_inner(false)
+    }
+
+    /// Validate a generated PostgreSQL offset timestamp filter.
+    #[cfg(all(feature = "postgres", feature = "time"))]
+    #[doc(hidden)]
+    pub fn validate_postgres_offset_datetime(&self) -> crate::Result<()> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, use_session_time_zone: bool) -> crate::Result<()> {
         if let Some(days) = self.recent_days {
             validate_positive_calendar_span("recentDays", days)?;
         }
@@ -578,13 +589,19 @@ impl DateFilter {
             validate_relative_offset("lteRelative", relative.days)?;
         }
         if let Some(range) = &self.between {
-            let start = crate::temporal::parse_calendar(&range.start).ok_or_else(|| {
-                invalid_date_filter("between.start must be an ISO-8601 date or timestamp")
-            })?;
-            let end = crate::temporal::parse_calendar(&range.end).ok_or_else(|| {
-                invalid_date_filter("between.end must be an ISO-8601 date or timestamp")
-            })?;
-            if start.ordering_key() > end.ordering_key() {
+            let (start, start_has_offset) = crate::temporal::parse_calendar(&range.start)
+                .ok_or_else(|| {
+                    invalid_date_filter("between.start must be an ISO-8601 date or timestamp")
+                })?;
+            let (end, end_has_offset) =
+                crate::temporal::parse_calendar(&range.end).ok_or_else(|| {
+                    invalid_date_filter("between.end must be an ISO-8601 date or timestamp")
+                })?;
+            // PostgreSQL resolves local bounds in the executing session's time zone,
+            // including DST transitions. BETWEEN compares the resolved instants.
+            if (!use_session_time_zone || (start_has_offset && end_has_offset))
+                && start.ordering_key() > end.ordering_key()
+            {
                 return Err(invalid_date_filter(
                     "between.start must not be after between.end",
                 ));
@@ -647,7 +664,7 @@ impl DateFilter {
     ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
         use crate::graphql::orm::{SqlDialect, SqlValue};
 
-        self.validate()?;
+        self.validate_inner(cast_timestamptz)?;
         let mut conditions = Vec::new();
         let mut values = Vec::new();
         let operand = |index| {

@@ -26,6 +26,43 @@ pub(crate) fn postgres_to_primitive_datetime(micros: i64) -> Option<PrimitiveDat
     time::macros::datetime!(2000-01-01 0:00).checked_add(Duration::microseconds(micros))
 }
 
+/// Decode ISO DateStyle output, which SQLx requests at connection startup.
+#[cfg(all(feature = "postgres", feature = "time"))]
+pub(crate) fn postgres_text_timestamp(text: &str) -> Option<OffsetDateTime> {
+    let (text, is_bc) = match text.strip_suffix(" BC") {
+        Some(adjusted) => (adjusted, true),
+        None => (text, false),
+    };
+    let (date, clock_with_offset) = text.split_once(' ')?;
+    let (clock, offset) = clock_with_offset.split_at(clock_with_offset.find(['+', '-'])?);
+    let clock = Time::parse(
+        clock,
+        format_description!("[hour]:[minute]:[second][optional [.[subsecond]]]"),
+    )
+    .ok()?;
+    let offset = UtcOffset::parse(
+        offset,
+        format_description!(
+            "[offset_hour sign:mandatory][optional [:[offset_minute]]][optional [:[offset_second]]]"
+        ),
+    )
+    .ok()?;
+    let utc_shift = Duration::seconds(-i64::from(offset.whole_seconds()));
+
+    // The session-local date can lie just outside the UTC wire range.
+    let utc = match (is_bc, date) {
+        (true, "0001-12-31") => parse_date("0000-12-31")?
+            .with_time(clock)
+            .checked_add(utc_shift),
+        (true, _) => None,
+        (false, "10000-01-01") => parse_date("9999-12-31")?
+            .with_time(clock)
+            .checked_add(Duration::DAY + utc_shift),
+        (false, _) => parse_date(date)?.with_time(clock).checked_add(utc_shift),
+    }?;
+    Some(utc.assume_utc())
+}
+
 /// Preserve the full chrono range alongside the internal time engine.
 #[derive(Clone, Copy)]
 pub(crate) enum Timestamp {
@@ -236,27 +273,32 @@ pub(crate) fn parse_naive(text: &str, separator: u8) -> Option<PrimitiveDateTime
     PrimitiveDateTime::parse(text, description).ok()
 }
 
-pub(crate) fn parse_calendar(text: &str) -> Option<Timestamp> {
+/// Parse a calendar operand and record whether it includes an explicit offset.
+pub(crate) fn parse_calendar(text: &str) -> Option<(Timestamp, bool)> {
     if let Ok(value) = parse_rfc3339(text) {
-        return Some(value);
+        return Some((value, true));
     }
     for (separator, legacy) in [
         (b'T', "%Y-%m-%dT%H:%M:%S%.f"),
         (b' ', "%Y-%m-%d %H:%M:%S%.f"),
     ] {
         if let Some(value) = parse_naive(text, separator) {
-            return Some(Timestamp::from_utc(value));
+            return Some((Timestamp::from_utc(value), false));
         }
         if let Ok(value) = chrono::NaiveDateTime::parse_from_str(text, legacy) {
-            return Some(Timestamp::from_chrono(value.and_utc().fixed_offset()));
+            return Some((
+                Timestamp::from_chrono(value.and_utc().fixed_offset()),
+                false,
+            ));
         }
     }
     if let Some(date) = parse_date(text) {
-        return Some(Timestamp::from_utc(date.midnight()));
+        return Some((Timestamp::from_utc(date.midnight()), false));
     }
     let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
-    Some(Timestamp::from_chrono(
-        date.and_hms_opt(0, 0, 0)?.and_utc().fixed_offset(),
+    Some((
+        Timestamp::from_chrono(date.and_hms_opt(0, 0, 0)?.and_utc().fixed_offset()),
+        false,
     ))
 }
 
