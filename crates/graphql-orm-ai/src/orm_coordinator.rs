@@ -5771,7 +5771,7 @@ mod tests {
                     call_id: "replayed-call".to_owned(),
                     tool_id: "graphql.capabilities.execute".to_owned(),
                     provider_name: "graphql_capabilities_execute".to_owned(),
-                    output: json!({"event": {"secret": "payload"}}),
+                    output: json!({"historicalToolContentWithheld": true, "event": {"secret": "payload"}}),
                 },
             ],
         };
@@ -5809,7 +5809,9 @@ mod tests {
             output,
             &crate::provider_calls::withheld_subscription_output(
                 crate::AiSubscriptionResultRefusal::AuthorityRevoked,
-                json!({"event": {"secret": "payload"}}).to_string().len(),
+                json!({"historicalToolContentWithheld": true, "event": {"secret": "payload"}})
+                    .to_string()
+                    .len(),
             )
             .expect("a marker no longer than the output fits")
         );

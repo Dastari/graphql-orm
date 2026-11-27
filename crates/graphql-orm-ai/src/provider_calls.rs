@@ -2118,7 +2118,12 @@ impl AiProviderCallPlan {
         lease: &AiRunLease,
         continuation: ModelContinuation,
     ) -> Self {
-        self.request.tools[0].parameters["properties"] = serde_json::json!({});
+        self.request.tools[0].parameters = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false,
+        });
         self.request.continuation = Some(continuation);
         self.request.continuation_mode = ModelContinuationMode::StatelessReplay;
         let mut inference = Self::test_chat_plan(lease, self.budget.scope.clone())
@@ -2140,7 +2145,7 @@ impl AiProviderCallPlan {
     }
 
     /// The planned continuation of a test plan.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_continuation(&self) -> Option<&ModelContinuation> {
         self.request.continuation.as_ref()
     }
