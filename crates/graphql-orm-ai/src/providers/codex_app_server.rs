@@ -10149,6 +10149,7 @@ pub(crate) mod tests {
                 "generated_entity",
                 "reviewed_static",
                 "generated_mutation",
+                "generated_subscription",
                 null
             ]))
         );

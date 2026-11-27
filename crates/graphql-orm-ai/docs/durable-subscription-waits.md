@@ -3,7 +3,7 @@ title: "Durable bounded subscription waits"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -32,10 +32,32 @@ and asks the source to authorize the exact projected event. Nonmatching cursor
 progress, or a matching/event-limit outcome plus the existing run-queue
 continuation, commits atomically.
 
+A wait can also be registered from a fixed-broker execute call that resolved
+to a generated subscription
+(`AiSubscriptionWaitRegistrationContext::with_capability_delivery`; see
+[Generated subscriptions through the fixed broker](capability-discovery-and-execution.md#generated-subscriptions-through-the-fixed-broker)).
+Its tool-call row records both the provider-facing broker call and the
+resolved subscription, and its result answers the broker call. Construct
+the service with `OrmAiSubscriptionWaitService::with_capability_broker`: the
+host's broker, configured with `with_revocation_version`, re-admits such a
+wait for its registering run at registration
+and at every claim, delivery and resumption, so a removed broker entry
+closes it as `capability_stale` and a revoked broker policy as
+`subscription_authority_revoked`.
+
+Hierarchical rules admit a subscription by its capability fingerprint, the
+fingerprint of its offered definition, never the broker's or a per-plan one.
+Every claim, delivery and resumption also proves the subscription is still
+registered with the fingerprint it was registered against; a removed or
+replaced one closes the wait as `capability_stale`.
+
 Wrap the ordinary checkpoint adopter with `AiSubscriptionCheckpointAdopter`.
 Before the next provider call it reopens the protected outcome, recompiles the
 capability, rechecks current principal/rules/target/source event and egress,
-then consumes the adoption once. Stop/cancellation closes the waiter and its
+then consumes the adoption once. Hosts driving their own provider turns must
+also [run final admission](capability-discovery-and-execution.md#generated-subscriptions-through-the-fixed-broker)
+after asynchronous preparation and apply the result before dispatch.
+Stop/cancellation closes the waiter and its
 tool step atomically. Timeout and event-limit are ordinary typed tool outcomes;
 retention reset becomes `RecoveryRequired`.
 

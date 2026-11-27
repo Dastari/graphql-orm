@@ -34,6 +34,12 @@ approved as the resolved mutation. Apply AI schema module 0.86.0.
 [Generated mutations through the broker](docs/capability-discovery-and-execution.md#generated-mutations-through-the-fixed-broker) ·
 [migration](MIGRATION.md#generated-mutations-through-the-capability-broker-551)
 
+A fixed-broker session can also opt in to generated subscriptions, which the
+host registers as durable waits classified by the resolved subscription;
+the wait answers the provider's broker call.
+[Generated subscriptions through the broker](docs/capability-discovery-and-execution.md#generated-subscriptions-through-the-fixed-broker) ·
+[migration](MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
+
 AI 0.167.0 verifies the stored provider plan hash when executing an approved
 generated mutation. See the [migration guide](MIGRATION.md#01660-to-01670-approved-generated-mutations).
 
@@ -558,8 +564,11 @@ subscription observation. `OrmAiSubscriptionWaitService` binds that plan to an
 authenticated registered replay source and the existing run queue; it
 rehydrates current authority at open, event and adoption boundaries. For a
 direct subscription wait, the rule's `allowed_tool_fingerprints` allowlist
-matches the registered subscription capability fingerprint. See
-[durable bounded subscription waits](docs/durable-subscription-waits.md).
+matches the registered subscription capability fingerprint. Brokered
+waits require a host revocation version and final admission before provider
+dispatch. Stateless checkpoint adoption verifies each replayed tool turn
+against its original attempt, including when a later worker takes over.
+See [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
 ## Actionable application refusals
 

@@ -14,6 +14,12 @@ The next breaking tool-profile release adds continuable keyset pages, compact mu
 and subscription signatures, and capability contract fingerprints.
 See the [migration guide](MIGRATION.md).
 
+AI tool profiles 0.36.0 records whether an index was built in process from a
+typed subscription catalogue, so the fixed broker admits subscriptions only
+from one whose compiler refused `@transientInput` roots, and summarizes a
+subscription's observation bounds for broker describe.
+See the [migration guide](MIGRATION.md#0360-brokered-subscription-indexes).
+
 AI tool profiles 0.32.0 refuses tool profiles, loaded manifests and typed
 capabilities that would carry a transient mutation argument
 (`@transientInput`).

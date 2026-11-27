@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-21
+last_reviewed: 2026-11-26
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -11,6 +11,153 @@ supersedes: []
 # Migration Guide
 
 ## Breaking release (unreleased)
+
+### Generated subscriptions through the capability broker (#551)
+
+**Action needed** for fixed-broker hosts, and for hosts whose rules list
+subscription fingerprints. This completes the #551 broker scope.
+
+1. **Rebind (same release as broker version 3).** The discover definition's
+   `kind` enum adds `generated_subscription`, and the discover and execute
+   definitions change (execute gains an optional `observation` argument), so
+   those fingerprints change again in this release. Admit the current five
+   broker fingerprints wherever you list them by value.
+2. **Rule allowlists admit subscriptions by capability fingerprint.** The
+   wait service used to check `allowed_tool_fingerprints` against the
+   per-plan compiled descriptor fingerprint, so no allowlist could admit a
+   direct subscription. It now uses the subscription's capability
+   fingerprint (the fingerprint of its offered definition). Rules without an
+   allowlist are unaffected. If you list subscriptions, list their
+   capability fingerprints.
+3. **Stale subscriptions close as `capability_stale`.** A durable wait whose
+   subscription capability was removed, or replaced with a different
+   fingerprint, now closes as `capability_stale` (run `Failed`) at its next
+   claim or delivery, instead of `subscription_authority_revoked`, and its
+   resumption is refused with `AI_CAPABILITY_STALE`. When that refusal
+   happens at resumption (adoption or consumption), both coordinators now
+   record `capability_stale` as the run's `RecoveryRequired` code (and error
+   code) instead of `checkpoint_adoption_failed`,
+   `classified_mutation_checkpoint_adoption_failed`,
+   `checkpoint_consumption_failed` or
+   `subscription_checkpoint_consumption_failed`. Every other adoption
+   failure keeps its old code. Update alerting or reporting that matches the
+   old codes for these cases.
+4. **Opt in (optional).** Call
+   `AiCapabilityBrokerSession::with_brokered_subscriptions` only on sessions
+   whose host loop routes a brokered subscription to the wait service. Build
+   the broker's index in process from the subscription catalogue compiled
+   against the finished SDL; that compiler refuses `@transientInput` roots
+   and a deserialized index offers no subscription. Then, for a provider
+   turn whose one call is `graphql.capabilities.execute` and
+   `delivery.session().holds_loaded_subscription(call.arguments())`:
+
+   ```rust,ignore
+   let context = AiSubscriptionWaitRegistrationContext::new(/* as for a direct wait */)?
+       .with_capability_delivery(delivery.clone());
+   waits.register_wait(&lease, &provider_result, context).await?;
+   ```
+
+   Construct the wait service with
+   `OrmAiSubscriptionWaitService::with_capability_broker`, passing the
+   host's `AiCapabilityDiscoveryBroker` (the one whose current index and
+   host capability policy decide brokered capabilities). Every service
+   instance that claims or resumes waits needs it. A broker-routed wait is
+   re-admitted by that broker for its registering run at registration and
+   again at every claim, delivery and resumption. Configure the broker with
+   `AiCapabilityDiscoveryBroker::with_revocation_version` and implement
+   `AiCapabilityRevocationVersion`. Publish a strictly larger version with
+   each policy revocation and index replacement. For a multi-write update,
+   report `None` until the new state and version are both visible. A broker
+   lacking the version source cannot register brokered waits.
+
+   Both coordinators call `admit_subscription_results` as their last
+   asynchronous preparation step before invoking the provider executor.
+   Admission reads the version, re-admits every adopted brokered wait,
+   awaits fallback admission, re-checks the admitted index fingerprints,
+   and compares the version again. It repeats the whole pass on drift or an
+   unstable version, with at most three attempts, then fails closed. There
+   is no await between the final successful comparison and return. This
+   orders delivery against changes published before that comparison. The
+   executor and transport run after it.
+
+   Host implementations of both checkpoint-adapter traits must now
+   implement `admit_subscription_results` explicitly. An adapter with no
+   waits returns an empty result. An adapter wrapping the durable-wait
+   service forwards admission. Hosts driving turns themselves must run
+   final admission after other asynchronous preparation, apply it with
+   `AiProviderCallPlan::withhold_subscription_results`, and update their
+   loop guard with `rebind_withheld_history` if the chain changed. Refuse
+   dispatch on either error, and call the executor without awaiting other
+   work. Refused current results fail the turn with `capability_stale` or
+   `subscription_authority_revoked`. Refused stateless history is replaced
+   with a fixed marker. Replay egress manifests account for the marker and
+   checkpoint adoption preserves it on restart. Egress policies that
+   allowlist source kinds can admit the public, runtime-authored
+   `withheld_subscription_result` source for a marker.
+
+   A removed or replaced index entry, or one without the in-process proof,
+   closes the wait
+   as `capability_stale`, and a host policy denial closes it as
+   `subscription_authority_revoked`, including a refusal found while a
+   timeout is delivered (resumption refuses with
+   `AI_CAPABILITY_STALE` or `Forbidden`). Without the broker, broker-routed
+   registration is refused and an existing broker-routed wait closes at its
+   next claim. Revoking broker access for a principal, run or provider
+   therefore stops waits that are already parked.
+
+   Do not dispatch that call through the coordinator or
+   `execute_capability_broker_call`: their read path refuses it with the
+   fixed correction `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`, and nothing waits.
+   Registration resolves the call through the exact offered broker
+   definition, loaded binding, current index and host capability policy,
+   then classifies and authorizes the resolved subscription exactly as a
+   direct one, by its own fingerprint. The rules must also admit the broker
+   execute definition. A broker call without the delivery, or on a session
+   that did not opt in, is refused.
+5. **Reading tool-call and waiter rows.** A broker-routed wait's tool-call
+   row has the dual identity of AI schema module 0.86.0, exactly as a
+   brokered mutation: `tool_id` and `tool_fingerprint` are the subscription,
+   `provider_tool_id` and `provider_tool_fingerprint` the broker execute
+   definition, and the protected arguments are the
+   `graphql-orm-ai/brokered-call/v1` envelope. The waiter's protected request
+   uses `formatVersion` 2 with the resolved call. The adopted result answers
+   the provider's original broker call ID and tool ID.
+6. **Rollback.** Earlier builds cannot read a `formatVersion` 2 wait request
+   and fail closed on it. Drain or cancel brokered waits before rolling back.
+7. **Model-facing: unreachable loaded references are `selection_stale`.**
+   Broker session clones share loaded state. Execute of a loaded reference
+   the session does not reach now returns `selection_stale`, exactly as for
+   an unknown reference, instead of `Forbidden`, with or without a
+   continuation. That covers:
+   - a subscription or mutation family it does not broker;
+   - a static tool not in its list;
+   - a generated mutation its bound rules do not admit at the reviewed
+     approval it was loaded with: no bound rules, rules that admit other
+     fingerprints, or rules revoked since describe;
+   - an entry removed from the current index, a mutation whose reviewed
+     approval changed, or an index that lost its in-process proof.
+
+   Both held and unknown references consult the same current index source,
+   and an unavailable index answers `selection_stale`. The session and
+   current index determine reachability before principal resolution and
+   operation selection. Continuation plan fields and observation are
+   validated after reachability.
+   `describe_type` applies the same check and answers the same way. A
+   continuation of a capability that is never continued (a mutation,
+   subscription or static tool) is first checked against the current index
+   and policy like an ordinary execute, so it too is `selection_stale` when
+   the session no longer reaches it; only a reachable one is refused as not
+   continuable. Host capability policy
+   denial and identity substitution are still `Forbidden`. Tests that
+   expected `Forbidden` for the cases above must expect
+   `AI_CAPABILITY_SELECTION_STALE`.
+
+Existing stateless checkpoints retain each turn's original attempt and lease
+through their committed budget, tool call and step records. A replacement
+worker can adopt a later checkpoint containing turns from earlier attempts,
+including a withheld subscription result. No schema module change, GraphQL
+SDL change or data migration is needed. A portable-restored wait is still
+`RecoveryRequired`.
 
 ### Codex app-server turn dispatch (#828)
 

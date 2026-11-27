@@ -2695,6 +2695,66 @@ impl AiGraphqlSubscriptionCapability {
         self.base.result_record_cost_estimate()
     }
 
+    /// Compact typed signature of this subscription's compact plan schema,
+    /// built exactly as for a query
+    /// ([`AiGraphqlQueryCapability::capability_signature`]).
+    ///
+    /// It renders the root arguments and selections only. The observation
+    /// bounds and completion condition a wait also takes are summarized by
+    /// [`Self::observation_summary`]. The value is a presentation: plans are
+    /// still validated against the unchanged closed schema and the
+    /// capability fingerprint is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compact schema cannot be rendered.
+    pub fn capability_signature(&self) -> Result<crate::AiCapabilitySignature, AiError> {
+        self.base.capability_signature()
+    }
+
+    /// Largest observation timeout, in seconds, a plan may request.
+    pub const fn maximum_duration_seconds(&self) -> u32 {
+        self.maximum_duration_seconds
+    }
+
+    /// Largest number of events a plan may ask one wait to examine.
+    pub const fn maximum_events(&self) -> u32 {
+        self.maximum_events
+    }
+
+    /// Model-facing summary of the bounded observation one wait takes: the
+    /// largest timeout and event count, and each admitted completion
+    /// condition field with its operators.
+    ///
+    /// It is public schema metadata already present in the compact plan
+    /// schema, rendered compactly. It carries no authority and changes no
+    /// fingerprint.
+    pub fn observation_summary(&self) -> Value {
+        let conditions = self
+            .base
+            .operation
+            .subscription_observation
+            .as_ref()
+            .map(|observation| {
+                observation
+                    .condition_fields
+                    .iter()
+                    .map(|condition| {
+                        json!({
+                            "field": condition.field_name,
+                            "operators": condition.operators,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        json!({
+            "maximumTimeoutSeconds": self.maximum_duration_seconds,
+            "maximumEvents": self.maximum_events,
+            "conditions": conditions,
+        })
+    }
+
     /// Compiles one bounded plan into an immutable subscription contract.
     ///
     /// # Errors
@@ -3251,15 +3311,23 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 maximum_events,
             )?;
             base.argument_schema = PlanSchema::new(plan_schema);
-            base.compact_argument_schema = PlanSchema::new(compact_subscription_plan_schema(
-                &schema,
-                semantic_catalog,
-                operation,
-                &base.output,
-                limits.query,
-                maximum_duration_seconds,
-                maximum_events,
-            )?);
+            // The compact subscription schema differs from the query schema
+            // the base would regenerate, so its input-type names are
+            // recorded here, once, for the broker signature.
+            let (compact_schema, input_type_names) = record_input_type_names(|| {
+                compact_subscription_plan_schema(
+                    &schema,
+                    semantic_catalog,
+                    operation,
+                    &base.output,
+                    limits.query,
+                    maximum_duration_seconds,
+                    maximum_events,
+                )
+            });
+            base.compact_argument_schema = PlanSchema::new(compact_schema?);
+            base.input_type_names =
+                InputTypeNames(Arc::new(OnceLock::from(Arc::new(input_type_names))));
             if let Some(exclusion) =
                 oversized_provider_schema(operation, base.compact_argument_schema())?
             {
@@ -12831,6 +12899,52 @@ mod tests {
             })),
             Err(AiError::InvalidInput(_))
         ));
+    }
+
+    /// A replayable subscription renders the broker signature of its root
+    /// arguments and selections, and summarizes the observation bounds and
+    /// completion conditions a wait takes, without touching its fingerprint.
+    #[test]
+    fn replayable_subscription_has_a_compact_signature_and_observation_summary() {
+        let compile = || {
+            AiGraphqlSubscriptionCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").expect("target"),
+                &subscription_sdl(),
+                &subscription_semantic_catalog(GraphqlSubscriptionReplayMode::ReplayThenLive),
+                AiGraphqlSubscriptionCapabilityLimits::default(),
+            )
+            .expect("replayable subscription capabilities")
+        };
+        let catalog = compile();
+        let capability = catalog.capabilities().next().expect("capability");
+        let signature = capability.capability_signature().expect("signature");
+        assert_eq!(signature.operation(), "ParentChanged");
+        let rendered = signature.signature();
+        assert!(rendered.starts_with("ParentChanged("), "{rendered}");
+        assert!(rendered.contains("id"), "{rendered}");
+        assert!(!rendered.contains("maximumItems"), "{rendered}");
+        let summary = signature.summary();
+        assert!(summary.get("maximumItems").is_none(), "{summary}");
+        assert_eq!(
+            capability.observation_summary(),
+            json!({
+                "maximumTimeoutSeconds": 120,
+                "maximumEvents": 20,
+                "conditions": [{"field": "id", "operators": ["equal"]}],
+            })
+        );
+        assert_eq!(capability.maximum_duration_seconds(), 120);
+        assert_eq!(capability.maximum_events(), 20);
+        // Rendering is a presentation: the fingerprint is deterministic.
+        assert_eq!(
+            compile()
+                .capabilities()
+                .next()
+                .expect("capability")
+                .fingerprint(),
+            capability.fingerprint()
+        );
     }
 
     #[test]

@@ -183,6 +183,30 @@ corresponding column declarations and directions. Set each term's
 `expression` to its backend-rendered column reference, including any table
 qualifier and omitting the direction.
 
+### 11. Opt in to brokered subscription waits (#551)
+
+**Action needed** for fixed-broker hosts of graphql-orm-ai, and for hosts
+whose rules list subscription fingerprints. A fixed-broker session can opt in
+to generated subscriptions with
+`AiCapabilityBrokerSession::with_brokered_subscriptions`; the host routes a
+broker execute that resolves to one to
+`OrmAiSubscriptionWaitService::register_wait` with
+`AiSubscriptionWaitRegistrationContext::with_capability_delivery`, on a wait
+service built with `with_capability_broker`, which re-admits the wait through
+the host's broker at every claim, delivery and resumption. Configure the
+broker with `with_revocation_version` and implement admission on checkpoint
+adapters. Host-driven turns must apply final admission before dispatch.
+The wait is classified by the resolved subscription's own fingerprint, keeps the
+schema module 0.86.0 dual identity, and answers the provider's broker call.
+The discover and execute broker fingerprints change in this same release.
+Rule allowlists now admit a subscription by its capability fingerprint, and
+a removed or replaced subscription, or broker entry, closes its wait as
+`capability_stale` (coordinators record it at resumption too), and a session
+that does not reach a loaded reference's family gets `selection_stale`.
+This completes the #551 broker scope. See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551).
+No schema or data migration is needed.
+
 ## 0.234.0 to 0.235.0: Optional relation loaders
 
 **No action.** Upgrade ORM and macros together. Generated relation

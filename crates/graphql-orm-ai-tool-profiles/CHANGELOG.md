@@ -3,12 +3,28 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-26
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.36.0
+
+- **No action (#551).** `AiCapabilityIndex::subscriptions_checked_against_finished_schema`
+  reports whether an index was built in process from a typed subscription
+  catalogue, whose compiler refuses any root that takes a `@transientInput`
+  argument. The proof does not survive serialization, exactly as for
+  mutations, and the fixed broker admits brokered subscriptions only from
+  an index that carries it.
+  `AiGraphqlSubscriptionCapability::capability_signature` now names the
+  compact schema's input types (it previously fell back to positional
+  names), and `observation_summary`, `maximum_duration_seconds` and
+  `maximum_events` expose the observation bounds and completion conditions
+  a wait takes. Capability, catalogue, index and plan fingerprints, plan
+  schemas and compilation are unchanged.
+  [Migration](MIGRATION.md#0360-brokered-subscription-indexes)
 
 ## Unreleased - 0.35.0 (breaking release)
 

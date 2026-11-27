@@ -3,12 +3,23 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-11-15
+last_reviewed: 2026-11-26
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.36.0 brokered subscription indexes
+
+**No action** unless you serve brokered subscriptions. A fixed broker admits
+a generated subscription only from an index built in process with a typed
+subscription catalogue compiled against the finished SDL
+(`AiCapabilityIndex::subscriptions_checked_against_finished_schema`), so it
+can rely on the compiler's `@transientInput` refusal. A deserialized index
+offers no subscription through the broker. The new subscription signature
+and observation accessors are additive. No fingerprint, schema or data
+changes.
 
 ## 0.35.0 brokered mutation indexes
 

@@ -804,6 +804,25 @@ impl AiAgentLoopGuard {
             .saturating_sub(self.total_tool_calls)
     }
 
+    /// Rebinds the expected previous continuation after the coordinator
+    /// withheld a durable-wait result from the planned stateless history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::Conflict`] unless the guard expected exactly
+    /// `before`.
+    pub fn rebind_withheld_history(
+        &mut self,
+        before: Option<&str>,
+        after: Option<String>,
+    ) -> Result<(), AiError> {
+        if self.expected_previous_reference.as_deref() != before || after.is_none() {
+            return Err(AiError::Conflict);
+        }
+        self.expected_previous_reference = after;
+        Ok(())
+    }
+
     /// Accepts the next exactly chained provider result.
     ///
     /// # Errors

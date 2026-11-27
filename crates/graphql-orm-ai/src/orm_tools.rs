@@ -7,8 +7,8 @@ mod task_context;
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use brokered::{BROKERED_CALL_EVIDENCE_FORMAT, open_call_arguments};
 pub(crate) use brokered::{
-    BrokeredRuleFence, ResolvedApplicationCall, brokered_rules_admit, protected_arguments_match,
-    row_records_call, row_records_parts,
+    BrokeredRuleFence, ResolvedApplicationCall, brokered_rules_admit, offered_broker_operation,
+    protected_arguments_match, row_records_call, row_records_parts, valid_provider_identity,
 };
 pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
@@ -1884,6 +1884,17 @@ impl OrmAiApplicationToolCallService {
                     if let (Some(object), Some(schema)) = (summary.as_object_mut(), inline_schema) {
                         object.insert("planSchema".to_owned(), schema);
                     }
+                    // A subscription lists the observation bounds and
+                    // completion conditions execute's observation takes.
+                    if operation.capability_kind() == crate::AiCapabilityKind::GeneratedSubscription
+                        && let Some(capability) = self
+                            .runtime
+                            .tool_catalog()
+                            .subscription_capability(operation.capability_id())
+                        && let Some(object) = summary.as_object_mut()
+                    {
+                        object.insert("observation".to_owned(), capability.observation_summary());
+                    }
                     // A continuable root says so, so the model knows a
                     // result may carry a continuation handle.
                     if operation.capability_kind() == crate::AiCapabilityKind::GeneratedQuery
@@ -1935,6 +1946,14 @@ impl OrmAiApplicationToolCallService {
                 if execution.is_consequential() {
                     return Err(AiError::InvalidInput(
                         crate::AI_CAPABILITY_CONSEQUENTIAL_UNROUTED.to_owned(),
+                    )
+                    .into());
+                }
+                // A subscription only becomes a durable wait through the
+                // wait service the host routes it to; it never runs here.
+                if execution.is_subscription_wait() {
+                    return Err(AiError::InvalidInput(
+                        crate::AI_CAPABILITY_SUBSCRIPTION_UNROUTED.to_owned(),
                     )
                     .into());
                 }
@@ -2123,6 +2142,17 @@ impl OrmAiApplicationToolCallService {
             return Ok((signature, inline_schema.then_some(schema)));
         }
         let catalog = self.runtime.tool_catalog();
+        if operation.capability_kind() == crate::AiCapabilityKind::GeneratedSubscription {
+            let definition = catalog.subscription_capability_model_definition(
+                operation.capability_id(),
+                crate::capability_provider_alias(operation.capability_id()),
+            )?;
+            if definition.fingerprint != operation.capability_fingerprint() {
+                return Err(AiError::Forbidden);
+            }
+            let signature = catalog.subscription_capability_signature(operation.capability_id())?;
+            return Ok((signature, inline_schema.then_some(definition.parameters)));
+        }
         let mutation = operation.capability_kind() == crate::AiCapabilityKind::GeneratedMutation;
         let definition = if mutation {
             catalog.mutation_capability_model_definition(
@@ -5273,6 +5303,11 @@ const CONSEQUENTIAL_UNROUTED_CORRECTION: BrokerCorrection = BrokerCorrection {
     disclosure_contract: b"graphql-orm-ai/capability-consequential-unrouted-correction/v1",
 };
 
+const SUBSCRIPTION_UNROUTED_CORRECTION: BrokerCorrection = BrokerCorrection {
+    text: "Nothing waited or ran. This run cannot wait for events through the capability broker. Answer with the information you have, and tell the user that waiting for the event needs a session that can wait.",
+    disclosure_contract: b"graphql-orm-ai/capability-subscription-unrouted-correction/v1",
+};
+
 const SELECTION_STALE_CORRECTION: BrokerCorrection = BrokerCorrection {
     text: "Nothing was executed. This run does not hold that candidate or loadedReference; it may have expired. Call discover to obtain a current candidate, describe it, then issue a new call with the returned loadedReference.",
     disclosure_contract: b"graphql-orm-ai/capability-selection-stale-correction/v1",
@@ -5297,6 +5332,11 @@ impl From<AiError> for BrokerCallFailure {
                 if message == crate::AI_CAPABILITY_CONSEQUENTIAL_UNROUTED =>
             {
                 Some(CONSEQUENTIAL_UNROUTED_CORRECTION)
+            }
+            AiError::InvalidInput(message)
+                if message == crate::AI_CAPABILITY_SUBSCRIPTION_UNROUTED =>
+            {
+                Some(SUBSCRIPTION_UNROUTED_CORRECTION)
             }
             _ => None,
         };
