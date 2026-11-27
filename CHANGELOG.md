@@ -19,14 +19,21 @@ for historical context.
 - **Security hardening (#921).** The authority that lets a generated GraphQL
   mutation's hook present its originating request is now derived from the
   entity's generated configuration, issued only after a target admission the
-  pipeline runs itself, and bound to one request and invocation, one operation, one `Database` handle,
-  one transaction and the admitted rows. A dispatch that does not match its
+  pipeline runs itself, and bound to one request and invocation, one
+  operation, one `Database` handle, one transaction and the admitted rows. A dispatch that does not match its
   admission is refused. The SDL and the catalogues are unchanged. A
   generated write always enforces the assurance requirement of its own root
   field, and the `Before` hook event of a single-row update names the stored
   key. **No action** unless a custom resolver calls a generated mutation
   resolver method, or host code calls the hidden pipeline functions.
   [Migration](MIGRATION.md#02350-to-02360-bound-generated-write-authority)
+
+## Unreleased - ORM/macros 0.235.0
+
+- **No action** (refs #542). Generated to-one and to-many resolvers use
+  a checked loader lookup. They batch when eligible and a compatible loader
+  is registered, and otherwise keep using authorized direct queries.
+  [Migration](MIGRATION.md#02340-to-02350-optional-relation-loaders)
 
 ## Unreleased - ORM/macros 0.234.0
 
