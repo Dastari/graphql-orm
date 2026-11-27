@@ -4729,14 +4729,24 @@ fn generate_graphql_operations_unfiltered(
         BackendKind::Mssql => "[updated_at] = {}",
         BackendKind::Sqlite | BackendKind::Postgres => r#""updated_at" = {}"#,
     };
-    let has_updated_at_column = fields.iter().any(|field| {
-        field.ident.as_ref().is_some_and(|ident| {
-            parse_field_metadata(field).is_ok_and(|meta| {
-                meta.timestamp_behavior(&ident.to_string())
-                    .update_updated_at
-            })
-        })
+    let updated_at_meta = fields.iter().find_map(|field| {
+        let ident = field.ident.as_ref()?;
+        let meta = parse_field_metadata(field).ok()?;
+        meta.timestamp_behavior(&ident.to_string())
+            .update_updated_at
+            .then_some(meta)
     });
+    let has_updated_at_column = updated_at_meta.is_some();
+    let upsert_clock = match updated_at_meta {
+        Some(meta) if meta.time_offset_datetime => {
+            quote! { ::std::option::Option::Some(#struct_name::__gom_current_updated_at_expr()) }
+        }
+        Some(_) => {
+            let epoch = crate::backend::backend_current_epoch_expr(backend);
+            quote! { ::std::option::Option::Some(#epoch) }
+        }
+        None => quote! { ::std::option::Option::None },
+    };
 
     let implicit_updated_at = |target: proc_macro2::TokenStream| {
         if has_updated_at_column {
@@ -5556,7 +5566,7 @@ fn generate_graphql_operations_unfiltered(
                 &[#(#upsert_insert_value_literals),*],
                 &[#(#upsert_conflict_column_literals),*],
                 &[#(#upsert_update_column_literals),*],
-                #has_updated_at_column.then(#struct_name::__gom_current_updated_at_expr),
+                #upsert_clock,
                 #managed_version_column_option,
             )
         }
@@ -5583,7 +5593,7 @@ fn generate_graphql_operations_unfiltered(
                     &[#(#upsert_insert_value_literals),*],
                     &[#(#upsert_conflict_column_literals),*],
                     &__gom_update_columns,
-                    #has_updated_at_column.then(#struct_name::__gom_current_updated_at_expr),
+                    #upsert_clock,
                     #managed_version_column_option,
                 )
             }
