@@ -605,7 +605,7 @@ impl DateFilter {
         column: &str,
         start_index: usize,
     ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
-        self.render_sql_with_calendar(backend, column, start_index, true)
+        self.render_sql_inner(backend, column, start_index, true, false)
     }
 
     /// Render only clock-independent predicates for a residual in-memory path.
@@ -616,21 +616,48 @@ impl DateFilter {
         column: &str,
         start_index: usize,
     ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
-        self.render_sql_with_calendar(backend, column, start_index, false)
+        self.render_sql_inner(backend, column, start_index, false, false)
     }
 
-    fn render_sql_with_calendar(
+    /// Render for a generated PostgreSQL offset timestamp column.
+    #[cfg(all(feature = "postgres", feature = "time"))]
+    #[doc(hidden)]
+    pub fn render_postgres_offset_datetime_sql(
+        &self,
+        column: &str,
+        start_index: usize,
+        include_calendar: bool,
+    ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
+        self.render_sql_inner(
+            crate::graphql::orm::DatabaseBackend::Postgres,
+            column,
+            start_index,
+            include_calendar,
+            true,
+        )
+    }
+
+    fn render_sql_inner(
         &self,
         backend: crate::graphql::orm::DatabaseBackend,
         column: &str,
         start_index: usize,
         include_calendar: bool,
+        cast_timestamptz: bool,
     ) -> crate::Result<(Vec<String>, Vec<crate::graphql::orm::SqlValue>)> {
         use crate::graphql::orm::{SqlDialect, SqlValue};
 
         self.validate()?;
         let mut conditions = Vec::new();
         let mut values = Vec::new();
+        let operand = |index| {
+            let placeholder = backend.placeholder(index);
+            if cast_timestamptz {
+                format!("CAST({placeholder} AS TIMESTAMPTZ)")
+            } else {
+                placeholder
+            }
+        };
         for (value, operator) in [
             (&self.eq, "="),
             (&self.ne, "!="),
@@ -640,14 +667,14 @@ impl DateFilter {
             (&self.gte, ">="),
         ] {
             if let Some(value) = value {
-                let placeholder = backend.placeholder(start_index + values.len());
+                let placeholder = operand(start_index + values.len());
                 conditions.push(format!("{column} {operator} {placeholder}"));
                 values.push(SqlValue::temporal_text(value.clone()));
             }
         }
         if let Some(range) = &self.between {
-            let start_placeholder = backend.placeholder(start_index + values.len());
-            let end_placeholder = backend.placeholder(start_index + values.len() + 1);
+            let start_placeholder = operand(start_index + values.len());
+            let end_placeholder = operand(start_index + values.len() + 1);
             conditions.push(format!(
                 "{column} BETWEEN {start_placeholder} AND {end_placeholder}"
             ));

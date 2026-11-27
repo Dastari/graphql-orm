@@ -19,17 +19,36 @@ dependency, and mark each persisted `OffsetDateTime` or
 `Option<OffsetDateTime>` with `#[graphql_orm(time_offset_datetime)]`.
 See the [field example](crates/graphql-orm/README.md#host-timestamps-with-time).
 
-Before converting an existing text column, plan a schema and data migration
-to `TIMESTAMPTZ` on PostgreSQL or `DATETIMEOFFSET` on SQL Server. SQLite
-stores RFC 3339 text. PostgreSQL returns timestamps in UTC at microsecond
-precision and rejects infinities and values outside the Rust type's range
-on read. SQL Server retains the stored offset at 100 ns precision and
-requires both the local and UTC dates to be in years 0001–9999 with an
-offset in whole minutes within ±14 hours. SQLite preserves the offset and
-uses text ordering, which can differ from instant ordering.
+Before opting in an existing text column, plan a schema and data migration
+to `TIMESTAMPTZ` on PostgreSQL or `DATETIMEOFFSET` on SQL Server. On
+PostgreSQL, normalize existing values to valid timestamps with explicit
+offsets, then run an explicit conversion:
+
+```sql
+ALTER TABLE reservations
+    ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::timestamptz;
+```
+
+If the text column has a default, drop it before the type change and
+recreate it with a timestamp expression if needed. Generated PostgreSQL
+date comparisons and both `between` bounds cast their parameters to
+`TIMESTAMPTZ`. PostgreSQL interprets date-only operands and timestamps
+without an explicit offset in the session time zone.
+
+PostgreSQL returns timestamps in UTC at microsecond precision and
+rejects both infinities on read. SQL Server retains the stored offset at
+100 ns precision and requires offsets in whole minutes within ±14 hours.
+SQLite stores RFC 3339 text, preserves the offset and uses text ordering,
+which can differ from instant ordering. Generated `created_at` and
+`updated_at` defaults and automatic `updated_at` assignments use the
+backend's timestamp clock for opted-in fields.
 
 The async-graphql `DateTime` scalar for `time` parses RFC 3339 and emits UTC
-with `Z`. Review this wire spelling if you switch a field from chrono.
+with `Z`. Opted-in values must have years in 0001–9999 both as stored or
+supplied and after conversion to UTC. For example,
+`9999-12-31T23:59:59-01:00` falls outside the supported UTC range.
+Generated GraphQL reads return an error for out-of-range values. Review
+the UTC wire spelling if you switch a field from chrono.
 The SQL Server text-temporal option still controls text binds from
 `#[date_field]`, date filters and `SqlValue::temporal_text`. Opted-in Rust
 offset timestamp fields bind as typed values, including nulls.

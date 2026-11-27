@@ -1223,12 +1223,12 @@ fn bind_sqlite_value<'q>(
         SqlValue::Temporal(value) => {
             #[cfg(feature = "time")]
             if let Some(stamp) = value.time_offset() {
-                return query.bind(stamp);
+                return query.bind(CheckedOffsetDateTime(stamp));
             }
             query.bind(value.as_text())
         }
         #[cfg(feature = "time")]
-        SqlValue::OffsetDateTimeNull => query.bind(Option::<time::OffsetDateTime>::None),
+        SqlValue::OffsetDateTimeNull => query.bind(Option::<CheckedOffsetDateTime>::None),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),
@@ -1276,39 +1276,93 @@ async fn apply_postgres_auth_context(
     Ok(())
 }
 
-// SQLx's time decoder adds a binary timestamp to the PostgreSQL epoch
-// unchecked. Use checked arithmetic for data outside time's representable range.
-#[cfg(all(feature = "postgres", feature = "time"))]
-struct PostgresOffsetDateTime(time::OffsetDateTime);
+#[cfg(feature = "time")]
+fn offset_datetime_utc(value: time::OffsetDateTime) -> Result<time::OffsetDateTime, &'static str> {
+    let wire_year = 1..=9999;
+    value
+        .checked_to_offset(time::UtcOffset::UTC)
+        .filter(|utc| wire_year.contains(&utc.year()) && wire_year.contains(&value.year()))
+        .ok_or(
+            "offset timestamp must be in years 0001 through 9999 before and after UTC conversion",
+        )
+}
+
+/// Guard the generated resolver before the GraphQL scalar normalizes to UTC.
+#[cfg(feature = "time")]
+#[doc(hidden)]
+pub fn validate_offset_datetime(value: time::OffsetDateTime) -> Result<(), &'static str> {
+    offset_datetime_utc(value).map(|_| ())
+}
+
+/// Reject an out-of-range offset timestamp decoded by a generated entity.
+#[cfg(feature = "time")]
+#[doc(hidden)]
+pub fn validate_decoded_offset_datetime(
+    value: Option<time::OffsetDateTime>,
+    column: &str,
+) -> crate::Result<Option<time::OffsetDateTime>> {
+    if let Some(value) = value {
+        validate_offset_datetime(value).map_err(|error| sqlx::Error::ColumnDecode {
+            index: column.to_owned(),
+            source: error.into(),
+        })?;
+    }
+    Ok(value)
+}
+
+#[cfg(all(feature = "time", any(feature = "sqlite", feature = "postgres")))]
+struct CheckedOffsetDateTime(time::OffsetDateTime);
+
+#[cfg(all(feature = "sqlite", feature = "time"))]
+impl sqlx::Type<sqlx::Sqlite> for CheckedOffsetDateTime {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <time::OffsetDateTime as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+}
+
+#[cfg(all(feature = "sqlite", feature = "time"))]
+impl sqlx::Encode<'_, sqlx::Sqlite> for CheckedOffsetDateTime {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'_>>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        validate_offset_datetime(self.0)?;
+        <time::OffsetDateTime as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&self.0, buf)
+    }
+}
 
 #[cfg(all(feature = "postgres", feature = "time"))]
-impl sqlx::Type<sqlx::Postgres> for PostgresOffsetDateTime {
+impl sqlx::Type<sqlx::Postgres> for CheckedOffsetDateTime {
     fn type_info() -> sqlx::postgres::PgTypeInfo {
         <time::OffsetDateTime as sqlx::Type<sqlx::Postgres>>::type_info()
     }
 }
 
 #[cfg(all(feature = "postgres", feature = "time"))]
-impl sqlx::Encode<'_, sqlx::Postgres> for PostgresOffsetDateTime {
+impl sqlx::Encode<'_, sqlx::Postgres> for CheckedOffsetDateTime {
     fn encode_by_ref(
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        let utc = self
-            .0
-            .checked_to_offset(time::UtcOffset::UTC)
-            .ok_or("timestamp UTC instant is outside the time range")?;
+        let utc = offset_datetime_utc(self.0)?;
         <time::OffsetDateTime as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(&utc, buf)
     }
 }
 
 #[cfg(all(feature = "postgres", feature = "time"))]
-impl<'r> sqlx::Decode<'r, sqlx::Postgres> for PostgresOffsetDateTime {
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for CheckedOffsetDateTime {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         if value.format() != sqlx::postgres::PgValueFormat::Binary {
+            if matches!(value.as_str()?, "infinity" | "-infinity") {
+                return Err("infinite PostgreSQL timestamp".into());
+            }
             return <time::OffsetDateTime as sqlx::Decode<sqlx::Postgres>>::decode(value).map(Self);
         }
         let micros = <i64 as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        if matches!(micros, i64::MIN | i64::MAX) {
+            return Err("infinite PostgreSQL timestamp".into());
+        }
+        // SQLx adds the binary timestamp to the PostgreSQL epoch unchecked.
         crate::temporal::postgres_to_primitive_datetime(micros)
             .map(|value| Self(value.assume_utc()))
             .ok_or_else(|| "PostgreSQL timestamp is outside the time range".into())
@@ -1323,7 +1377,7 @@ pub fn postgres_offset_datetime(
     column: &str,
 ) -> crate::Result<Option<time::OffsetDateTime>> {
     use sqlx::Row;
-    row.try_get::<Option<PostgresOffsetDateTime>, _>(column)
+    row.try_get::<Option<CheckedOffsetDateTime>, _>(column)
         .map(|value| value.map(|value| value.0))
 }
 
@@ -1337,12 +1391,12 @@ pub(super) fn bind_postgres_value<'q>(
         SqlValue::Temporal(value) => {
             #[cfg(feature = "time")]
             if let Some(stamp) = value.time_offset() {
-                return query.bind(PostgresOffsetDateTime(stamp));
+                return query.bind(CheckedOffsetDateTime(stamp));
             }
             query.bind(value.as_text())
         }
         #[cfg(feature = "time")]
-        SqlValue::OffsetDateTimeNull => query.bind(Option::<PostgresOffsetDateTime>::None),
+        SqlValue::OffsetDateTimeNull => query.bind(Option::<CheckedOffsetDateTime>::None),
         SqlValue::StringNull => query.bind(Option::<String>::None),
         SqlValue::Bytes(value) => query.bind(value),
         SqlValue::BytesNull => query.bind(Option::<Vec<u8>>::None),

@@ -1,9 +1,9 @@
 use super::*;
 use crate::backend::{
-    BackendKind, backend_current_epoch_expr, backend_current_timestamp_expr,
-    backend_dialect_tokens, backend_helper_import_tokens, backend_marker_tokens,
-    backend_quote_identifier_path, backend_render_identifier_path, backend_row_type_tokens,
-    resolve_backend,
+    BackendKind, backend_current_epoch_expr, backend_current_offset_datetime_expr,
+    backend_current_timestamp_expr, backend_dialect_tokens, backend_helper_import_tokens,
+    backend_marker_tokens, backend_quote_identifier_path, backend_render_identifier_path,
+    backend_row_type_tokens, resolve_backend,
 };
 use crate::naming::{graphql_field_name, selected_field_case_rule};
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -4667,21 +4667,25 @@ fn generate_entity_tokens(
     }
 
     // Generated updates target the physical updated_at column, including aliases.
-    let text_updated_at = fields.iter().find_map(|field| {
-        field.ident.as_ref().and_then(|ident| {
-            let meta = parse_field_metadata(field).ok()?;
-            (meta
-                .timestamp_behavior(&ident.to_string())
-                .update_updated_at
-                && is_string_type(&field.ty))
-            .then_some(meta.is_date_field)
-        })
+    let current_updated_at_runtime = fields.iter().find_map(|field| {
+        let ident = field.ident.as_ref()?;
+        let meta = parse_field_metadata(field).ok()?;
+        if !meta
+            .timestamp_behavior(&ident.to_string())
+            .update_updated_at
+        {
+            return None;
+        }
+        if meta.time_offset_datetime {
+            Some(backend_current_offset_datetime_expr(backend))
+        } else if is_string_type(&field.ty) {
+            Some(backend_current_timestamp_expr(backend, meta.is_date_field))
+        } else {
+            None
+        }
     });
-    let current_updated_at_runtime = if let Some(native_date) = text_updated_at {
-        backend_current_timestamp_expr(backend, native_date)
-    } else {
-        backend_current_epoch_expr(backend)
-    };
+    let current_updated_at_runtime =
+        current_updated_at_runtime.unwrap_or_else(|| backend_current_epoch_expr(backend));
 
     let entity_name_lit = struct_name.to_string();
     if backend != BackendKind::Mssql {
@@ -6583,7 +6587,9 @@ fn generate_entity_tokens(
                 && (rust_name == "created_at" || rust_name == "updated_at")
             {
                 Some(
-                    if is_string_type(field_type) {
+                    if field_meta.time_offset_datetime {
+                        backend_current_offset_datetime_expr(backend)
+                    } else if is_string_type(field_type) {
                         backend_current_timestamp_expr(backend, field_meta.is_date_field)
                     } else {
                         backend_current_epoch_expr(backend)
@@ -6805,7 +6811,23 @@ fn generate_entity_tokens(
                 ).await
                 .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
             };
-            let (return_type, return_expr) = if field_meta.spatial.is_some() {
+            let (return_type, return_expr) = if field_meta.time_offset_datetime {
+                let value = if is_option_type(field_type) {
+                    quote! { self.#field_name }
+                } else {
+                    quote! { Some(self.#field_name) }
+                };
+                (
+                    quote! { #field_type },
+                    quote! {
+                        if let Some(value) = #value {
+                            ::graphql_orm::graphql::orm::validate_offset_datetime(value)
+                                .map_err(::graphql_orm::graphql::errors::graphql_internal_error)?;
+                        }
+                        Ok(self.#field_name)
+                    },
+                )
+            } else if field_meta.spatial.is_some() {
                 if is_option_type(field_type) {
                     (
                         quote! { Option<::graphql_orm::async_graphql::Json<::graphql_orm::serde_json::Value>> },
@@ -9365,14 +9387,24 @@ fn generate_filter_field(
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::DateFilter>,
             };
-            let sql = quote! {
-                if let Some(ref f) = self.#filter_field_name {
-                    let rendered = if _gom_spatial_prefilter {
+            let render = if backend == BackendKind::Postgres && field_meta.time_offset_datetime {
+                quote! {
+                    f.render_postgres_offset_datetime_sql(
+                        #db_col, values.len() + 1, !_gom_spatial_prefilter,
+                    )
+                }
+            } else {
+                quote! {
+                    if _gom_spatial_prefilter {
                         f.render_sql_prefilter(#backend_expr, #db_col, values.len() + 1)
                     } else {
                         f.render_sql(#backend_expr, #db_col, values.len() + 1)
-                    };
-                    match rendered {
+                    }
+                }
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    match #render {
                         Ok((date_conditions, date_values)) => {
                             conditions.extend(date_conditions);
                             values.extend(date_values);
@@ -9438,9 +9470,15 @@ fn generate_row_field_assignment(
     db_col: &str,
     meta: &FieldMetadata,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if meta.time_offset_datetime && backend == BackendKind::Postgres {
-        let decoded =
-            quote! { ::graphql_orm::graphql::orm::postgres_offset_datetime(row, #db_col)? };
+    if meta.time_offset_datetime {
+        let read = if backend == BackendKind::Postgres {
+            quote! { ::graphql_orm::graphql::orm::postgres_offset_datetime(row, #db_col)? }
+        } else {
+            quote! { row.try_get(#db_col)? }
+        };
+        let decoded = quote! {
+            ::graphql_orm::graphql::orm::validate_decoded_offset_datetime(#read, #db_col)?
+        };
         let value = if is_option_type(field_type) {
             decoded
         } else {
