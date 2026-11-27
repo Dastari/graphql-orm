@@ -1531,6 +1531,11 @@ struct HoldEventsUntilCommit;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
+    /// Identifies this transaction; never reused.
+    identity: u64,
+    /// The generated write invocation whose root admission began this
+    /// transaction, if one did.
+    write_invocation: Option<std::sync::Arc<super::write_pipeline::Invocation>>,
     db: &'tx crate::db::Database<B>,
     pub(crate) tx: B::Transaction<'tx>,
     mode: TransactionMode,
@@ -2605,6 +2610,8 @@ where
         mode: TransactionMode,
     ) -> Self {
         Self {
+            identity: crate::db::fresh_identity(),
+            write_invocation: None,
             db,
             tx,
             mode,
@@ -3171,6 +3178,25 @@ where
         }));
     }
 
+    /// The `Database` handle this transaction was begun on, whatever scope
+    /// is active.
+    pub(super) fn __base_database(&self) -> &crate::db::Database<B> {
+        self.db
+    }
+
+    /// This transaction's identity.
+    pub(super) fn __identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Mark this transaction as the one `invocation`'s root admission began.
+    pub(super) fn __carry_write_invocation(
+        &mut self,
+        invocation: std::sync::Arc<super::write_pipeline::Invocation>,
+    ) {
+        self.write_invocation = Some(invocation);
+    }
+
     /// Keep every queued event in the transaction until commit, including
     /// events queued by a hook that explicitly drains the queue.
     #[doc(hidden)]
@@ -3257,6 +3283,8 @@ where
             ));
         }
         let Self {
+            identity: _,
+            write_invocation: _,
             db,
             tx,
             mode: _,
@@ -3317,16 +3345,24 @@ where
     /// **Macro-internal.** Host code uses [`Self::run_mutation_hook`].
     ///
     /// `request` is the originating GraphQL request and the authority its
-    /// admission issued; a repository write passes `None`. On a database that
-    /// propagates request authority to hooks, the hook's operations on this
-    /// transaction present that request when the authority was issued for
-    /// `entity` and the request is still admitted to write it on the
-    /// `GraphqlMutation` surface: the entity decision is asked again here. A
-    /// nested invocation keeps the authority already presented.
+    /// admission issued; a repository write passes `None`.
+    ///
+    /// A request is refused, before the hook runs, unless its authority was
+    /// earned for `entity` under this request and field, on this
+    /// transaction's `Database`, and is issued in this transaction for the
+    /// row `id` and an event that reports `action`; a create must be
+    /// dispatched in the transaction its invocation's root admission began.
+    /// Each row dispatches each phase once.
+    ///
+    /// On a database that propagates request authority to hooks, the hook's
+    /// operations on this transaction then present that request when it is
+    /// still admitted to write the entity on the `GraphqlMutation` surface:
+    /// the entity decision is asked again here. A nested invocation keeps the
+    /// authority already presented.
     ///
     /// A [`GeneratedWriteAuthority`](super::GeneratedWriteAuthority) has no
-    /// public constructor. It is issued only by the pipeline's request and
-    /// entity admission, so a caller that did not run them attaches nothing.
+    /// public constructor. Only the pipeline's admission issues one, so a
+    /// caller that did not run it has no request to present.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub async fn __run_generated_write_hook(
@@ -3351,15 +3387,27 @@ where
             before_state,
             after_state,
         };
+        if let Some((ctx, admitted)) = request {
+            admitted.__require_dispatch(
+                entity,
+                ctx,
+                self.db,
+                self.identity,
+                self.write_invocation.as_ref(),
+                &event.phase,
+                event.action,
+                &event.id,
+                &event.changes,
+            )?;
+        }
         let ctx = request.map(|(ctx, _)| ctx);
         let presented = self
             .hook_request
             .as_ref()
             .is_some_and(|request| request.is_live());
         let authority = match request {
-            Some((ctx, admitted))
-                if admitted.covers(entity)
-                    && self.db.propagates_request_authority_to_hooks()
+            Some((ctx, _))
+                if self.db.propagates_request_authority_to_hooks()
                     && !presented
                     && self.db.mutation_hook().is_some()
                     && matches!(

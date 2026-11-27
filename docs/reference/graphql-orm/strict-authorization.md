@@ -239,6 +239,9 @@ and names the public field on both surfaces: the message is
 an omission. On an upsert that resolves to an existing row the omission is
 real: the denied column is left out of the conflict update, so its stored
 value is kept.
+On an upsert that inserts, a denied conflict field fails with `FORBIDDEN`
+even when the policy opts into omission. The insert must use the conflict key
+from its locked lookup.
 
 **What the repository callbacks receive.** Generated repository reads and
 writes call `can_read_repository_field` and `can_write_repository_field` with
@@ -301,9 +304,10 @@ runtime's write pipeline (`graphql_orm::graphql::orm::write_pipeline` in the
 ORM source), which fixes the order of the checks in one place:
 
 1. **Request admission.** Resolver authentication (`auth`), the PostgreSQL RLS
-   request context, the operation's declared scopes, then its declared
-   [assurance](../../architecture/operation-assurance.md). A nested child row
-   is admitted the same way against its entity's own create root.
+   request context, the operation's declared scopes, then the
+   [assurance](../../architecture/operation-assurance.md) declared for the
+   operation's own root field. A nested child row is admitted the same way
+   against its entity's own create root.
 2. **Entity admission.** The request's `Database`, the entity write decision on
    the `GraphqlMutation` surface, then the check that a row policy provider is
    registered when the entity declares a row write policy key. A
@@ -311,7 +315,9 @@ ORM source), which fixes the order of the checks in one place:
    resolves its key between steps 1 and 2.
 3. **Target admission.** A single-row update or delete locks its row through
    the write-target prefilter and classifies it with the row read and write
-   decisions; a bulk write does the same for every row its filter selects. See
+   decisions; a bulk write does the same for every row its filter selects, and
+   an upsert looks its conflict key up under a lock and asks the row write
+   decision on the row it found. See
    [row policy on generated writes](#row-policy-on-generated-writes).
 4. **Hook dispatch.** Each `Before` and `After` hook invocation, the hook's
    [request authority](#hook-writes-on-the-originating-requests-authority) and
@@ -342,25 +348,83 @@ deferred actions and `notify_with`.
 ### What the pipeline does and does not enforce
 
 A mutation hook's transaction presents the originating request only when the
-hook dispatch is given a `GeneratedWriteAuthority` for the event's entity.
-That type has no public constructor. It is issued only by the pipeline's
-entity admission, which can only start from a completed request admission.
-An authority issued for one entity attaches nothing to a hook event of
-another.
+hook dispatch is given the `GeneratedWriteAuthority` of that dispatch. The
+type has no public constructor: only the pipeline's own admission produces
+one.
 
-That is the whole boundary. It is not a seal against host Rust code:
+- **Admission is derived from the entity.** Request admission is told which
+  entity and which operation (create, update, bulk update, delete, bulk
+  delete or upsert). It reads the backend, the authentication mode, the
+  scope declarations and the operation's coordinate from the configuration
+  `GraphQLOperations` generates for that entity, once. An upsert is admitted
+  only for an entity that generates the upsert root:
+  - the scope declarations, fixed scopes or scope templates, come from the
+    configuration. The values a template's placeholders take are the
+    request's scalar arguments, which the caller supplies, because only the
+    resolver holds its arguments. A generated resolver passes its own;
+  - the assurance requirement is the one declared for the operation's own
+    root field, whatever field is being resolved. A resolver that is not the
+    operation's root cannot substitute its own field's requirement;
+  - the backend is the entity's own. The RLS request context is checked for
+    it, the admitted request is typed by it, and entity admission, target
+    admission and an upsert's lookup run on that backend's `Database`.
+- **The authority is issued when admission is complete.** A create has no
+  target, so entity admission issues it. For an update, a delete, an upsert
+  and a bulk write, target admission issues it. A target that is absent or
+  refused, a bulk filter that admits no row, and the unlocked read of a
+  `dependent_deletes` root issue nothing.
+- **Target admission is the pipeline's, once.** The pipeline reads the target
+  itself: it locks the row of a single-row write, selects the rows of a bulk
+  write, and runs the locked lookup of an upsert's conflict key, which is the
+  lookup the entity's derive generates for the entity's own backend. The
+  lookup returns the exact conflict-key values it bound. An admission admits
+  a target once, whatever the attempt finds. The attempt is claimed before its
+  first await, so of two callers that share an admission one is refused and
+  cannot replace what the other was issued.
+- **The authority is bound to what it was earned under:**
+  - one request and one invocation: the request itself, the root field being
+    resolved (its response key and where its selection is in the document),
+    and one invocation of it. The transaction a root's admission begins
+    carries the invocation, and a create dispatches only in a transaction
+    that carries its own. A nested child is admitted through its parent's
+    admission and inherits the parent's invocation, so the synthetic
+    child-field contexts of a nested create share it with their root. A
+    second selection of the same root field in one request is another
+    selection and another invocation;
+  - one operation: the operation, the entity and the field whose context was
+    admitted, which is the root field or a nested child's own create field;
+  - one `Database`: the handle the entity was admitted on, which must be the
+    handle of the transaction that dispatches the hook. A handle keeps one
+    identity for its lifetime and a clone is another handle;
+  - one transaction: the one target admission ran in, or for a create the one
+    that carries its invocation;
+  - the admitted rows: the row a single-row target admission locked, the
+    branch an upsert's lookup decided, or the rows a bulk target admission
+    selected. On an upsert lookup miss, both hook phases must carry exactly
+    one change per conflict column, matching the lookup's bind values,
+    including the serialized representation of JSON values. On a hit, the
+    authority binds to the row the lookup found. Each row dispatches one
+    `Before` and one `After`, so each nested child row needs its own admission.
+- **A mismatch is refused.** Entity admission, target admission, the bulk
+  entry points and hook dispatch fail when they are given a request,
+  admission or authority that does not match the call, before any hook runs.
+  The refusal is an uncoded internal error with the text
+  `generated write admission does not match this request, operation or database`.
+  Generated code always presents the authority of its own admission, so no
+  generated mutation produces it.
 
-- The pipeline's functions are macro-internal and hidden from the API
-  documentation, but they are `pub`, because generated code compiles in the
-  host's crate. Host Rust code is trusted and can call them.
-- Request admission takes the authentication mode, the scopes and the
-  assurance coordinate from its caller. A generated resolver passes the
-  entity's declarations. Host code that calls it passes its own.
-- The authority is issued at entity admission, before any target row is
-  admitted.
-- The authority is not bound to the request, operation or `Database` it was
-  issued under. The entity write decision is asked again, for the request
-  presented at dispatch, before each hook invocation that attaches authority.
+When the authority matches, the entity write decision is still asked once
+more, for the request presented at dispatch, before each hook invocation that
+attaches it.
+
+This is not a seal against host Rust code. The pipeline's functions are
+macro-internal and hidden from the API documentation, but they are `pub`,
+because generated code compiles in the host's crate. Host Rust code is
+trusted and can run the whole pipeline itself, in order, for an entity and
+operation the macros generated. It cannot choose that admission's
+authentication mode, scope declarations, coordinate or backend, obtain an
+authority before the admission is complete, or present one under another
+request, invocation, operation, `Database`, transaction or row.
 
 Do not treat these functions as an authorization API. A custom resolver
 declares its own [authorization](resolver-operation-metadata.md) and writes
@@ -756,14 +820,14 @@ The authority belongs to the hook's transaction, and to nothing else:
 - **It is attached only with a pipeline admission,** and only when the request is admitted to
   write the event's entity: the entity decision is asked once more, on the `GraphqlMutation`
   surface, before each hook invocation that attaches it. The hook dispatch of the
-  [write pipeline](#the-generated-write-pipeline) takes the request only together with a
-  `GeneratedWriteAuthority` for that entity, which only the pipeline's request and entity
-  admission issue. A generated GraphQL mutation runs that admission with the entity's declared
-  authentication, scopes and assurance. `MutationContext::run_mutation_hook`, the dispatcher
-  for host code, runs the hook without request authority.
-  This does not constrain host Rust code, which is trusted: the admission functions are
-  macro-internal but callable, take their caller's arguments, and issue an authority that is
-  not bound to one request. See
+  [write pipeline](#the-generated-write-pipeline) takes the request only together with the
+  `GeneratedWriteAuthority` of that dispatch, which only the pipeline's admission issues, bound
+  to the request, invocation, operation, `Database`, transaction and rows it was earned for. A generated GraphQL mutation
+  runs that admission with the entity's declared authentication, scopes and assurance.
+  `MutationContext::run_mutation_hook`, the dispatcher for host code, runs the hook without
+  request authority.
+  Host Rust code is trusted and can still run the macro-internal admission itself; it cannot
+  choose its inputs or present its authority anywhere else. See
   [what the pipeline does and does not enforce](#what-the-pipeline-does-and-does-not-enforce).
 - **It ends with the hook invocation,** including on an error or a dropped future, and every read
   of it checks that: `PolicyAuthority::hook_request()` and `HookRequestAuthority::subject()`
@@ -841,11 +905,12 @@ updates check only supplied fields, including explicit nulls.
 
 `FieldPolicy::ignore_denied_field_write(entity_name, field_name)` defaults to
 `false`. Override it to return `true` for selected GraphQL fields (or all fields)
-to restore legacy input omission. An omitted field is never written: a create
-or an inserting upsert stores the column's default, and an update or an upsert
-onto an existing row keeps the stored value (the column is left out of the
-statement, and out of the changes mutation hooks see). Required create/upsert
-inputs still fail on denial. Errors from a policy and missing policy providers are never ignored.
+to restore legacy input omission. A create or an inserting upsert clears the
+denied optional input before binding the insert. An update or an upsert onto
+an existing row keeps the stored value by omitting the denied column from the
+update and from the changes mutation hooks see. Required create/upsert inputs
+and inserting upserts' conflict fields still fail on denial. Errors from a
+policy and missing policy providers are never ignored.
 Repository field checks retain their existing fail-closed contract. See the
 [migration guide](../../../MIGRATION.md#0911-to-0920-rejected-field-writes-fail-the-mutation).
 

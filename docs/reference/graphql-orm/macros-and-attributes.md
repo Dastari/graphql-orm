@@ -671,7 +671,7 @@ GraphQL type. The semantic catalogue lists it after the generated fields as
 selectable, with no filter, ordering, grouping or aggregate, the entity's
 classification and `NeverExport`, so AI query plans do not select it.
 
-`tests/generated_object_fields.rs` and the `object_fields_*` UI fixtures cover
+`tests/sqlite_schema_metadata/generated_object_fields.rs` and the `object_fields_*` UI fixtures cover
 this shape.
 
 Polymorphic references can add one fixed discriminator condition:

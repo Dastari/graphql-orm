@@ -10,17 +10,22 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.237.0 derives the authority of a generated GraphQL write from the
+entity's configuration, issues it only after target admission and binds it to
+one request, operation and `Database`. Generated mutations are unchanged.
+[Migration](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority)
+
 Runtime schema conversion uses structured default order terms emitted by the
 entity derives.
 See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942).
 
 SQL Server index introspection and migration plans distinguish covering
 indexes from their plain-key equivalents.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
 
 In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
-fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
+fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
 
 Version 0.235.0 preserves authorized direct queries for generated
 relations without a compatible registered loader. See
@@ -1373,3 +1378,6 @@ SDL export builds. Runtime builds must leave it disabled; see
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
 
 Test-owned PostgreSQL infrastructure uses digest-pinned images.
+
+See the [workspace testing guide](../../docs/development/testing.md) for the ORM
+integration test harnesses and backend selectors.
