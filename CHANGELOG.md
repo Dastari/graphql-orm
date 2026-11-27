@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.240.0
+
+- **No action** (refs #677, #724). Generated GraphQL upserts and creates on
+  the same entity share the declaration-ordered field-policy checks to reduce
+  generated code. [Migration](MIGRATION.md#02400-shared-create-and-upsert-field-policies)
+
 ## Unreleased - ORM/macros 0.239.0
 
 - **No action** (refs #542). `GraphQLOperations` reports invalid plural

@@ -2722,6 +2722,17 @@ fn generate_graphql_operations_unfiltered(
                     .any(|key| key.field_name == field.field_name)
         })
     });
+    let generates_standard_write_surface = backend_writable
+        && !schema_policy_read_only
+        && !has_composite_primary_key
+        && !entity_meta.append_only;
+    let shares_create_field_checks = generates_standard_write_surface
+        && mutations_disabled.is_none()
+        && graphql_upsert_enabled
+        && entity_meta
+            .mutation_shapes
+            .as_ref()
+            .is_none_or(|shapes| shapes.iter().any(|shape| shape == "upsert"));
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_is_bytes = is_byte_vec_type(&pk_type_ty);
     // Single-key write/readback paths use the same typed binder as key-based
@@ -3507,7 +3518,7 @@ fn generate_graphql_operations_unfiltered(
     let mut update_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_runtime_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_bulk_omission_checks: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut upsert_policy_checks_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut shared_create_fields = Vec::new();
     let mut upsert_policy_checks_repo: Vec<proc_macro2::TokenStream> = Vec::new();
     // Field write decisions of the repository insert and update paths. A
     // `RepositoryEntity` asks them through its `Entity` hook instead.
@@ -3629,41 +3640,6 @@ fn generate_graphql_operations_unfiltered(
             }
             let graphql_create_field_type =
                 crate::entity::graphql_write_input_type(field_type, &meta);
-            let create_policy_check = {
-                if is_option_type(field_type) {
-                    let strict_denial = supports_nested_create.then(|| quote! {
-                        if __gom_nested {
-                            return ::std::result::Result::Err(
-                                ::graphql_orm::graphql::errors::OrmPublicError::field_write_denied(#graphql_name).into_graphql_error()
-                            );
-                        }
-                    });
-                    quote! {
-                        if !db.check_field_write(
-                            ctx,
-                            #entity_name_lit,
-                            #graphql_name,
-                            #write_policy_key,
-                            ::std::option::Option::None,
-                            ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
-                            #strict_denial
-                            input.#field_name = ::std::option::Option::None;
-                        }
-                    }
-                } else {
-                    quote! {
-                        db.ensure_writable_field(
-                            ctx,
-                            #entity_name_lit,
-                            #graphql_name,
-                            #write_policy_key,
-                            ::std::option::Option::None,
-                            ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                    }
-                }
-            };
             // A field with a declared key is asked as before, also when the
             // optional input is absent. A key-less field is asked only when it
             // is part of the GraphQL input type and the client supplied it; a
@@ -3678,7 +3654,82 @@ fn generate_graphql_operations_unfiltered(
             } else {
                 quote! { true }
             };
-            if graphql_create_asks {
+            if shares_create_field_checks {
+                let conflict_key = upsert_target_db_columns.contains(&db_col);
+                let update_candidate = !meta.is_primary_key && !conflict_key;
+                let field_check = quote! { ::graphql_orm::graphql::orm::GeneratedCreateFieldCheck };
+                let create_check = if !graphql_create_asks {
+                    quote! { #field_check::Never }
+                } else if keyless && is_option_type(field_type) {
+                    quote! { #field_check::WhenSupplied }
+                } else {
+                    quote! { #field_check::Always }
+                };
+                // A hit assigns even omitted fields, except for columns the
+                // upsert does not update. A managed version does not add an
+                // update check of its own.
+                let update_check = if !update_candidate {
+                    quote! { #field_check::Never }
+                } else if meta.managed_version {
+                    create_check.clone()
+                } else {
+                    quote! { #field_check::Always }
+                };
+                if graphql_create_asks || (update_candidate && !meta.managed_version) {
+                    let clear = if is_option_type(field_type) {
+                        quote! { ::std::option::Option::Some(|input| input.#field_name = ::std::option::Option::None) }
+                    } else {
+                        quote! { ::std::option::Option::None }
+                    };
+                    shared_create_fields.push(quote! {
+                        ::graphql_orm::graphql::orm::GeneratedCreateField {
+                            name: #graphql_name,
+                            policy: #write_policy_key,
+                            column: #db_col,
+                            conflict_key: #conflict_key,
+                            create_check: #create_check,
+                            update_check: #update_check,
+                            value: |input| &input.#field_name,
+                            clear: #clear,
+                        }
+                    });
+                }
+            } else if graphql_create_asks {
+                let create_policy_check = {
+                    if is_option_type(field_type) {
+                        let strict_denial = supports_nested_create.then(|| quote! {
+                            if __gom_nested {
+                                return ::std::result::Result::Err(
+                                    ::graphql_orm::graphql::errors::OrmPublicError::field_write_denied(#graphql_name).into_graphql_error()
+                                );
+                            }
+                        });
+                        quote! {
+                            if !db.check_field_write(
+                                ctx,
+                                #entity_name_lit,
+                                #graphql_name,
+                                #write_policy_key,
+                                ::std::option::Option::None,
+                                ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                            ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)? {
+                                #strict_denial
+                                input.#field_name = ::std::option::Option::None;
+                            }
+                        }
+                    } else {
+                        quote! {
+                            db.ensure_writable_field(
+                                ctx,
+                                #entity_name_lit,
+                                #graphql_name,
+                                #write_policy_key,
+                                ::std::option::Option::None,
+                                ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
+                            ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                        }
+                    }
+                };
                 create_policy_checks.push(quote! {
                     if #graphql_create_condition {
                         #create_policy_check
@@ -3756,94 +3807,6 @@ fn generate_graphql_operations_unfiltered(
                 let upsert_update_candidate = !meta.is_primary_key && !upsert_conflict_column;
 
                 {
-                    // On a lookup miss the insert must use the conflict key
-                    // that was looked up. A denied key write cannot be omitted.
-                    let graphql_check = if is_option_type(field_type) && !upsert_conflict_column {
-                        if upsert_update_candidate {
-                            quote! {
-                                let __gom_field_write_allowed = if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
-                                    db.check_field_write(
-                                        ctx,
-                                        #entity_name_lit,
-                                        #graphql_name,
-                                        #write_policy_key,
-                                        ::std::option::Option::Some(current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                        ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
-                                } else {
-                                    db.check_field_write(
-                                        ctx,
-                                        #entity_name_lit,
-                                        #graphql_name,
-                                        #write_policy_key,
-                                        ::std::option::Option::None,
-                                        ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
-                                };
-                                if !__gom_field_write_allowed {
-                                    input.#field_name = ::std::option::Option::None;
-                                    // The host ignores this denial. On an
-                                    // existing row the conflict update must
-                                    // then leave the column alone: writing
-                                    // the cleared input would overwrite the
-                                    // stored value the policy protects.
-                                    if current_entity.is_some() {
-                                        __gom_denied_upsert_columns.push(#db_col);
-                                    }
-                                }
-                            }
-                        } else {
-                            quote! {
-                                if current_entity.is_none()
-                                    && !db.check_field_write(
-                                        ctx,
-                                        #entity_name_lit,
-                                        #graphql_name,
-                                        #write_policy_key,
-                                        ::std::option::Option::None,
-                                        ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                    ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?
-                                {
-                                    input.#field_name = ::std::option::Option::None;
-                                }
-                            }
-                        }
-                    } else if upsert_update_candidate {
-                        quote! {
-                            if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
-                                db.ensure_writable_field(
-                                    ctx,
-                                    #entity_name_lit,
-                                    #graphql_name,
-                                    #write_policy_key,
-                                    ::std::option::Option::Some(current_entity as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                    ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                            } else {
-                                db.ensure_writable_field(
-                                    ctx,
-                                    #entity_name_lit,
-                                    #graphql_name,
-                                    #write_policy_key,
-                                    ::std::option::Option::None,
-                                    ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                            }
-                        }
-                    } else {
-                        quote! {
-                            if current_entity.is_none() {
-                                db.ensure_writable_field(
-                                    ctx,
-                                    #entity_name_lit,
-                                    #graphql_name,
-                                    #write_policy_key,
-                                    ::std::option::Option::None,
-                                    ::std::option::Option::Some(&input.#field_name as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync)),
-                                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                            }
-                        }
-                    };
                     let repo_check = if upsert_update_candidate {
                         quote! {
                             if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
@@ -3880,36 +3843,6 @@ fn generate_graphql_operations_unfiltered(
                             }
                         }
                     };
-                    // The conflict update sets every update candidate, also one
-                    // the client left out: an omitted optional field is written
-                    // as NULL and a field outside the GraphQL input type as its
-                    // default. On an existing row the decision is therefore
-                    // asked for every update candidate, with the current row
-                    // and the value about to be written. The insert branch
-                    // keeps the client-supplied rule. ORM-managed version
-                    // columns are not the client's to write.
-                    let existing_row_asks = upsert_update_candidate && !meta.managed_version;
-                    let supplied_condition_is_constant = !(keyless && is_option_type(field_type));
-                    if graphql_create_asks && (supplied_condition_is_constant || !existing_row_asks)
-                    {
-                        upsert_policy_checks_graphql.push(quote! {
-                            if #graphql_create_condition {
-                                #graphql_check
-                            }
-                        });
-                    } else if graphql_create_asks {
-                        upsert_policy_checks_graphql.push(quote! {
-                            if #graphql_create_condition || current_entity.is_some() {
-                                #graphql_check
-                            }
-                        });
-                    } else if existing_row_asks {
-                        upsert_policy_checks_graphql.push(quote! {
-                            if current_entity.is_some() {
-                                #graphql_check
-                            }
-                        });
-                    }
                     if !meta.managed_version {
                         upsert_policy_checks_repo.push(repo_check);
                     }
@@ -5135,10 +5068,6 @@ fn generate_graphql_operations_unfiltered(
             "operation authorization category `keyset_list` requires a generated keyset operation; configure graphql_entity keyset = \"field asc|desc, ...\"",
         ));
     }
-    let generates_standard_write_surface = backend_writable
-        && !schema_policy_read_only
-        && !has_composite_primary_key
-        && !entity_meta.append_only;
     // A GraphQL input object must declare at least one field. When every
     // create (or update) column is a generated key, a managed timestamp,
     // `skip_input` or `write = false`, the public input would be empty, so the
@@ -5976,7 +5905,6 @@ fn generate_graphql_operations_unfiltered(
             upsert_key_columns: &upsert_key_columns,
             create_client_supplied: &create_client_supplied,
             unsigned_checks: &graphql_unsigned_checks(&upsert_unsigned_checks),
-            upsert_policy_checks_graphql: &upsert_policy_checks_graphql,
             created_pk_init: &created_pk_init,
             pk_id_for_entity: &pk_id_for_entity,
             created_pk_id_string: &created_pk_id_string,
@@ -6778,6 +6706,33 @@ fn generate_graphql_operations_unfiltered(
         quote! { let entity = entity.clone(); }
     } else {
         quote! {}
+    };
+    let shared_create_field_descriptor = if shares_create_field_checks && generates_public_upsert {
+        quote! {
+            impl #struct_name {
+                const __GOM_CREATE_FIELDS: &'static [
+                    ::graphql_orm::graphql::orm::GeneratedCreateField<#create_input>
+                ] = &[#(#shared_create_fields),*];
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let create_policy_checks = if shares_create_field_checks {
+        let nested = if supports_nested_create {
+            quote! { __gom_nested }
+        } else {
+            quote! { false }
+        };
+        quote! {
+            ::graphql_orm::graphql::orm::__apply_generated_create_fields(
+                db, ctx, #entity_name_lit, &mut input, &__gom_client_supplied,
+                #struct_name::__GOM_CREATE_FIELDS,
+                ::graphql_orm::graphql::orm::GeneratedCreateFieldMode::Create { nested: #nested },
+            ).await?;
+        }
+    } else {
+        quote! { #(#create_policy_checks)* }
     };
     let (graphql_create_input_definition, create_graphql_method, nested_child_definition) =
         mutations::create::create(mutations::create::CreateInput {
@@ -9431,6 +9386,7 @@ fn generate_graphql_operations_unfiltered(
 
         #graphql_create_input_definition
         #nested_child_definition
+        #shared_create_field_descriptor
 
         #graphql_update_input_definition
 

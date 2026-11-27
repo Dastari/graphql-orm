@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.240.0 shares the field-policy checks for generated GraphQL upsert
+and create on upsert-enabled entities.
+[Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).
+
 Version 0.238.0 shares the SQL of nested closure read predicates over stable
 filters and relations. Handwritten SQL shares evaluation sites only with an
 explicit host guarantee.
