@@ -212,6 +212,16 @@ impl MockProvider {
     }
 
     #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn prepend_event_batch(&self, events: Vec<ProviderEvent>) {
+        self.event_batches
+            .as_ref()
+            .expect("mock event batches are enabled")
+            .lock()
+            .expect("mock event batches lock")
+            .push_front(events.into());
+    }
+
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_stream_failure(
         mut self,
         category: crate::AiProviderFailureCategory,

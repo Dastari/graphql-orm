@@ -4524,6 +4524,9 @@ fn valid_provider_snapshot(
 }
 
 #[cfg(all(test, feature = "sqlite"))]
+pub(crate) use tests::BrokeredReplayFixture;
+
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::Mutex;
@@ -5229,10 +5232,30 @@ mod tests {
         let now = OffsetDateTime::from_unix_timestamp(TEST_NOW).expect("test timestamp");
         let clock = Arc::new(FixedClock::new(now));
         let principal = test_principal();
-        let principal_active = Arc::new(AtomicBool::new(true));
-        let access_allowed = Arc::new(AtomicBool::new(true));
         let scope = AiScope::new("workspace", "subscription-workspace")
             .with_tenant_id("tenant-subscription");
+        let rules = test_rules(scope.clone());
+        wait_fixture_on(
+            database,
+            principal,
+            scope,
+            clock,
+            rules,
+            Arc::new(TestEgressAudit),
+        )
+        .await
+    }
+
+    async fn wait_fixture_on(
+        database: Database<SqliteBackend>,
+        principal: AuthPrincipal,
+        scope: AiScope,
+        clock: Arc<FixedClock>,
+        rules: crate::AiResolvedRuleSet,
+        audit: Arc<dyn AiEgressDecisionAudit>,
+    ) -> WaitFixture {
+        let principal_active = Arc::new(AtomicBool::new(true));
+        let access_allowed = Arc::new(AtomicBool::new(true));
         let semantics = test_semantics();
         let target_id =
             crate::GraphqlExecutionTargetId::parse("subscription.graphql").expect("target ID");
@@ -5309,7 +5332,6 @@ mod tests {
             crate::AiRunServiceLimits::new(Duration::minutes(5), Duration::minutes(5), 16, 3, 8)
                 .expect("run limits"),
         );
-        let rules = test_rules(scope.clone());
         let provider_sessions = Arc::new(TestProviderSessions {
             database: database.clone(),
             parks: AtomicUsize::new(0),
@@ -5353,7 +5375,7 @@ mod tests {
                 Arc::new(runtime),
                 sources.clone(),
                 Arc::new(TestRules(rules.clone())),
-                Arc::new(TestEgressAudit),
+                audit,
                 clock.clone(),
                 AiSubscriptionWaitLimits::default(),
             )
@@ -6226,6 +6248,7 @@ mod tests {
     }
 
     mod brokered;
+    pub(crate) use brokered::BrokeredReplayFixture;
 
     fn condition(operator: &str, value: Value) -> AiGraphqlSubscriptionCondition {
         serde_json::from_value(json!({

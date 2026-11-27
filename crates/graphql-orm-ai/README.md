@@ -566,8 +566,9 @@ rehydrates current authority at open, event and adoption boundaries. For a
 direct subscription wait, the rule's `allowed_tool_fingerprints` allowlist
 matches the registered subscription capability fingerprint. Brokered
 waits require a host revocation version and final admission before provider
-dispatch. See
-[durable bounded subscription waits](docs/durable-subscription-waits.md).
+dispatch. Stateless checkpoint adoption verifies each replayed tool turn
+against its original attempt, including when a later worker takes over.
+See [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
 ## Actionable application refusals
 

@@ -56,7 +56,9 @@ supersedes: []
   the turn would deliver fails the run with `capability_stale` or
   `subscription_authority_revoked`; one in stateless replay history is
   replaced with a fixed marker, gets updated egress manifests, and remains
-  withheld after checkpoint adoption. Brokered waits require
+  withheld after checkpoint adoption. Stateless adoption verifies each tool
+  turn against its original attempt and lease across worker recovery.
+  Brokered waits require
   `AiCapabilityRevocationVersion`. Final admission reads the version,
   checks all adopted waits, awaits fallback admission, rechecks index
   fingerprints, and compares the version again. On drift or an unstable
@@ -83,8 +85,8 @@ supersedes: []
   subscription or mutation family it does not broker, a static tool outside
   its list, a generated mutation its bound rules do not admit (decided from
   the loaded binding's reviewed approval), and an
-  entry the current index no longer lets it reach. A clone sharing loaded
-  state, or a run whose rules refuse the mutation, therefore cannot tell a
+  entry removed from or made unreachable by the current index. A clone sharing
+  loaded state, or a run whose rules refuse the mutation, therefore cannot tell a
   hidden capability from an unknown one. `describe_type` answers the same
   way. Held and unknown references consult the same index source, and
   source failure is `selection_stale`. Reachability is decided before the

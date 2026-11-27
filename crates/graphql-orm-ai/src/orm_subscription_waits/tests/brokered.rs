@@ -10,7 +10,7 @@ use crate::{
     AI_CAPABILITY_EXECUTE_TOOL_ID, AiCapabilityBrokerOperation, AiCapabilityBrokerSession,
     AiCapabilityDeliveryLimits, AiCapabilityDeliveryMode, AiCapabilityDeliveryTurn,
     AiCapabilityIndex, AiCapabilityIndexLimits, AiCapabilityIndexSet, AiCapabilityRunBinding,
-    AiProviderCapabilitySessionBinding, ModelInputBlock, ModelReasoningEffort,
+    AiProviderCapabilitySessionBinding, ModelInputBlock, ModelReasoningEffort, ModelToolDefinition,
     ProviderCapabilities, ProviderKind,
 };
 
@@ -160,21 +160,27 @@ impl WaitFixture {
     /// A fixed-broker delivery over the fixture's subscription catalogue,
     /// compiled in process, with subscriptions brokered when `opted_in`.
     fn brokered_delivery(&self, opted_in: bool) -> AiCapabilityDeliveryTurn {
-        self.delivery_over(opted_in)
+        self.delivery_for_model(opted_in, "coordinator-test-model", Vec::new())
     }
 
-    /// A delivery over the fixture's shared broker, the one its wait
-    /// services re-admit through.
-    fn delivery_over(&self, opted_in: bool) -> AiCapabilityDeliveryTurn {
+    fn delivery_for_model(
+        &self,
+        opted_in: bool,
+        model: &str,
+        static_tools: Vec<ModelToolDefinition>,
+    ) -> AiCapabilityDeliveryTurn {
         let index_set =
             AiCapabilityIndexSet::compile([self.broker_index.current()]).expect("index set");
         let broker = self.broker.clone();
         let binding = AiProviderCapabilitySessionBinding::new(
             AiCapabilityDeliveryMode::FixedBroker,
             index_set.fingerprint(),
-            BTreeSet::new(),
+            static_tools
+                .iter()
+                .map(|tool| tool.fingerprint.clone())
+                .collect(),
             "test-provider-projection-v1",
-            "coordinator-test-model",
+            model,
             ModelReasoningEffort::Unspecified,
             "a".repeat(64),
         )
@@ -195,7 +201,7 @@ impl WaitFixture {
                 ..Default::default()
             },
             index_set.fingerprint(),
-            Vec::new(),
+            static_tools,
             true,
             binding,
             broker,
@@ -211,11 +217,18 @@ impl WaitFixture {
         delivery: &AiCapabilityDeliveryTurn,
         lease: &AiRunLease,
     ) -> String {
-        let run = AiCapabilityRunBinding::from_lease(
-            lease,
-            ProviderKind::OpenAi,
-            delivery.session_binding(),
-        );
+        self.load_subscription_for_provider(delivery, lease, ProviderKind::OpenAi)
+            .await
+    }
+
+    async fn load_subscription_for_provider(
+        &self,
+        delivery: &AiCapabilityDeliveryTurn,
+        lease: &AiRunLease,
+        provider_kind: ProviderKind,
+    ) -> String {
+        let run =
+            AiCapabilityRunBinding::from_lease(lease, provider_kind, delivery.session_binding());
         let discovery = delivery
             .broker()
             .dispatch_discover(
@@ -420,6 +433,55 @@ impl WaitFixture {
             .start(&claimed)
             .await
             .expect("fresh attempt starts")
+    }
+}
+
+/// Runs the broker and the durable waiter against the provider executor's store.
+pub(crate) struct BrokeredReplayFixture {
+    fixture: WaitFixture,
+    pub(crate) waits: Arc<OrmAiSubscriptionWaitService>,
+}
+
+impl BrokeredReplayFixture {
+    pub(crate) async fn new(
+        database: Database<SqliteBackend>,
+        principal: AuthPrincipal,
+        scope: AiScope,
+        rules: crate::AiResolvedRuleSet,
+        audit: Arc<dyn AiEgressDecisionAudit>,
+    ) -> Self {
+        let clock = Arc::new(FixedClock::new(OffsetDateTime::now_utc()));
+        let fixture = wait_fixture_on(database, principal, scope, clock, rules, audit).await;
+        let waits = fixture.service.clone();
+        Self { fixture, waits }
+    }
+
+    pub(crate) async fn load(
+        &self,
+        lease: &AiRunLease,
+        provider_kind: ProviderKind,
+        model: &str,
+        static_tools: Vec<ModelToolDefinition>,
+    ) -> (AiCapabilityDeliveryTurn, Value) {
+        let delivery = self.fixture.delivery_for_model(true, model, static_tools);
+        let reference = self
+            .fixture
+            .load_subscription_for_provider(&delivery, lease, provider_kind)
+            .await;
+        (delivery, wait_arguments(&reference))
+    }
+
+    pub(crate) async fn queue_event(&self) {
+        self.fixture.source.push(self.fixture.event(1, "wanted"));
+        assert!(matches!(
+            self.waits.process_next("brokered-event-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+        ));
+    }
+
+    pub(crate) fn revoke(&self) {
+        self.fixture.broker_allowed.store(false, Ordering::SeqCst);
+        self.fixture.broker_version.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1241,6 +1303,48 @@ async fn sqlite_revoked_broker_policy_refuses_resuming_a_queued_brokered_wait() 
         .await
         .expect("adoptions load");
     assert_eq!(adoptions[0].state, "queued", "the adoption was not claimed");
+}
+
+#[tokio::test]
+async fn sqlite_a_removed_loaded_subscription_answers_as_an_unknown_reference() {
+    let fixture = wait_fixture().await;
+    let delivery = fixture.brokered_delivery(true);
+    let lease = fixture.start_lease().await;
+    let reference = fixture.load_subscription(&delivery, &lease).await;
+    let run = AiCapabilityRunBinding::from_lease(
+        &lease,
+        ProviderKind::OpenAi,
+        delivery.session_binding(),
+    );
+    fixture.broker_index.remove_subscriptions(&fixture);
+    let unknown = "f".repeat(64);
+    assert_ne!(reference, unknown);
+    for reference in [reference, unknown] {
+        for arguments in [
+            wait_arguments(&reference),
+            json!({"loadedReference": reference, "continuation": "a".repeat(64)}),
+        ] {
+            assert!(
+                matches!(
+                    fixture.broker.authorize_broker_execution(
+                        lease.principal_reference(), &run, delivery.session(), &arguments,
+                    ).await,
+                    Err(AiError::InvalidInput(code)) if code == crate::AI_CAPABILITY_SELECTION_STALE
+                ),
+                "execute {reference}"
+            );
+        }
+        assert!(
+            matches!(
+                fixture.broker.dispatch_describe_type(
+                    lease.principal_reference(), &run, delivery.session(),
+                    &json!({"loadedReference": reference, "type": "Parent"}),
+                ).await,
+                Err(AiError::InvalidInput(code)) if code == crate::AI_CAPABILITY_SELECTION_STALE
+            ),
+            "describe_type {reference}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -18191,6 +18191,431 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoked_brokered_wait_replays_a_marker_across_checkpoint_recovery() {
+        use crate::orm_subscription_waits::BrokeredReplayFixture;
+
+        let tool_events = |call_id: &str, tool_id: &str, arguments| {
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: call_id.to_owned(),
+                    tool_id: tool_id.to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: call_id.to_owned(),
+                    arguments,
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 18,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ]
+        };
+        let fixture = fixture_with_event_batches([
+            tool_events("before-recovery", "records.read", json!({"recordId": "55"})),
+            tool_events("after-recovery", "records.read", json!({"recordId": "56"})),
+        ])
+        .await;
+        let rules = test_rules(fixture.scope.clone());
+        let initial_rules =
+            AiAgentRuleResolution::new(rules.clone(), OffsetDateTime::now_utc()).unwrap();
+        let wait = BrokeredReplayFixture::new(
+            fixture.database.clone(),
+            fixture.principal.clone(),
+            fixture.scope.clone(),
+            rules.clone(),
+            fixture.audit.clone(),
+        )
+        .await;
+        let writer = Arc::new(OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30)).unwrap(),
+        ));
+        let adopter = AiSubscriptionCheckpointAdopter::new(wait.waits.clone(), writer.clone());
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024).unwrap(),
+        );
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .unwrap(),
+        );
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_authorized_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .unwrap();
+        let loop_limits = AiAgentLoopLimits::new(4, 4).unwrap();
+        let correlation = "brokered-wait-replay";
+        let wait_call = "brokered-wait-call";
+        let catalog = fixture.runtime.tool_catalog();
+        let descriptor = catalog
+            .descriptor(&AiToolId::parse("records.read").unwrap())
+            .unwrap();
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let mut initial = stateless_tool_plan(&fixture);
+        let (delivery, arguments) = wait
+            .load(
+                &fixture.lease,
+                initial.provider_kind.clone(),
+                &initial.request.model,
+                initial.request.tools.clone(),
+            )
+            .await;
+        fixture.mock.prepend_event_batch(tool_events(
+            wait_call,
+            AI_CAPABILITY_EXECUTE_TOOL_ID,
+            arguments,
+        ));
+        let surface = delivery.current_surface();
+        initial.request.tools = delivery.current_tools();
+        initial.transfers[0].estimated_bytes = initial.request.conservative_egress_bytes();
+        let initial = AiProviderCallPlan::new_with_capability_surface(
+            initial.provider_kind,
+            initial.request,
+            initial.budget,
+            initial.transfers,
+            correlation,
+            &surface,
+            catalog,
+            &policy,
+            &fixture.generated_target_policy,
+        )
+        .unwrap();
+        let first = executor
+            .execute(&fixture.lease, initial)
+            .await
+            .expect("provider requests a brokered wait");
+        let first_usage = AiRuleRunUsage::default()
+            .accept_provider_with_web_searches(first.usage(), 0, &initial_rules)
+            .unwrap();
+        let parked_from = writer
+            .persist_provider_turn(
+                &fixture.lease,
+                &first,
+                &fixture.scope,
+                correlation,
+                &route,
+                &rules,
+                first_usage,
+                1,
+                1,
+            )
+            .await
+            .expect("the registration turn is checkpointed");
+        let context = AiSubscriptionWaitRegistrationContext::new(
+            fixture.scope.clone(),
+            correlation,
+            route.clone(),
+            initial_rules.clone(),
+            first_usage.accept_tool_calls(1, &initial_rules).unwrap(),
+            1,
+            1,
+        )
+        .unwrap()
+        .with_capability_delivery(delivery);
+        wait.waits
+            .register_wait(&parked_from, &first, context)
+            .await
+            .expect("the wait parks");
+        assert_eq!(
+            AiRunRecord::find_by_id(&fixture.database, &parked_from.run_id().0)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            AiRunState::WaitingSubscription.as_str()
+        );
+        wait.queue_event().await;
+        let delivery_claim = fixture
+            .run_service
+            .claim_next("wait-delivery")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut lease = fixture.run_service.start(&delivery_claim).await.unwrap();
+        assert!(lease.lease_generation() > parked_from.lease_generation());
+
+        let mut delivered_output = None;
+        let mut delivered_turn_budget = None;
+        for turn in 2..=3 {
+            let adopted = adopter
+                .adopt_tool_batch(&lease)
+                .await
+                .expect("the batch adopts")
+                .unwrap();
+            assert_eq!(adopted.provider_turns(), turn - 1);
+            let reference = adopted.continuation().chain_reference().unwrap();
+            let mut guard = AiAgentLoopGuard::resume_after_tool_batch(
+                &lease,
+                loop_limits,
+                adopted.provider_turns(),
+                adopted.total_tool_calls(),
+                &reference,
+            )
+            .unwrap();
+            lease = adopter
+                .consume_before_provider(&lease, adopted.checkpoint_id())
+                .await
+                .unwrap();
+            let mut base = stateless_tool_plan(&fixture);
+            base.budget.attempt_id = lease.attempt_id();
+            base.budget.lease_generation = lease.lease_generation();
+            base.budget.idempotency_key = format!("provider:{}:{turn}", lease.attempt_id());
+            base.request.input.clear();
+            base.request.instructions.clear();
+            base.request.tools = surface.tools().to_vec();
+            let mut plan = AiProviderCallPlan::new_continuation_with_capability_surface(
+                base.provider_kind,
+                base.request,
+                base.budget,
+                base.transfers,
+                correlation,
+                adopted.continuation().clone(),
+                &surface,
+                catalog,
+                &policy,
+                &fixture.generated_target_policy,
+            )
+            .expect("the current surface contains all historical tool definitions");
+            let withheld = adopter.admit_subscription_results(&lease).await.unwrap();
+            if turn == 2 {
+                assert!(withheld.is_empty());
+                let ModelInputBlock::ToolResult { output, .. } = &plan.request.input[0] else {
+                    panic!("the wait result is delivered on its resumed attempt");
+                };
+                delivered_output = Some(output.clone());
+            } else {
+                assert_eq!(
+                    withheld,
+                    vec![AiWithheldSubscriptionResult::new(
+                        wait_call,
+                        AiSubscriptionResultRefusal::AuthorityRevoked,
+                    )]
+                );
+                let before = plan.continuation_chain_reference();
+                assert_eq!(plan.withhold_subscription_results(&withheld), Ok(true));
+                guard
+                    .rebind_withheld_history(before.as_deref(), plan.continuation_chain_reference())
+                    .unwrap();
+            }
+            let result = executor
+                .execute(&lease, plan)
+                .await
+                .expect("the real provider executor dispatches");
+            if turn == 2 {
+                delivered_turn_budget = Some(result.budget_reservation_id().0);
+            } else {
+                let Some(ModelContinuation::StatelessConversation { messages, .. }) =
+                    &result.request_snapshot.continuation
+                else {
+                    panic!("stateless replay")
+                };
+                let old = delivered_output.as_ref().unwrap();
+                assert!(messages.iter().any(|message| matches!(message,
+                    ModelConversationMessage::Tool { call_id, tool_id, output, .. }
+                    if call_id == wait_call && tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID
+                        && Some(output.clone()) == withheld_subscription_output(
+                            AiSubscriptionResultRefusal::AuthorityRevoked, old.to_string().len(),
+                        ) && output != old
+                )));
+            }
+            assert_eq!(
+                guard.observe_provider_turn(&result).unwrap(),
+                AiAgentLoopTurn::ToolCalls {
+                    provider_turn_index: turn - 1,
+                    call_count: 1,
+                }
+            );
+            let resolution =
+                AiAgentRuleResolution::new(rules.clone(), OffsetDateTime::now_utc()).unwrap();
+            let provider_usage = adopted
+                .rule_usage()
+                .accept_provider_with_web_searches(result.usage(), 0, &resolution)
+                .unwrap();
+            let provider_lease = writer
+                .persist_provider_turn(
+                    &lease,
+                    &result,
+                    &fixture.scope,
+                    correlation,
+                    &route,
+                    &rules,
+                    provider_usage,
+                    turn,
+                    turn,
+                )
+                .await
+                .unwrap();
+            let tool = tool_service
+                .execute_read_only(
+                    &provider_lease,
+                    &result,
+                    AiApplicationToolCallContext::new(
+                        turn - 1,
+                        0,
+                        fixture.scope.clone(),
+                        correlation,
+                        "ordinary-tool",
+                    )
+                    .unwrap(),
+                    route.clone(),
+                )
+                .await
+                .expect("the ordinary read completes through the resolver");
+            guard.observe_tool_result(&tool).unwrap();
+            let continuation = guard.continuation().unwrap();
+            let batch_usage = provider_usage.accept_tool_calls(1, &resolution).unwrap();
+            let batch = writer
+                .persist_tool_batch(
+                    tool.lease(),
+                    &result,
+                    std::slice::from_ref(&tool),
+                    &continuation,
+                    &fixture.scope,
+                    correlation,
+                    &route,
+                    &rules,
+                    batch_usage,
+                    turn,
+                    turn,
+                )
+                .await
+                .expect("the batch is persisted by its current attempt");
+            if turn == 2 {
+                wait.revoke();
+            }
+            lease = recover_brokered_replay_batch(&fixture, &batch).await;
+        }
+
+        let adopted = adopter
+            .adopt_tool_batch(&lease)
+            .await
+            .expect("the fresh attempt accepts history from all three fences")
+            .unwrap();
+        assert_eq!(adopted.provider_turns(), 3);
+        assert_eq!(adopted.total_tool_calls(), 3);
+        assert!(matches!(
+            replay_tool_source(&adopted.continuation().replay_transfers()[0]),
+            Some((ReplayToolSource::Subscription(_), Some(_)))
+        ));
+        assert_eq!(fixture.mock.request_count(), 3);
+
+        // The retained budget still names the original generation. A
+        // different attempt in the same run cannot vouch for that turn.
+        let budget_id = delivered_turn_budget.unwrap();
+        let incorrect_attempt = lease.attempt_id();
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let budget = tx
+                        .find_by_id::<AiBudgetReservationRecord>(&budget_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    assert!(matches!(
+                        tx.compare_and_swap::<AiBudgetReservationRecord>(
+                            &budget.id,
+                            budget.row_version,
+                            AiBudgetReservationRecordWhereInput::default(),
+                            UpdateAiBudgetReservationRecordInput {
+                                attempt_id: Some(incorrect_attempt),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?,
+                        ConditionalUpdateOutcome::Updated(_)
+                    ));
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            adopter.adopt_tool_batch(&lease).await,
+            Err(AiError::Conflict)
+        ));
+    }
+
+    async fn recover_brokered_replay_batch(fixture: &Fixture, batch: &AiRunLease) -> AiRunLease {
+        let run_id = batch.run_id().0;
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    assert!(matches!(
+                        tx.compare_and_swap::<AiRunRecord>(
+                            &run.id,
+                            run.row_version,
+                            AiRunRecordWhereInput::default(),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?,
+                        ConditionalUpdateOutcome::Updated(_)
+                    ));
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let recovery = fixture.run_service.recover_expired_leases().await.unwrap();
+        assert_eq!(recovery.checkpoint_requeued, 1);
+        assert_eq!(recovery.recovery_required, 0);
+        let lease = fixture
+            .run_service
+            .claim_next("checkpoint-recovery-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(lease.lease_generation() > batch.lease_generation());
+        assert_ne!(lease.attempt_id(), batch.attempt_id());
+        fixture.run_service.start(&lease).await.unwrap()
+    }
+
+    #[tokio::test]
     async fn stateless_checkpoint_adoption_validates_every_historical_tool_turn() {
         let fixture = fixture_with_event_batches([
             vec![

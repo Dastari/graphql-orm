@@ -1777,6 +1777,23 @@ impl OrmAiCoordinatorCheckpointService {
             .await
     }
 
+    async fn verify_replay_attempt(
+        &self,
+        lease: &AiRunLease,
+        attempt_id: Uuid,
+        generation: i64,
+    ) -> Result<(), AiError> {
+        let claim =
+            AiRunAttemptRecord::find_by_id(self.run_service.custody_database(), &attempt_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+        if claim.run_id != lease.run_id().0 || claim.lease_generation != generation {
+            return Err(AiError::Conflict);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn validate_subscription_replay(
         &self,
@@ -1784,12 +1801,13 @@ impl OrmAiCoordinatorCheckpointService {
         scope: &AiScope,
         policy: &AiContentProtectionPolicy,
         waiter: &AiSubscriptionWaiterRecord,
+        checkpoint_generation: i64,
         call_id: &str,
         tool_id: &str,
         output: &serde_json::Value,
         transfer: &AiEgressManifest,
         withheld_hash: Option<&str>,
-    ) -> Result<(), AiError> {
+    ) -> Result<i64, AiError> {
         let adoptions =
             AiSubscriptionWaitAdoptionRecord::query(self.run_service.custody_database().pool())
                 .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
@@ -1806,18 +1824,19 @@ impl OrmAiCoordinatorCheckpointService {
         let [adoption] = adoptions.as_slice() else {
             return Err(AiError::Conflict);
         };
+        let delivery_attempt = adoption.claimed_attempt_id.ok_or(AiError::Conflict)?;
+        let delivery_generation = adoption.claimed_lease_generation.ok_or(AiError::Conflict)?;
         if adoption.run_id != waiter.run_id
             || adoption.tool_call_id != waiter.tool_call_id
             || adoption.state != "consumed"
             || adoption.consumed_at.is_none()
-            || adoption.claimed_attempt_id.is_none()
-            || adoption.claimed_lease_generation.is_none_or(|generation| {
-                generation <= waiter.source_lease_generation
-                    || generation > lease.lease_generation()
-            })
+            || delivery_generation <= waiter.source_lease_generation
+            || delivery_generation > checkpoint_generation
         {
             return Err(AiError::Conflict);
         }
+        self.verify_replay_attempt(lease, delivery_attempt, delivery_generation)
+            .await?;
         let value = self
             .open(
                 policy,
@@ -1860,7 +1879,7 @@ impl OrmAiCoordinatorCheckpointService {
         if !matches {
             return Err(AiError::EgressDenied);
         }
-        Ok(())
+        Ok(delivery_generation)
     }
 
     async fn current_policy(
@@ -2272,15 +2291,14 @@ impl OrmAiCoordinatorCheckpointService {
             let historical = evidence.tools[..historical_count]
                 .iter()
                 .zip(continuation.replay_transfers());
-            let mut waits = historical.clone().filter_map(|(item, transfer)| {
-                match replay_tool_source(transfer) {
-                    Some((ReplayToolSource::Subscription(waiter_id), _)) => {
-                        Some((item.provider_turn_index, waiter_id))
-                    }
+            let mut waits = continuation
+                .replay_transfers()
+                .iter()
+                .filter_map(|transfer| match replay_tool_source(transfer) {
+                    Some((ReplayToolSource::Subscription(waiter_id), _)) => Some(waiter_id),
                     _ => None,
-                }
-            });
-            let wait = if let Some((turn, waiter_id)) = waits.next() {
+                });
+            let wait = if let Some(waiter_id) = waits.next() {
                 if waits.next().is_some() {
                     return Err(AiError::Conflict);
                 }
@@ -2303,10 +2321,11 @@ impl OrmAiCoordinatorCheckpointService {
                 {
                     return Err(AiError::Conflict);
                 }
-                Some((turn, waiter))
+                Some(waiter)
             } else {
                 None
             };
+            let mut minimum_generation = 1;
             for (item, transfer) in historical {
                 if !route.matches_manifest(
                     transfer,
@@ -2333,9 +2352,9 @@ impl OrmAiCoordinatorCheckpointService {
                 let (tool_id, waiter) = match source {
                     ReplayToolSource::Application(id) => (id, None),
                     ReplayToolSource::Subscription(id) => {
-                        let (_, waiter) = wait
+                        let waiter = wait
                             .as_ref()
-                            .filter(|(_, waiter)| waiter.id == id)
+                            .filter(|waiter| waiter.id == id)
                             .ok_or(AiError::Conflict)?;
                         (waiter.tool_call_id, Some(waiter))
                     }
@@ -2361,16 +2380,23 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-                // Parking a wait ends the attempt. The wait and earlier
-                // turns belong to its registering fence; subsequent turns
-                // belong to the fence that wrote this checkpoint.
-                let (historical_attempt, historical_generation) = wait
-                    .as_ref()
-                    .filter(|(turn, _)| item.provider_turn_index <= *turn)
-                    .map_or(
-                        (checkpoint.attempt_id, checkpoint.lease_generation),
-                        |(_, waiter)| (waiter.source_attempt_id, waiter.source_lease_generation),
-                    );
+                // The committed budget identifies the originating attempt in
+                // every supported checkpoint format. A recovered checkpoint
+                // can carry turns produced by several earlier claims.
+                let historical_attempt = historical_budget.attempt_id;
+                let historical_generation = historical_budget.lease_generation;
+                if historical_generation < minimum_generation
+                    || historical_generation > checkpoint.lease_generation
+                    || (historical_generation == checkpoint.lease_generation
+                        && historical_attempt != checkpoint.attempt_id)
+                    || waiter.is_some_and(|waiter| {
+                        historical_attempt != waiter.source_attempt_id
+                            || historical_generation != waiter.source_lease_generation
+                    })
+                {
+                    return Err(AiError::Conflict);
+                }
+                minimum_generation = historical_generation;
                 let turn_budget_matches =
                     match historical_turn_budgets.entry(item.provider_turn_index) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -2379,6 +2405,12 @@ impl OrmAiCoordinatorCheckpointService {
                             {
                                 false
                             } else {
+                                self.verify_replay_attempt(
+                                    lease,
+                                    historical_attempt,
+                                    historical_generation,
+                                )
+                                .await?;
                                 entry.insert(historical_budget_id);
                                 true
                             }
@@ -2460,18 +2492,20 @@ impl OrmAiCoordinatorCheckpointService {
                     {
                         return Err(AiError::Conflict);
                     }
-                    self.validate_subscription_replay(
-                        lease,
-                        &scope,
-                        &policy,
-                        waiter,
-                        &item.call_id,
-                        &item.tool_id,
-                        &item.output,
-                        transfer,
-                        withheld_hash,
-                    )
-                    .await?;
+                    minimum_generation = self
+                        .validate_subscription_replay(
+                            lease,
+                            &scope,
+                            &policy,
+                            waiter,
+                            checkpoint.lease_generation,
+                            &item.call_id,
+                            &item.tool_id,
+                            &item.output,
+                            transfer,
+                            withheld_hash,
+                        )
+                        .await?;
                     continue;
                 }
                 if call.provider_tool_id.is_some() {

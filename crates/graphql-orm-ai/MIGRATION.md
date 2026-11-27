@@ -134,9 +134,8 @@ subscription fingerprints. This completes the #551 broker scope.
    - a generated mutation its bound rules do not admit at the reviewed
      approval it was loaded with: no bound rules, rules that admit other
      fingerprints, or rules revoked since describe;
-   - an entry the current index no longer lets it reach, for example a
-     mutation whose reviewed approval changed or an index that lost its
-     in-process proof.
+   - an entry removed from the current index, a mutation whose reviewed
+     approval changed, or an index that lost its in-process proof.
 
    Both held and unknown references consult the same current index source,
    and an unavailable index answers `selection_stale`. The session and
@@ -153,8 +152,11 @@ subscription fingerprints. This completes the #551 broker scope.
    expected `Forbidden` for the cases above must expect
    `AI_CAPABILITY_SELECTION_STALE`.
 
-No schema module change, no GraphQL SDL change and no data migration.
-Restore and recovery are unchanged: a portable-restored wait is still
+Existing stateless checkpoints retain each turn's original attempt and lease
+through their committed budget, tool call and step records. A replacement
+worker can adopt a later checkpoint containing turns from earlier attempts,
+including a withheld subscription result. No schema module change, GraphQL
+SDL change or data migration is needed. A portable-restored wait is still
 `RecoveryRequired`.
 
 ### Codex app-server turn dispatch (#828)

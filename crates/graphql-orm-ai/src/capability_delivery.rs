@@ -1955,7 +1955,7 @@ impl AiCapabilityDiscoveryBroker {
         let LoadedOperationSnapshot { indexes, loaded } = snapshot;
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
-            .ok_or_else(stale_capability)?;
+            .ok_or_else(stale_selection)?;
         if !session.brokers_entry(index, entry) {
             return Err(stale_selection());
         }
