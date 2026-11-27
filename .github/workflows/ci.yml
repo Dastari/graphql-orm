@@ -265,8 +265,9 @@ jobs:
             cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
           done
-      # Compile-only: a write admission is typed by its backend (#921).
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,postgres --test compile_ui write_pipeline_ui::
+      - name: Type write admissions by backend (compile-only, #921)
+        run: |
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,postgres --test compile_ui write_pipeline_ui::
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --test zero_public_write_inputs_backends
       - name: Verify nested create on owned PostgreSQL
         run: |
