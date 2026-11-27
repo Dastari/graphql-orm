@@ -30,6 +30,7 @@ pub mod surface {
         plural = "BrokerParityRecords",
         default_sort = "id ASC",
         keyset = "id asc",
+        aggregate = true,
         description = "A reviewed record reached through the capability broker"
     )]
     pub struct BrokerParityRecord {
@@ -372,6 +373,95 @@ pub async fn entity_capability_round_trip(database: Database) {
     assert!(data.contains("beta"), "{data}");
     assert!(!data.contains("alpha"), "{data}");
     assert_eq!(session.amplification().describe_type_calls, 3);
+
+    let aggregate = entity
+        .operations
+        .iter()
+        .find(|member| member.operation_shape == AiCapabilityOperationShape::Aggregate)
+        .expect("aggregate operation");
+    let execute = json!({
+        "loadedReference": described.loaded_reference(),
+        "operation": aggregate.operation_name,
+        "arguments": [
+            {"name": "metrics.0.operator", "value": "COUNT"},
+            {"name": "where.subject.eq", "value": "beta"}
+        ],
+        "selections": [],
+        "relationshipMaximumItems": [],
+        "maximumItems": 1
+    });
+    let mut tools = AiToolCatalog::new();
+    tools
+        .register_query_capability_catalog(&queries)
+        .expect("register generated queries");
+    let compile = |execute: serde_json::Value| {
+        let tools = &tools;
+        let broker = &broker;
+        let reference = &reference;
+        let run = &run;
+        let session = &session;
+        async move {
+            let execution = broker
+                .authorize_broker_execution(reference, run, session, &execute)
+                .await?;
+            tools.compile_query_capability(
+                execution.capability_id(),
+                execution.capability_fingerprint(),
+                execution.plan().clone(),
+            )
+        }
+    };
+    let compiled = compile(execute.clone())
+        .await
+        .expect("the closed plan supports an ungrouped count");
+    let response = schema
+        .execute(
+            graphql_orm::async_graphql::Request::new(compiled.descriptor().document.clone())
+                .variables(graphql_orm::async_graphql::Variables::from_json(
+                    compiled.variables().clone(),
+                )),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("data")[&aggregate.operation_name],
+        json!([{"groups": [], "metrics": [
+            {"value": "1", "field": null, "kind": "COUNT", "operator": "COUNT"}
+        ]}])
+    );
+
+    for (pointer, invalid) in [
+        ("/maximumItems", json!(null)),
+        ("/selections", json!(["id"])),
+        (
+            "/relationshipMaximumItems",
+            json!([{"path": "records", "maximumItems": 1}]),
+        ),
+        (
+            "/arguments",
+            json!([
+                {"name": "metrics.0.operator", "value": "MIN"},
+                {"name": "metrics.0.field", "value": "subject"}
+            ]),
+        ),
+        ("/arguments/1/name", json!("where.unknown.eq")),
+    ] {
+        let mut rejected = execute.clone();
+        *rejected.pointer_mut(pointer).expect("test argument exists") = invalid;
+        assert!(
+            matches!(compile(rejected).await, Err(AiError::InvalidInput(_))),
+            "{pointer}"
+        );
+    }
+    let mut invalid_grouping = execute;
+    invalid_grouping["arguments"]
+        .as_array_mut()
+        .expect("argument paths")
+        .push(json!({"name": "groupBy", "value": "invalid"}));
+    assert!(matches!(
+        compile(invalid_grouping).await,
+        Err(AiError::InvalidInput(_))
+    ));
 }
 
 /// Browses to the entity capability, then reads every row of its keyset

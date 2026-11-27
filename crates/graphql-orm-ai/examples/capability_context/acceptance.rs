@@ -436,8 +436,7 @@ impl<'a> Trial<'a> {
             "maximumItems": 1,
         });
         if intent.shape == "aggregate" {
-            // This represents the COUNT metric. The required empty groupBy
-            // list for an ungrouped count has no scalar argument path.
+            // An ungrouped COUNT omits the grouping argument on the broker wire.
             args["arguments"] = json!([
                 {"name": "metrics.0.operator", "value": "COUNT"},
             ]);
