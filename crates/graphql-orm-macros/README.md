@@ -12,11 +12,11 @@ supersedes: []
 
 Entity derives validate `default_sort` against persisted columns and render
 identifiers for the selected backend.
-See the [migration guide](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942).
 
 Generated relation search documents reject statically unreadable target
 fields unless the target field explicitly opts in.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
 
 In the next breaking ORM/macros release, `db_column` must designate one
 physical column. A literal dot requires one delimited identifier, such as

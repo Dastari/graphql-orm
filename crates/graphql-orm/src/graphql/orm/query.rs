@@ -17,11 +17,13 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// One default order term for conversion of a static entity to a runtime schema.
+/// One default order term of a static entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefaultSortTerm {
     /// The column declaration as recorded in `FieldMetadata::name`.
     pub column: &'static str,
+    /// The rendered column reference, including any table qualifier.
+    pub expression: &'static str,
     /// Whether the values sort in descending order.
     pub descending: bool,
 }
@@ -37,6 +39,7 @@ pub trait DatabaseEntity {
     const DEFAULT_SORT: &'static str;
     /// Structured counterparts of the SQL terms in `DEFAULT_SORT`.
     /// Handwritten entities with a default order supply these for runtime conversion.
+    /// With no structured terms, query helpers use the order text directly.
     const DEFAULT_SORT_TERMS: &'static [DefaultSortTerm] = &[];
 
     /// Explicit SQL Server column types keyed by rendered column name.
@@ -1066,15 +1069,55 @@ impl SortExpression {
 /// `CASE WHEN id > 0 THEN 0 ELSE 1 END`, does not order by it, so callers that
 /// append a primary-key tiebreak still append one.
 pub(crate) fn sort_clause_orders_by_column(clause: &str, column: &str) -> bool {
-    let expected = unquote_identifier(column);
+    let expected = column
+        .starts_with(['"', '[', '`'])
+        .then(|| identifier_segment(column))
+        .flatten()
+        .filter(|(_, rest)| rest.is_empty())
+        .map(|(name, _)| name);
+    let expected = expected.as_deref().unwrap_or(column);
     split_sort_terms(clause)
         .into_iter()
         .any(|term| sort_term_column(term).is_some_and(|name| name == expected))
 }
 
+/// Prefer the declared columns when an order came from a generated default.
+pub(crate) fn entity_sort_orders_by_column<T: DatabaseEntity>(
+    dialect: DatabaseBackend,
+    clause: &str,
+    column: &str,
+) -> bool {
+    if clause == T::DEFAULT_SORT && !T::DEFAULT_SORT_TERMS.is_empty() {
+        T::DEFAULT_SORT_TERMS
+            .iter()
+            .any(|term| dialect.same_identifier_part(term.column, column))
+    } else {
+        sort_clause_orders_by_column(clause, column)
+    }
+}
+
+pub(crate) fn postgres_default_sort_uses_projected_columns<T: DatabaseEntity>(
+    columns: &[&str],
+) -> bool {
+    use super::dialect::{postgres_resolved_identifier, postgres_resolved_identifier_parts};
+
+    if T::DEFAULT_SORT_TERMS.is_empty() {
+        return postgres_sort_uses_projected_columns(T::DEFAULT_SORT, columns);
+    }
+    T::DEFAULT_SORT_TERMS.iter().all(|term| {
+        let parts = postgres_resolved_identifier_parts(term.expression);
+        let [name] = parts.as_slice() else {
+            return false;
+        };
+        columns
+            .iter()
+            .any(|column| postgres_resolved_identifier(column) == *name)
+    })
+}
+
 /// Whether a default sort can be evaluated against a projection of these
 /// physical columns. Keep arbitrary SQL on the original table scope.
-pub(crate) fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str]) -> bool {
+fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str]) -> bool {
     use super::dialect::{SqlTokenKind, postgres_resolved_identifier, scan_sql};
 
     clause.trim().is_empty()
@@ -1099,32 +1142,37 @@ pub(crate) fn postgres_sort_uses_projected_columns(clause: &str, columns: &[&str
         })
 }
 
-/// The terms of `clause` that do not order directly by a column one of
-/// `ordered` already orders by, or `None` when no term is left.
-///
-/// SQL Server refuses an `ORDER BY` list that names a column twice, so a
-/// default order is appended to existing terms through this.
-pub(crate) fn sort_terms_not_ordered_by(
-    clause: &str,
-    ordered: &[SortExpression],
-) -> Option<String> {
-    let terms = split_sort_terms(clause)
+/// The default terms left after removing columns already used for grouping.
+pub(crate) fn default_sort_terms_not_ordered_by<T: DatabaseEntity>(
+    dialect: DatabaseBackend,
+    grouped_columns: &[&str],
+) -> Vec<SortExpression> {
+    if !T::DEFAULT_SORT_TERMS.is_empty() {
+        return T::DEFAULT_SORT_TERMS
+            .iter()
+            .filter(|term| {
+                !grouped_columns
+                    .iter()
+                    .any(|column| dialect.same_identifier_part(term.column, column))
+            })
+            .map(|term| {
+                let direction = if term.descending { " DESC" } else { "" };
+                SortExpression::unbound(format!("{}{direction}", term.expression))
+            })
+            .collect();
+    }
+
+    split_sort_terms(T::DEFAULT_SORT)
         .into_iter()
         .map(str::trim)
-        .filter(|term| !term.is_empty())
         .filter(|term| {
-            sort_term_column(term).is_none_or(|column| {
-                !ordered
+            !term.is_empty()
+                && !grouped_columns
                     .iter()
-                    .any(|sort| sort_clause_orders_by_column(&sort.clause, &column))
-            })
+                    .any(|column| sort_clause_orders_by_column(term, column))
         })
-        .collect::<Vec<_>>();
-    (!terms.is_empty()).then(|| terms.join(", "))
-}
-
-fn unquote_identifier(identifier: &str) -> &str {
-    identifier.trim_matches(|character| matches!(character, '"' | '[' | ']' | '`'))
+        .map(SortExpression::unbound)
+        .collect()
 }
 
 /// Split an `ORDER BY` list on top-level commas, outside parentheses and
@@ -1134,12 +1182,17 @@ fn split_sort_terms(clause: &str) -> Vec<&str> {
     let mut depth = 0_usize;
     let mut quote: Option<char> = None;
     let mut start = 0;
-    for (index, character) in clause.char_indices() {
+    let mut characters = clause.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
         match quote {
             Some(open) => {
                 let close = if open == '[' { ']' } else { open };
                 if character == close {
-                    quote = None;
+                    if characters.peek().is_some_and(|&(_, next)| next == close) {
+                        characters.next();
+                    } else {
+                        quote = None;
+                    }
                 }
             }
             None => match character {
@@ -5102,10 +5155,9 @@ where
             self.order_sorts.clone()
         };
         for primary_key in <P::Entity as DatabaseEntity>::PRIMARY_KEYS {
-            if !sorts
-                .iter()
-                .any(|sort| sort_clause_orders_by_column(&sort.clause, primary_key))
-            {
+            if !sorts.iter().any(|sort| {
+                entity_sort_orders_by_column::<P::Entity>(B::DIALECT, &sort.clause, primary_key)
+            }) {
                 sorts.push(SortExpression {
                     clause: format!("{} ASC", B::DIALECT.render_identifier_path(primary_key)),
                     values: Vec::new(),
@@ -5884,10 +5936,9 @@ where
             })
             .collect::<Vec<_>>();
         for primary_key in T::PRIMARY_KEYS {
-            if !sorts
-                .iter()
-                .any(|sort| sort_clause_orders_by_column(&sort.clause, primary_key))
-            {
+            if !sorts.iter().any(|sort| {
+                entity_sort_orders_by_column::<T>(B::DIALECT, &sort.clause, primary_key)
+            }) {
                 sorts.push(SortExpression::unbound(format!(
                     "{} ASC",
                     B::DIALECT.render_identifier_path(primary_key)
@@ -8262,6 +8313,18 @@ mod visible_row_scan_tests {
             "\"page_rows\" . \"id ASC",
         ] {
             assert!(!sort_clause_orders_by_column(clause, "id"), "{clause}");
+        }
+    }
+
+    #[test]
+    fn text_only_sorts_keep_commas_inside_escaped_identifiers() {
+        for (clause, identifier) in [
+            ("[a]],[parent_id] DESC, [id]", "[a]],[parent_id]"),
+            (r#""a"",""parent_id" DESC, "id""#, r#""a"",""parent_id""#),
+        ] {
+            assert!(sort_clause_orders_by_column(clause, identifier));
+            assert!(sort_clause_orders_by_column(clause, "id"));
+            assert!(!sort_clause_orders_by_column(clause, "parent_id"));
         }
     }
 

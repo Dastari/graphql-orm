@@ -1244,6 +1244,7 @@ fn legacy_identifier_shapes_fail_validation_not_silently_convert() {
     entity.default_sort = "JobId ASC";
     entity.default_sort_terms = &[graphql_orm::graphql::orm::DefaultSortTerm {
         column: "JobId",
+        expression: "JobId",
         descending: false,
     }];
 

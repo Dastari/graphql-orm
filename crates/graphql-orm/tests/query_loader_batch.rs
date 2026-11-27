@@ -35,7 +35,9 @@ mod owned_postgres;
 
 /// The relation target. Its default order is a numeric position, which
 /// disagrees with the order of its text primary key (`a-10` sorts before
-/// `a-2`). It has no `BatchLoadEntity` implementation.
+/// `a-2`). Native backends use a physical position column whose escaped
+/// identifier contains a comma and looks like a second list_id sort term.
+/// This target has no `BatchLoadEntity` implementation.
 #[derive(
     GraphQLEntity,
     GraphQLOperations,
@@ -63,7 +65,7 @@ mod owned_postgres;
         table = "batch_steps",
         plural = "BatchSteps",
         auth = "none",
-        default_sort = "position ASC"
+        default_sort = "\"a\"\",\"\"list_id\" ASC, list_id DESC"
     )
 )]
 #[cfg_attr(
@@ -74,7 +76,7 @@ mod owned_postgres;
         plural = "BatchSteps",
         auth = "none",
         schema_policy = "external_writable",
-        default_sort = "[position] ASC"
+        default_sort = "[a]],[list_id] ASC, [list_id] DESC"
     )
 )]
 #[graphql(complex)]
@@ -88,6 +90,8 @@ struct Step {
     list_id: String,
     #[sortable]
     #[filterable(type = "number")]
+    #[cfg_attr(feature = "postgres", graphql_orm(db_column = "\"a\"\",\"\"list_id\""))]
+    #[cfg_attr(feature = "mssql", graphql_orm(db_column = "[a]],[list_id]"))]
     position: i32,
     #[filterable(type = "string")]
     label: String,
@@ -649,10 +653,19 @@ impl Fixture {
         )
         .schema_policy(SchemaPolicy::ExternalWritable)
         .build();
+        #[cfg(feature = "sqlite")]
+        let position_column = "position";
+        #[cfg(feature = "postgres")]
+        let position_column = r#""a"",""list_id""#;
+        #[cfg(feature = "mssql")]
+        let position_column = "[a]],[list_id]";
+        let steps_ddl = format!(
+            "CREATE TABLE batch_steps (id VARCHAR(64) PRIMARY KEY, list_id VARCHAR(64) NOT NULL, \
+             {position_column} INTEGER NOT NULL, label VARCHAR(64) NOT NULL, note VARCHAR(64) NULL)"
+        );
         for statement in [
             "CREATE TABLE batch_lists (id VARCHAR(64) PRIMARY KEY)",
-            "CREATE TABLE batch_steps (id VARCHAR(64) PRIMARY KEY, list_id VARCHAR(64) NOT NULL, \
-             position INTEGER NOT NULL, label VARCHAR(64) NOT NULL, note VARCHAR(64) NULL)",
+            &steps_ddl,
             "INSERT INTO batch_lists VALUES ('a')",
             "INSERT INTO batch_lists VALUES ('b')",
             "INSERT INTO batch_lists VALUES ('c')",

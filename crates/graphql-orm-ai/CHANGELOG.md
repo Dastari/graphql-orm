@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.169.0 (breaking release)
+## Unreleased - 0.170.0 (breaking release)
 
 - The fixed broker admits generated mutations from indexes built in process
   from a mutation catalogue checked against the finished SDL. A mutation

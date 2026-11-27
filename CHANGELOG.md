@@ -14,13 +14,19 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.235.0 (breaking release)
+## Unreleased - ORM/macros 0.236.0 (breaking release)
+
+- **Fixed (#942).** Batched relation loads preserve default ordering by
+  columns whose names contain escaped identifier delimiters. On SQL Server,
+  runtime-schema default orders inferred from primary keys use field IDs
+  such as `table.id` in place of `table.[id]`.
+  [Migration](MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942)
 
 - **Breaking (#542):** Entity derives validate `default_sort` against persisted
   columns and render identifiers for the selected backend. Runtime schema
   conversion uses structured sort terms. Changes to rendered sort SQL change
   client interpretation fingerprints.
-  See the [migration guide](MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+  See the [migration guide](MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942).
 
 - **Breaking (#905):** Generated relation search documents reject statically
   unreadable target fields unless the target field opts in with
@@ -33,7 +39,7 @@ for historical context.
   `ReadSnapshot` variant runs the same policy-aware, read-only transaction
   as the dedicated snapshot methods. The general callback supports generated
   transaction keysets and refuses access to the underlying pool.
-  See the [migration guide](MIGRATION.md#breaking-release-unreleased).
+  See the [migration guide](MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
 
 - **Breaking (#521):** SQL Server pools that opt into native temporal text
   binding refuse generated keyset orders on String-valued temporal fields.
