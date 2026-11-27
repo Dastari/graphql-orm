@@ -70,9 +70,16 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.239.0**; **`graphql-orm-macros` 0.239.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+Versions on main (bold where they differ from the latest release): `graphql-orm` 0.240.0; `graphql-orm-macros` 0.240.0; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
 - **No action** — ORM/macros 0.242.0 reduce compile cost for ordinary generated entity fields (#677, #358). [Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
+
+### workspace-2026.11.27.4
+
+Commit `5f2f668bebd1` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.27.4)
+
+Packages (changed in bold): **`graphql-orm` 0.240.0**; **`graphql-orm-macros` 0.240.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+
 - **No action** — ORM/macros 0.240.0 share the generated GraphQL create and upsert field-policy checks for upsert-enabled entities (#677, #724). [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies)
 - **No action** — ORM/macros 0.239.0 report invalid plural overrides on the attribute value (#542). [Migration](../../MIGRATION.md#02390-plural-name-diagnostics)
 
