@@ -15,6 +15,11 @@ filters and relations. Handwritten SQL shares evaluation sites only with an
 explicit host guarantee.
 [Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
 
+Version 0.237.0 derives the authority of a generated GraphQL write from the
+entity's configuration, issues it only after target admission and binds it to
+one request, operation and `Database`. Generated mutations are unchanged.
+[Migration](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority)
+
 Version 0.235.0 preserves authorized direct queries for generated
 relations without a compatible registered loader. See
 [generated relation loaders](../../docs/reference/graphql-orm/entities-and-relations.md#current-authority-for-generated-relationship-targets).

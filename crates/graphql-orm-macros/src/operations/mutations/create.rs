@@ -1,4 +1,4 @@
-use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
+use super::{Hook, admit_nested_create_request, admit_request, admitted_request, write_entity};
 use crate::operations::nested_create::{Child, ChildPipeline, Parent};
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -17,8 +17,7 @@ pub(in crate::operations) struct CreateInput<'a> {
     pub(in crate::operations) input_arg_name: &'a str,
     pub(in crate::operations) input_arg_description: &'a str,
     pub(in crate::operations) result_type: &'a syn::Ident,
-    pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) create_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) create_scope_arguments: &'a TokenStream,
     pub(in crate::operations) backend_marker: &'a TokenStream,
     pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
@@ -60,8 +59,7 @@ pub(in crate::operations) fn create(
         input_arg_name,
         input_arg_description,
         result_type,
-        resolver_auth_mode,
-        create_scope_enforcement,
+        create_scope_arguments,
         backend_marker,
         entity_name_lit,
         struct_name,
@@ -118,27 +116,19 @@ pub(in crate::operations) fn create(
     } else {
         quote! {}
     };
-    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = |assurance| {
-        admit_request(
-            struct_name,
-            backend_marker,
-            resolver_auth_mode,
-            create_scope_enforcement,
-            assurance,
-        )
-    };
-    let admit_parent = admit(Assurance::Resolver);
-    // A child row is admitted on its parent's database under its own field
-    // context, and enforces its entity's own create root.
+    let admit_parent = admit_request(struct_name, "Create", create_scope_arguments);
+    // A child row is admitted through its parent's admission, under its own
+    // field context, which carries the parent's request and database. It
+    // enforces its entity's own create root.
     let admit_child = {
-        let admit_request = admit(Assurance::Operation(create_mutation_name));
+        let admit_request = admit_nested_create_request(struct_name);
         quote! {
             #entity
             #admit_request
             let __gom_authority = __gom_request
-                .__admit_entity_on(ctx, db, __gom_entity)
+                .__admit_entity(ctx)
                 .await?
                 .into_authority();
         }
@@ -279,7 +269,7 @@ pub(in crate::operations) fn create(
 
                 #entity
                 #admit_parent
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx, __gom_entity).await?;
+                let __gom_write = __gom_request.__admit_entity(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();

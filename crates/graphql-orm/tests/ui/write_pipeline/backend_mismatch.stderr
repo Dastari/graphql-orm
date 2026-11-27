@@ -1,0 +1,9 @@
+error[E0308]: `?` operator has incompatible types
+  --> tests/ui/write_pipeline/backend_mismatch.rs:18:9
+   |
+18 |         request.__admit_entity(ctx).await?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `PostgresBackend`, found `SqliteBackend`
+   |
+   = note: `?` operator cannot convert from `graphql_orm::prelude::GeneratedWriteAdmission<'_, SqliteBackend>` to `graphql_orm::prelude::GeneratedWriteAdmission<'_, PostgresBackend>`
+   = note: expected struct `graphql_orm::prelude::GeneratedWriteAdmission<'_, PostgresBackend>`
+              found struct `graphql_orm::prelude::GeneratedWriteAdmission<'_, SqliteBackend>`
