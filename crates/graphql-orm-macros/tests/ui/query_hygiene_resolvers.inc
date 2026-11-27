@@ -878,7 +878,7 @@ impl RecordMutations {
                         &["?", "?"],
                         &["id"],
                         &__gom_update_columns,
-                        false.then(Record::__gom_current_updated_at_expr),
+                        ::std::option::Option::None,
                         ::std::option::Option::None,
                     )
                 },
