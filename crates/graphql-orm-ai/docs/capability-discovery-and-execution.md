@@ -262,9 +262,9 @@ counts questions that never executed successfully. A separate control
 dispatches a stale execute reference, then a valid one, to verify the
 failed call counts exactly once.
 
-Measured on an AMD Ryzen 9 9955HX with Rust 1.97.1, using an unoptimized
-build with debug information disabled and the broker from review commit
-`646d7d3b`. Measured discover latency includes policy admission. Setup
+Rerun on a shared AMD Ryzen 9 9955HX host with Rust 1.97.1, using an
+unoptimized build with debug information disabled and the ungrouped-count
+fix at `698d03f3b`. Measured discover latency includes policy admission. Setup
 includes SDL generation, SQLite seeding, and compiling the catalogues
 and indexes. The points used 6 and 402 targets, respectively. Peak RSS
 covers the whole process.
@@ -273,30 +273,35 @@ covers the whole process.
 | --- | --- | ---: | ---: |
 | Correct target, entity and shape | ≥95% | 30/30 | 30/30 |
 | Calls to first successful execute, p50 | ≤2 | 3 | 3 |
-| Calls to first successful execute, p95 | ≤4 | 6 | 6 |
-| Questions with no successful execute | — | 8 | 8 |
-| Full task successes | At least the prior baseline | 18/30 | 18/30 |
-| Two-leg task successes | — | 2/6 | 2/6 |
+| Calls to first successful execute, p95 | ≤4 | 3 | 3 |
+| Questions with no successful execute | — | 0/30 | 0/30 |
+| Failed executes across all legs | — | 0/36 | 0/36 |
+| Failed ungrouped count legs | — | 0/12 | 0/12 |
+| Full task successes | At least the prior baseline | 30/30 | 30/30 |
+| Two-leg task successes | — | 6/6 | 6/6 |
 | Restricted caller candidates | Permitted candidates at 40,000 | 6, all permitted | 6, all permitted |
-| Unscoped broker discover p95 | ≤10 ms at 40,000 | 5.99 ms | 453.81 ms |
-| Fixture setup | Linear growth | 6.37 s | 536.19 s |
-| Peak process RSS | Linear growth | 159 MiB | 593 MiB |
+| Unscoped broker discover p95 | ≤10 ms at 40,000 | 13.77 ms | 512.93 ms |
+| Fixture setup | Linear growth | 9.24 s | 615.57 s |
+| Peak process RSS | Linear growth | 158 MiB | 578 MiB |
 
 A fresh question takes at least three calls through discover, describe,
-and execute. The p50 and p95 call targets were missed. In two questions
-a failed first leg took three calls before a second leg succeeded. The
-stale-reference control also included the failed execute in its count of
-four calls.
+and execute. The p95 call target passed and the p50 target was missed at
+both sizes. Each percentile includes all 30 questions. The separate
+stale-reference control recorded one failure in two execute attempts and
+four broker calls to first success at each size.
 
-All 12 ungrouped count legs selected the intended aggregate and failed
-closed during plan validation. The generated aggregate requires an
-explicit empty `groupBy` for an ungrouped count. Broker arguments accept
-scalar leaves such as `metrics.0.operator`, which leaves no path for an
-empty list. List and keyset legs succeeded, including the two questions
-that combine those shapes across targets.
+The original run at `43a18f01` selected 30/30 correct shapes at each size.
+All 12 ungrouped count legs failed plan validation (12/36 legs overall),
+8/30 questions had no successful execute, and 18/30 tasks succeeded.
+Scalar argument paths could not encode the required empty grouping list.
+The broker's empty selection and relationship fields also fell outside
+the fixed-result aggregate schema. The catalog now supplies the empty
+grouping list and removes the empty wrapper fields for a count-only
+aggregate with omitted grouping. The same closed-plan compiler validates
+the resulting arguments and bound.
 
-The two-point changes were 13.38 s of setup per 1,000 added entries
-and 11.23 KiB of peak RSS per added entry. Confirming linearity requires
+The two-point changes were 15.31 s of setup per 1,000 added entries
+and 10.86 KiB of peak RSS per added entry. Confirming linearity requires
 more points. Unscoped discover p95 missed the 10 ms target at 40,000
 entries on this unoptimized host.
 
