@@ -12,6 +12,12 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Grouped-root discovery allocation reduction (#551)
+
+**No action.** Discovery streams grouped roots into the existing policy
+batches. Hosts receive the same ordered batches and continue to decide
+admission before the result limit applies. No data migration is needed.
+
 ### Capability discovery ranking reuse (#551)
 
 **No action.** Discovery reuses the initial rank of admitted entries when

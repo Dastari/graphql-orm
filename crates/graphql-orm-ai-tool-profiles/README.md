@@ -14,6 +14,10 @@ The next breaking tool-profile release adds continuable keyset pages, compact mu
 and subscription signatures, and capability contract fingerprints.
 See the [migration guide](MIGRATION.md).
 
+AI tool profiles 0.37.0 adds a streaming iterator over the grouped root
+matches of a ranked entity.
+[Migration guide](MIGRATION.md#0370-grouped-root-iteration)
+
 AI tool profiles 0.36.0 records whether an index was built in process from a
 typed subscription catalogue, so the fixed broker admits subscriptions only
 from one whose compiler refused `@transientInput` roots, and summarizes a

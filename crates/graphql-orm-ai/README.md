@@ -29,6 +29,10 @@ handles. Fixed-broker sessions rebind once.
 [Question-to-execute benchmark](docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark) ·
 [migration](MIGRATION.md#capability-broker-version-3-551)
 
+AI 0.175.0 reduces discovery allocations by appending grouped roots directly
+to the existing policy batches.
+[Migration guide](MIGRATION.md#grouped-root-discovery-allocation-reduction-551)
+
 AI 0.174.0 reuses discovery ranking after fresh policy admission when all
 retained entities keep their grouped roots.
 [Migration guide](MIGRATION.md#capability-discovery-ranking-reuse-551)

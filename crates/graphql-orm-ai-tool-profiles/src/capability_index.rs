@@ -1238,15 +1238,23 @@ impl<'a> AiCapabilityRankedMatch<'a> {
     /// Matches for the root entries an entity entry groups, in operation
     /// order. Empty for every other entry.
     pub fn operations(&self) -> Vec<AiCapabilityRankedMatch<'a>> {
-        self.entry
-            .operations
-            .iter()
-            .filter_map(|member| self.index.entry(&member.capability_id))
-            .map(|entry| AiCapabilityRankedMatch {
+        self.iter_grouped_roots().collect()
+    }
+
+    /// Iterates the grouped root matches in operation order without
+    /// collecting them. Empty for an entry that groups no roots.
+    ///
+    /// The matches carry index metadata. Each root still requires its own
+    /// current host policy decision before disclosure.
+    pub fn iter_grouped_roots(&self) -> impl Iterator<Item = AiCapabilityRankedMatch<'a>> + '_ {
+        // Admission proves that top-level and grouped root IDs are distinct.
+        self.entry.operations.iter().filter_map(|member| {
+            let (_, entry) = self.index.operation_entries().get(&member.capability_id)?;
+            Some(AiCapabilityRankedMatch {
                 index: self.index,
                 entry,
             })
-            .collect()
+        })
     }
 
     /// Match for the entity entry that groups this root, if any.
@@ -3983,6 +3991,29 @@ mod tests {
                 .all(|candidate| candidate.entry().kind == AiCapabilityKind::GeneratedQuery)
         );
         assert_eq!(roots.entries().len(), 25);
+    }
+
+    #[test]
+    fn grouped_root_iterator_preserves_operation_order_and_exact_entries() {
+        let set = AiCapabilityIndexSet::compile([Arc::new(synthetic_entity_index(3))])
+            .expect("entity set");
+        for candidate in set.browse_matches(None, None).expect("entities") {
+            let roots = candidate.iter_grouped_roots().collect::<Vec<_>>();
+            assert_eq!(roots.len(), candidate.entry().operations.len());
+            assert!(!roots.is_empty());
+            for (root, member) in roots.iter().zip(&candidate.entry().operations) {
+                assert_eq!(root.entry().id, member.capability_id);
+                assert!(std::ptr::eq(root.index(), candidate.index()));
+                assert!(std::ptr::eq(
+                    root.entry(),
+                    candidate
+                        .index()
+                        .entry(&member.capability_id)
+                        .expect("root")
+                ));
+                assert!(root.iter_grouped_roots().next().is_none());
+            }
+        }
     }
 
     #[test]

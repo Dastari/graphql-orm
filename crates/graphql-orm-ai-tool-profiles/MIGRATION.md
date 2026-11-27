@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.37.0 grouped-root iteration
+
+**No action.** Hosts can use `AiCapabilityRankedMatch::iter_grouped_roots`
+to visit grouped root matches in operation order without collecting them.
+`operations()` still returns the collected matches. Apply current host
+policy before using the matches for disclosure. No data migration is needed.
+
 ## 0.36.0 brokered subscription indexes
 
 **No action** unless you serve brokered subscriptions. A fixed broker admits

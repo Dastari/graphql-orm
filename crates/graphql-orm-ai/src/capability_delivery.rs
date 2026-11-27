@@ -1622,14 +1622,11 @@ impl AiCapabilityDiscoveryBroker {
             };
             batch.push(*candidate);
             let at = batch.len() - 1;
-            let mut roots = Vec::new();
+            let root_start = batch.len();
             if !per_root {
-                for root in candidate.operations() {
-                    batch.push(root);
-                    roots.push(batch.len() - 1);
-                }
+                batch.extend(candidate.iter_grouped_roots());
             }
-            slots.push((at, roots, entity_at));
+            slots.push((at, root_start..batch.len(), entity_at));
         }
         // No policy call decides more than one batch: an entity whose
         // grouped roots exceed it is split across calls, and the decisions
@@ -1659,9 +1656,8 @@ impl AiCapabilityDiscoveryBroker {
                 continue;
             }
             let admitted = roots
-                .iter()
-                .filter(|root| decisions[**root].allowed)
-                .map(|root| batch[*root].entry().id.clone())
+                .filter(|root| decisions[*root].allowed)
+                .map(|root| batch[root].entry().id.clone())
                 .collect::<BTreeSet<_>>();
             if batch[at].entry().kind == AiCapabilityKind::GeneratedEntity && admitted.is_empty() {
                 continue;
@@ -10400,6 +10396,177 @@ mod tests {
                     legacy
                 );
                 assert_eq!(authority.calls.load(Ordering::SeqCst), expected_calls);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LaterBatch {
+        Aligned,
+        MissingDecision,
+        WrongId,
+        PolicyError,
+    }
+
+    struct GroupedBatchAuthority {
+        allowed: BTreeSet<AiToolId>,
+        batches: Mutex<Vec<Vec<AiToolId>>>,
+        later_batch: LaterBatch,
+    }
+
+    #[async_trait]
+    impl AiCapabilityAuthorityPolicy for GroupedBatchAuthority {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _owning_index: &AiCapabilityIndex,
+            _entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            panic!("search must use the batch decision");
+        }
+
+        async fn authorize_discovery(
+            &self,
+            _principal: &ResolvedPrincipal,
+            matches: &[AiCapabilityRankedMatch<'_>],
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<Vec<AiCapabilityDiscoveryDecision>, AiError> {
+            let mut batches = self.batches.lock().expect("batches");
+            batches.push(matches.iter().map(|item| item.entry().id.clone()).collect());
+            let mut decisions = matches
+                .iter()
+                .map(|item| {
+                    AiCapabilityDiscoveryDecision::for_match(
+                        item,
+                        self.allowed.contains(&item.entry().id),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if batches.len() == 2 {
+                match self.later_batch {
+                    LaterBatch::Aligned => {}
+                    LaterBatch::MissingDecision => {
+                        decisions.pop();
+                    }
+                    LaterBatch::WrongId => decisions.swap(0, 1),
+                    LaterBatch::PolicyError => {
+                        return Err(AiError::InvalidInput("policy unavailable".to_owned()));
+                    }
+                }
+            }
+            Ok(decisions)
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_discovery_preserves_policy_batches_before_top_k() {
+        let indexes = Arc::new(
+            AiCapabilityIndexSet::compile([
+                two_root_entity_index("target-policy-v1"),
+                generated_index_with_schema(
+                    "other-application",
+                    "other",
+                    "target-policy-v1",
+                    None,
+                    true,
+                ),
+                generated_index_with_schema(
+                    "third-application",
+                    "third",
+                    "target-policy-v1",
+                    None,
+                    true,
+                ),
+            ])
+            .expect("index set"),
+        );
+        let query = AiCapabilitySearchQuery {
+            text: "record".to_owned(),
+            namespace: None,
+            kind: Some(AiCapabilityKind::GeneratedEntity),
+            entity_or_operation: None,
+            maximum_results: 1,
+        };
+        let ranked = indexes.ranked_matches(&query).expect("ranking");
+        assert_eq!(ranked.len(), 3);
+        let grouped_ids = ranked
+            .iter()
+            .map(|candidate| {
+                std::iter::once(candidate.entry().id.clone())
+                    .chain(
+                        candidate
+                            .entry()
+                            .operations
+                            .iter()
+                            .map(|root| root.capability_id.clone()),
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(grouped_ids.iter().all(|group| group.len() == 3));
+        let expected_batches = [grouped_ids[..2].concat(), grouped_ids[2].clone()];
+        let principal = principal();
+        let reference = principal.reference();
+        let run = run_binding();
+        for (allowed_position, later_batch) in [
+            (Some(2), LaterBatch::Aligned),
+            (Some(1), LaterBatch::Aligned),
+            (None, LaterBatch::Aligned),
+            (Some(0), LaterBatch::MissingDecision),
+            (Some(0), LaterBatch::WrongId),
+            (Some(0), LaterBatch::PolicyError),
+        ] {
+            let allowed = allowed_position
+                .map(|position: usize| {
+                    BTreeSet::from([
+                        grouped_ids[position][0].clone(),
+                        grouped_ids[position][2].clone(),
+                    ])
+                })
+                .unwrap_or_default();
+            let authority = Arc::new(GroupedBatchAuthority {
+                allowed,
+                batches: Mutex::new(Vec::new()),
+                later_batch,
+            });
+            let broker = AiCapabilityDiscoveryBroker::new(
+                Arc::new(Resolver(principal.clone())),
+                Arc::new(CurrentIndexes(RwLock::new(indexes.clone()))),
+                authority.clone(),
+                Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+                Duration::seconds(30),
+            )
+            .expect("broker")
+            .with_maximum_discovery_authorizations(6)
+            .expect("bound");
+
+            let result = broker
+                .search_admitted(&reference, &run, &query, false, |_, _| true)
+                .await;
+            assert_eq!(
+                *authority.batches.lock().expect("batches"),
+                expected_batches
+            );
+            match later_batch {
+                LaterBatch::Aligned => {
+                    let (result, visible) = result.expect("admitted");
+                    if let Some(position) = allowed_position {
+                        let candidate = ranked[position];
+                        let roots = BTreeSet::from([grouped_ids[position][2].clone()]);
+                        assert_eq!(result.candidates, [candidate.admitted_candidate(&roots)]);
+                        assert_eq!(visible, [visible_fingerprint(candidate.entry(), &roots)]);
+                    } else {
+                        assert!(result.candidates.is_empty());
+                        assert!(visible.is_empty());
+                    }
+                }
+                LaterBatch::MissingDecision | LaterBatch::WrongId => {
+                    assert!(matches!(result, Err(AiError::Forbidden)));
+                }
+                LaterBatch::PolicyError => {
+                    assert_input_error(&result.expect_err("policy error"), "policy unavailable");
+                }
             }
         }
     }
