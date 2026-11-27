@@ -335,8 +335,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         /// relationship registrations in addition to mounted generated resolvers.
         ///
         /// See `GraphqlResolverCatalog::compose_with_registrations` for the
-        /// registration contract. Each call validates the supplied declarations
-        /// against this schema and leaves the cached generated catalogue intact.
+        /// registration contract. The owner and target must be backed by their
+        /// declared Rust types in the query root's registry. Each call validates
+        /// the declarations against this schema.
         ///
         /// # Errors
         ///
@@ -353,6 +354,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ::graphql_orm::graphql::orm::compose_resolver_catalog_with_registrations::<QueryRoot>(
                 __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
                 ::std::vec![#(#resolver_sources),*],
+                __graphql_orm_custom_semantic_sources(),
                 registrations,
             )
         }
@@ -427,6 +429,18 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 .expect("macro-generated GraphQL semantic catalogue must validate")
         }
 
+        fn __graphql_orm_custom_semantic_sources(
+        ) -> &'static [::graphql_orm::graphql::orm::GraphqlSemanticEntitySource] {
+            static SOURCES: ::std::sync::OnceLock<
+                ::std::vec::Vec<::graphql_orm::graphql::orm::GraphqlSemanticEntitySource>,
+            > = ::std::sync::OnceLock::new();
+            SOURCES.get_or_init(|| {
+                ::std::iter::IntoIterator::into_iter([#(#semantic_type_items),*])
+                    #(.chain(#described_result_type_items))*
+                    .collect()
+            })
+        }
+
         /// The semantic catalogue, or the error its composition returned.
         /// Composed once; `graphql_orm_semantic_catalog` and the resolver
         /// catalogue share the result.
@@ -445,8 +459,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
                 ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom_sources(
                     [#(#semantic_entity_items),*],
-                    ::std::iter::IntoIterator::into_iter([#(#semantic_type_items),*])
-                        #(.chain(#described_result_type_items))*,
+                    __graphql_orm_custom_semantic_sources().iter().copied(),
                     operation_catalog,
                     ::std::iter::empty()
                         #(.chain(#semantic_custom_operation_items))*,

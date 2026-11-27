@@ -17,8 +17,8 @@ use async_graphql::registry::{MetaType, Registry};
 
 use super::{
     Entity, GraphqlGeneratedResolverSource, GraphqlHandwrittenResolverRegistration,
-    GraphqlResolverCatalog, GraphqlSemanticCatalog, GraphqlSemanticError, GraphqlServedField,
-    GraphqlServedObjects,
+    GraphqlResolverCatalog, GraphqlSemanticCatalog, GraphqlSemanticEntitySource,
+    GraphqlSemanticError, GraphqlServedField, GraphqlServedObjects,
 };
 
 /// Compile-time resolver facts of one entity, emitted by `GraphQLOperations`.
@@ -80,7 +80,7 @@ pub fn compose_resolver_catalog<Q: OutputType>(
     catalog: &GraphqlSemanticCatalog,
     sources: Vec<ResolverEntitySource>,
 ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
-    compose_resolver_catalog_with_registrations::<Q>(catalog, sources, [])
+    compose_resolver_catalog_with_registrations::<Q>(catalog, sources, &[], [])
 }
 
 /// Composes the resolver catalogue for `Q` with handwritten field registrations.
@@ -93,6 +93,7 @@ pub fn compose_resolver_catalog<Q: OutputType>(
 pub fn compose_resolver_catalog_with_registrations<Q: OutputType>(
     catalog: &GraphqlSemanticCatalog,
     sources: Vec<ResolverEntitySource>,
+    custom_sources: &[GraphqlSemanticEntitySource],
     registrations: impl IntoIterator<Item = GraphqlHandwrittenResolverRegistration>,
 ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
     let mut registry = Registry::default();
@@ -111,28 +112,55 @@ pub fn compose_resolver_catalog_with_registrations<Q: OutputType>(
             );
         }
     }
+    let matching_objects = |rust_type| {
+        registry
+            .types
+            .iter()
+            .filter_map(move |(type_name, registered)| match registered {
+                MetaType::Object {
+                    rust_typename: Some(registered_rust_type),
+                    keys,
+                    resolvable,
+                    ..
+                } if *registered_rust_type == rust_type => Some((
+                    type_name,
+                    keys.as_deref().filter(|_| *resolvable).unwrap_or_default(),
+                )),
+                _ => None,
+            })
+    };
+    let mut registrations = registrations.into_iter().peekable();
+    if registrations.peek().is_some() {
+        let entity_types = sources
+            .iter()
+            .filter_map(|source| Some((source.semantic_name.as_deref()?, source.rust_type)));
+        let custom_types = custom_sources.iter().filter_map(|source| {
+            Some((
+                source.metadata().entity_name.as_str(),
+                source.rust_type_name()?,
+            ))
+        });
+        served = served.with_registration_type_names(
+            entity_types
+                .chain(custom_types)
+                .filter_map(|(semantic_name, rust_type)| {
+                    let mut objects = matching_objects(rust_type);
+                    let (served_name, _) = objects.next()?;
+                    objects
+                        .next()
+                        .is_none()
+                        .then(|| (semantic_name.to_owned(), served_name.clone()))
+                })
+                .collect(),
+        );
+    }
     let sources = sources.into_iter().filter_map(|source| {
         let entity_name = source.semantic_name?;
         // The object the schema registers for this Rust type gives the
         // served type name and the keys the schema resolves for it, as it
         // spells them in `@key(fields: "...")`. A type the subgraph marks
         // unresolvable resolves none of its keys.
-        let registered =
-            registry
-                .types
-                .iter()
-                .find_map(|(type_name, registered)| match registered {
-                    MetaType::Object {
-                        rust_typename: Some(rust_type),
-                        keys,
-                        resolvable,
-                        ..
-                    } if *rust_type == source.rust_type => Some((
-                        type_name.clone(),
-                        keys.as_deref().filter(|_| *resolvable).unwrap_or_default(),
-                    )),
-                    _ => None,
-                });
+        let registered = matching_objects(source.rust_type).next();
         // An entity the schema does not register is kept as such, so that
         // nothing of it is matched to another type with its name.
         let Some((type_name, resolvable)) = registered else {

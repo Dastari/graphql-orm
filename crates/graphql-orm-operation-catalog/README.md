@@ -371,18 +371,31 @@ let children = GraphqlHandwrittenResolverRegistration::new(
     "Child",
     GraphqlResolverAuthorization::SubgraphOnly,
 )
-.with_argument("first", "Int");
+.with_argument("where", "ChildWhereInput")
+.with_argument("orderBy", "ChildOrderByInput")
+.with_argument("page", "PageInput");
 
 let resolvers = my_service::graphql_orm_resolver_catalog_with_registrations([children])?;
 std::fs::write("resolver-catalog.json", resolvers.export_json()?)?;
 ```
 
 The declared target and argument types must match the semantic relationship.
-The producer checks the served field's argument types and its return shape
-against the served target type. A to-one field returns that object, and a
-to-many field returns a list or a connection with an unambiguous `edges`
-list and `node` of that type. A repeated declaration or a conflict with a
-mounted generated resolver fails composition.
+Use the argument names as the schema serves them under its naming rules.
+The served return type must match the semantic field's object or list shape
+and nullability, using the served name of the target. A to-many field can
+also return a connection with the list's nullability, a non-null `edges`
+list of non-null edge objects, and a `node` field matching the list item's
+type and nullability. The `edges` and `node` fields must be unambiguous and
+take no arguments. A repeated declaration or a conflict with a mounted
+generated resolver fails composition.
+
+The generated helper requires a Rust type witness for both the owner and the
+target in the query root's GraphQL registry. Entities, explicit
+`semantic_types`, and typed results from described custom operations supply
+declarations. A declaration without typed provenance or whose type is absent
+from the registry cannot support a registration. With standalone
+`compose_with_registrations`, the host supplies the served objects and any
+renamed type mappings.
 
 Use `SubgraphOnly` for resolver-specific requirements, including any
 declared field policy. To declare `SameAsRoot`, choose the generated traversal

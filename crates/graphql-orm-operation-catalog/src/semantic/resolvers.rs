@@ -34,9 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     GraphqlEntitySemanticMetadata, GraphqlSemanticCatalog, GraphqlSemanticError,
-    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality,
-    GraphqlSemanticRelationshipDescriptor, GraphqlSemanticTypeRef, MAXIMUM_ENTITIES,
-    MAXIMUM_FIELDS_PER_ENTITY, hex_sha256, valid_fingerprint, valid_graphql_name,
+    GraphqlSemanticFieldMetadata, GraphqlSemanticOperationSource,
+    GraphqlSemanticRelationshipCardinality, GraphqlSemanticRelationshipDescriptor,
+    GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, MAXIMUM_ENTITIES, MAXIMUM_FIELDS_PER_ENTITY,
+    hex_sha256, valid_fingerprint, valid_graphql_name,
 };
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationKind, rfc8785_canonical_json};
 
@@ -514,6 +515,7 @@ impl GraphqlServedField {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphqlServedObjects {
     objects: BTreeMap<String, BTreeMap<String, GraphqlServedField>>,
+    registration_type_names: Option<BTreeMap<String, String>>,
 }
 
 impl GraphqlServedObjects {
@@ -534,6 +536,15 @@ impl GraphqlServedObjects {
             field.duplicated = object.contains_key(&field.name);
             object.insert(field.name.clone(), field);
         }
+        self
+    }
+
+    /// Requires handwritten registrations to use these witnessed semantic-to-served
+    /// type names. The generated schema helper supplies them from its type registry.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_registration_type_names(mut self, names: BTreeMap<String, String>) -> Self {
+        self.registration_type_names = Some(names);
         self
     }
 
@@ -583,27 +594,52 @@ impl GraphqlServedObjects {
     fn serves_handwritten_relationship(
         &self,
         type_name: &str,
-        field_name: &str,
         target: &str,
+        semantic_field: &GraphqlSemanticFieldMetadata,
         relationship: &GraphqlSemanticRelationshipDescriptor,
     ) -> bool {
         let Some(field) = self
-            .field(type_name, field_name)
+            .field(type_name, &semantic_field.field_name)
             .filter(|field| !field.duplicated)
         else {
             return false;
         };
-        let result = without_non_null(&field.graphql_type);
-        let returns_target = match relationship.cardinality {
-            GraphqlSemanticRelationshipCardinality::One => result == target,
-            GraphqlSemanticRelationshipCardinality::Many => {
-                list_item(result) == Some(target) || self.connection_node(result) == Some(target)
+        let object_type = |type_ref: &GraphqlSemanticTypeRef| match type_ref {
+            GraphqlSemanticTypeRef::Named {
+                name,
+                kind: GraphqlSemanticTypeKind::Object,
+                nullable,
+            } if *name == relationship.target => {
+                Some(format!("{target}{}", if *nullable { "" } else { "!" }))
             }
+            _ => None,
+        };
+        let returns_target = match (relationship.cardinality, &semantic_field.type_ref) {
+            (GraphqlSemanticRelationshipCardinality::One, declared) => {
+                object_type(declared).is_some_and(|expected| field.graphql_type == expected)
+            }
+            (
+                GraphqlSemanticRelationshipCardinality::Many,
+                GraphqlSemanticTypeRef::List { item, nullable, .. },
+            ) => object_type(item).is_some_and(|expected_item| {
+                let list_suffix = if *nullable { "" } else { "!" };
+                field.graphql_type == format!("[{expected_item}]{list_suffix}")
+                    || self.connection_node(&field.graphql_type, *nullable)
+                        == Some(expected_item.as_str())
+            }),
+            _ => false,
         };
         returns_target && arguments_match(&field.arguments, relationship)
     }
 
-    fn connection_node(&self, connection: &str) -> Option<&str> {
+    fn connection_node(&self, connection_type: &str, nullable_list: bool) -> Option<&str> {
+        // The connection occupies the list's nullable position, and node the
+        // item's. Intermediate edges and edge objects cannot introduce nulls.
+        let connection = if nullable_list {
+            connection_type
+        } else {
+            connection_type.strip_suffix('!')?
+        };
         // Naming rules may change the case of either member. A second
         // case-insensitive match makes the connection shape ambiguous.
         let member = |object: &str, name: &str| {
@@ -617,21 +653,15 @@ impl GraphqlServedObjects {
                 .filter(|field| field.name.eq_ignore_ascii_case(name));
             let field = matching.next()?;
             (!field.duplicated && field.arguments.is_empty() && matching.next().is_none())
-                .then_some(without_non_null(&field.graphql_type))
+                .then_some(field.graphql_type.as_str())
         };
-        let edge = list_item(member(connection, "edges")?)?;
+        let edge = member(connection, "edges")?
+            .strip_suffix('!')?
+            .strip_prefix('[')?
+            .strip_suffix(']')?
+            .strip_suffix('!')?;
         member(edge, "node")
     }
-}
-
-fn without_non_null(graphql_type: &str) -> &str {
-    graphql_type.strip_suffix('!').unwrap_or(graphql_type)
-}
-
-fn list_item(graphql_type: &str) -> Option<&str> {
-    Some(without_non_null(
-        graphql_type.strip_prefix('[')?.strip_suffix(']')?,
-    ))
 }
 
 fn arguments_match(
@@ -697,11 +727,13 @@ impl GraphqlResolverCatalog {
     /// Composes a v1 catalogue with explicit registrations for handwritten fields.
     ///
     /// Every registration must match a declared semantic relationship and
-    /// a served field, including the target, cardinality and argument types.
-    /// A to-one field returns the target object. A to-many field returns a
-    /// list of targets or a connection with an unambiguous `edges` list and
-    /// `node` of the target type. Other served fields are left out unless
-    /// witnessed by a generated source.
+    /// a served field, including the target, cardinality, exact result
+    /// nullability and argument types. A to-one field returns the target
+    /// object. A to-many field returns a list of targets or a connection
+    /// whose nullability matches the list's. The connection must have an
+    /// unambiguous non-null `edges` list of non-null edges, with a `node`
+    /// field whose type matches the declared list item. Other served fields
+    /// are left out unless witnessed by a generated source.
     ///
     /// A root reference must match the target's generated traversal root
     /// for this cardinality. A host that supplies its own generated source
@@ -763,25 +795,31 @@ impl GraphqlResolverCatalog {
                 })
         };
 
-        // The served name of a semantic entity, and the semantic name to
-        // carry beside it when the two differ.
+        // The served name of a semantic entity for generated resolvers and
+        // standalone composition.
         let served_name = |entity_name: &str| {
-            let type_name = source(entity_name)
+            source(entity_name)
                 .and_then(|source| source.type_name.clone())
-                .unwrap_or_else(|| entity_name.to_owned());
-            let semantic = (type_name != entity_name).then(|| entity_name.to_owned());
-            (type_name, semantic)
+                .unwrap_or_else(|| entity_name.to_owned())
         };
 
+        let registration_type_name = |entity_name: &str| {
+            if let Some(names) = &served.registration_type_names {
+                names.get(entity_name).cloned()
+            } else if source(entity_name).is_some_and(|source| source.unregistered) {
+                None
+            } else {
+                Some(served_name(entity_name))
+            }
+        };
         // A registration cannot use a served name shared by two semantic
         // entities, even if the other entity has no resolver entry.
         let mut served_entities = BTreeMap::new();
         if !registrations_by_field.is_empty() {
             for entity in &catalog.entities {
-                if source(&entity.entity_name).is_some_and(|source| source.unregistered) {
+                let Some(type_name) = registration_type_name(&entity.entity_name) else {
                     continue;
-                }
-                let (type_name, _) = served_name(&entity.entity_name);
+                };
                 if served.has_object(&type_name) {
                     served_entities
                         .entry(type_name)
@@ -797,12 +835,11 @@ impl GraphqlResolverCatalog {
             if owner.is_some_and(|owner| owner.unregistered) {
                 continue;
             }
-            let (type_name, semantic_entity_name) = served_name(&entity.entity_name);
+            let type_name = served_name(&entity.entity_name);
             for field in &entity.fields {
                 let Some(relationship) = &field.relationship else {
                     continue;
                 };
-                let (target, semantic_target) = served_name(&relationship.target);
                 let registration = if registrations_by_field.is_empty() {
                     None
                 } else {
@@ -813,7 +850,7 @@ impl GraphqlResolverCatalog {
                     owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name));
                 let target_unregistered =
                     source(&relationship.target).is_some_and(|target| target.unregistered);
-                if let Some(registration) = &registration {
+                let (relation_type_name, target) = if let Some(registration) = &registration {
                     if generated {
                         return Err(GraphqlSemanticError::new(
                             "handwritten resolver registration conflicts with a mounted generated resolver",
@@ -826,31 +863,43 @@ impl GraphqlResolverCatalog {
                             "handwritten resolver registration does not match the semantic relationship",
                         ));
                     }
-                    if served_entities.get(&type_name) != Some(&Some(entity.entity_name.as_str()))
+                    let served_mismatch = || {
+                        GraphqlSemanticError::new(
+                            "handwritten resolver registration does not match an unambiguous served relationship",
+                        )
+                    };
+                    let owner_name =
+                        registration_type_name(&entity.entity_name).ok_or_else(served_mismatch)?;
+                    let target =
+                        registration_type_name(&relationship.target).ok_or_else(served_mismatch)?;
+                    if served_entities.get(&owner_name) != Some(&Some(entity.entity_name.as_str()))
                         || served_entities.get(&target) != Some(&Some(relationship.target.as_str()))
                         || !served.serves_handwritten_relationship(
+                            &owner_name,
+                            &target,
+                            field,
+                            relationship,
+                        )
+                    {
+                        return Err(served_mismatch());
+                    }
+                    (owner_name, target)
+                } else {
+                    let target = served_name(&relationship.target);
+                    if !generated
+                        || target_unregistered
+                        || !served.has_object(&target)
+                        || !served.serves_relationship(
                             &type_name,
                             &field.field_name,
                             &target,
                             relationship,
                         )
                     {
-                        return Err(GraphqlSemanticError::new(
-                            "handwritten resolver registration does not match an unambiguous served relationship",
-                        ));
+                        continue;
                     }
-                } else if !generated
-                    || target_unregistered
-                    || !served.has_object(&target)
-                    || !served.serves_relationship(
-                        &type_name,
-                        &field.field_name,
-                        &target,
-                        relationship,
-                    )
-                {
-                    continue;
-                }
+                    (type_name.clone(), target)
+                };
                 let target_source =
                     source(&relationship.target).filter(|_| !field.has_field_policy);
                 let authorization = match target_source {
@@ -881,11 +930,13 @@ impl GraphqlResolverCatalog {
                     authorization
                 };
                 relations.push(GraphqlRelationResolverDescriptor {
-                    type_name: type_name.clone(),
-                    semantic_entity_name: semantic_entity_name.clone(),
+                    semantic_entity_name: (relation_type_name != entity.entity_name)
+                        .then(|| entity.entity_name.clone()),
+                    type_name: relation_type_name,
                     field_name: field.field_name.clone(),
+                    semantic_target: (target != relationship.target)
+                        .then(|| relationship.target.clone()),
                     target,
-                    semantic_target,
                     cardinality: relationship.cardinality,
                     arguments: relationship
                         .arguments
@@ -900,8 +951,9 @@ impl GraphqlResolverCatalog {
                 .filter(|owner| !owner.federation_keys.is_empty() && served.has_object(&type_name))
             {
                 entities.push(GraphqlEntityResolverDescriptor {
+                    semantic_entity_name: (type_name != entity.entity_name)
+                        .then(|| entity.entity_name.clone()),
                     type_name,
-                    semantic_entity_name,
                     keys: owner
                         .federation_keys
                         .iter()
@@ -1709,6 +1761,8 @@ mod tests {
         assert_eq!(relation.arguments, ["Page"]);
         assert!(compose(&served, registration().with_argument("Page", "Int")).is_err());
         for invalid in [
+            GraphqlServedField::new("Children", "[PublicChild!]").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "[PublicChild]!").with_argument("Page", "Int"),
             GraphqlServedField::new("Children", "PublicChild").with_argument("Page", "Int"),
             GraphqlServedField::new("Children", "[[PublicChild]]").with_argument("Page", "Int"),
             GraphqlServedField::new("Children", "[Child]").with_argument("Page", "Int"),
@@ -1724,7 +1778,7 @@ mod tests {
             [GraphqlGeneratedResolverSource::new("Child").with_type_name("Summary")];
         let ambiguous_schema = base().with_object(
             "Parent",
-            [GraphqlServedField::new("Children", "[Summary]").with_argument("Page", "Int")],
+            [GraphqlServedField::new("Children", "[Summary!]!").with_argument("Page", "Int")],
         );
         assert!(
             GraphqlResolverCatalog::compose_with_registrations(
@@ -1736,20 +1790,28 @@ mod tests {
             .is_err()
         );
 
-        let connection = base()
-            .with_object(
-                "Parent",
-                [GraphqlServedField::new("Children", "ChildConnection!")
-                    .with_argument("Page", "Int")],
-            )
-            .with_object(
-                "ChildConnection",
-                [GraphqlServedField::new("Edges", "[ChildEdge!]!")],
-            )
-            .with_object(
-                "ChildEdge",
-                [GraphqlServedField::new("Node", "PublicChild!")],
+        let connection = |result, edges, node| {
+            base()
+                .with_object(
+                    "Parent",
+                    [GraphqlServedField::new("Children", result).with_argument("Page", "Int")],
+                )
+                .with_object("ChildConnection", [GraphqlServedField::new("Edges", edges)])
+                .with_object("ChildEdge", [GraphqlServedField::new("Node", node)])
+        };
+        for (result, edges, node) in [
+            ("ChildConnection", "[ChildEdge!]!", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge!]", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge]!", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge!]!", "PublicChild"),
+            ("ChildConnection!", "[ChildEdge!]!", "[PublicChild!]!"),
+        ] {
+            assert!(
+                compose(&connection(result, edges, node), registration()).is_err(),
+                "{result}, {edges}, {node}"
             );
+        }
+        let connection = connection("ChildConnection!", "[ChildEdge!]!", "PublicChild!");
         assert!(compose(&connection, registration()).is_ok());
         let ambiguous_connection = connection.with_object(
             "ChildEdge",
@@ -1770,6 +1832,71 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn handwritten_registrations_match_declared_nullability() {
+        for nullable in [true, false] {
+            let mut one = to_one("Child", "Child");
+            one.type_ref = object("Child", nullable);
+            let mut many = to_many("Children", "Child");
+            many.type_ref =
+                GraphqlSemanticTypeRef::list(nullable, Some(100), object("Child", nullable));
+            let semantic = GraphqlSemanticCatalog::compose_descriptors(
+                [entity("Parent", vec![one, many]), entity("Child", vec![])],
+                [],
+            )
+            .unwrap();
+            let compose = |one, many, node| {
+                let served = GraphqlServedObjects::new()
+                    .with_object("Child", [])
+                    .with_object(
+                        "Parent",
+                        [
+                            GraphqlServedField::new("Child", one),
+                            GraphqlServedField::new("Children", many).with_argument("Page", "Int"),
+                        ],
+                    )
+                    .with_object(
+                        "ChildConnection",
+                        [GraphqlServedField::new("edges", "[ChildEdge!]!")],
+                    )
+                    .with_object("ChildEdge", [GraphqlServedField::new("node", node)]);
+                let register = |field| {
+                    GraphqlHandwrittenResolverRegistration::new(
+                        "Parent",
+                        field,
+                        "Child",
+                        GraphqlResolverAuthorization::SubgraphOnly,
+                    )
+                };
+                GraphqlResolverCatalog::compose_with_registrations(
+                    &semantic,
+                    [],
+                    &served,
+                    [
+                        register("Child"),
+                        register("Children").with_argument("Page", "Int"),
+                    ],
+                )
+            };
+            let (object, list, connection, wrong_object, wrong_list) = if nullable {
+                ("Child", "[Child]", "ChildConnection", "Child!", "[Child!]")
+            } else {
+                (
+                    "Child!",
+                    "[Child!]!",
+                    "ChildConnection!",
+                    "Child",
+                    "[Child]!",
+                )
+            };
+            assert!(compose(object, list, object).is_ok());
+            assert!(compose(object, connection, object).is_ok());
+            assert!(compose(wrong_object, list, object).is_err());
+            assert!(compose(object, wrong_list, object).is_err());
+            assert!(compose(object, connection, wrong_object).is_err());
+        }
     }
 
     #[test]

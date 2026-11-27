@@ -220,9 +220,10 @@ back by the server.
 
 Use `graphql_orm_resolver_catalog_with_registrations` to include individual
 handwritten fields that implement declared semantic relationships. The helper
-checks their target and arguments against the served schema and validates the
-authorization reference. The v1 format covers relationship fields and generated
-Federation lookups. See the
+checks their target, return shape and argument types against the served schema
+and validates the authorization reference. The query root's registry must
+contain the Rust types declared for both the owner and the target. The v1
+format covers relationship fields and generated Federation lookups. See the
 [registration contract](../../../crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
 
 The catalogue reflects ORM-generated mounting and explicit host declarations.
