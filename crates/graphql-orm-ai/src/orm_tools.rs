@@ -1847,14 +1847,24 @@ impl OrmAiApplicationToolCallService {
                         )
                         .await?
                 } else {
-                    broker
-                        .dispatch_discover(lease.principal_reference(), &run, session, arguments)
-                        .await?
+                    Box::pin(broker.dispatch_discover_with_catalog(
+                        lease.principal_reference(),
+                        &run,
+                        session,
+                        arguments,
+                        self.runtime.tool_catalog(),
+                        self.limits.maximum_model_output_bytes,
+                    ))
+                    .await?
                 };
                 // Client-deferred discovery keeps its version 2 contract.
                 let fingerprint =
                     if delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred {
                         client_deferred_discovery_disclosure_fingerprint()
+                    } else if output["candidates"][0]["inlineDescription"].is_object() {
+                        hex::encode(Sha256::digest(
+                            b"graphql-orm-ai/capability-broker-discover-inline/v1",
+                        ))
                     } else {
                         broker_disclosure_fingerprint(operation)
                     };

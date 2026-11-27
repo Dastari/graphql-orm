@@ -1,8 +1,9 @@
 //! Deterministic question-to-execution driver for the context benchmark.
 
 use super::{
-    CachedSet, LARGE_INDEX_LIMITS, LARGE_SET_LIMITS, broker, compile_target, compile_target_sdl,
-    elapsed_micros, principal, production_describe, run_binding, split_template, template,
+    CachedSet, LARGE_INDEX_LIMITS, LARGE_SET_LIMITS, broker, bytes, compile_target,
+    compile_target_sdl, elapsed_micros, principal, production_describe, production_type_page,
+    run_binding, split_template, template,
 };
 use async_graphql::{Request, Variables};
 use graphql_orm::prelude::{AuthSubject, Database};
@@ -292,11 +293,20 @@ struct ExecutionResult {
     result: Value,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscoveryMode {
+    Default,
+    Scoped,
+    Inline,
+}
+
 struct Trial<'a> {
     fixture: &'a Fixture,
     broker: &'a AiCapabilityDiscoveryBroker,
     run: AiCapabilityRunBinding,
     session: AiCapabilityBrokerSession,
+    mode: DiscoveryMode,
     calls: Vec<Value>,
     unscoped_discover_micros: Vec<u64>,
     first_execute: Option<usize>,
@@ -304,12 +314,21 @@ struct Trial<'a> {
 }
 
 impl<'a> Trial<'a> {
-    fn new(fixture: &'a Fixture, broker: &'a AiCapabilityDiscoveryBroker) -> BenchResult<Self> {
+    fn new(
+        fixture: &'a Fixture,
+        broker: &'a AiCapabilityDiscoveryBroker,
+        mode: DiscoveryMode,
+    ) -> BenchResult<Self> {
+        let mut session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())?;
+        if mode == DiscoveryMode::Inline {
+            session = session.with_scoped_discovery_descriptions();
+        }
         Ok(Self {
             fixture,
             broker,
             run: run_binding(),
-            session: AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())?,
+            session,
+            mode,
             calls: Vec::new(),
             unscoped_discover_micros: Vec::new(),
             first_execute: None,
@@ -317,9 +336,17 @@ impl<'a> Trial<'a> {
         })
     }
 
-    fn record<T>(&mut self, operation: &str, result: &BenchResult<T>) {
+    fn record<T>(
+        &mut self,
+        operation: &str,
+        result: &BenchResult<T>,
+        started: Instant,
+        response_bytes: u64,
+    ) {
         self.calls.push(json!({
             "operation": operation,
+            "microseconds": elapsed_micros(started),
+            "metadataBytes": response_bytes,
             "error": result.as_ref().err().map(ToString::to_string),
         }));
     }
@@ -328,11 +355,13 @@ impl<'a> Trial<'a> {
         let started = Instant::now();
         let result = self
             .broker
-            .dispatch_discover(
+            .dispatch_discover_with_catalog(
                 &principal().reference(),
                 &self.run,
                 &self.session,
                 &arguments,
+                &self.fixture.catalog,
+                64 * 1024,
             )
             .await
             .map_err(Into::into);
@@ -342,6 +371,9 @@ impl<'a> Trial<'a> {
         self.calls.push(json!({
             "operation": "discover",
             "namespace": arguments["namespace"],
+            "microseconds": elapsed_micros(started),
+            "metadataBytes": result.as_ref().map_or(0, bytes),
+            "inlineDescription": result.as_ref().is_ok_and(|v| v["candidates"][0]["inlineDescription"].is_object()),
             "candidates": result.as_ref().ok().and_then(|result| result["candidates"].as_array()).map(Vec::len),
             "error": result.as_ref().err().map(ToString::to_string),
         }));
@@ -349,6 +381,7 @@ impl<'a> Trial<'a> {
     }
 
     async fn describe(&mut self, candidate: &Value) -> BenchResult<Value> {
+        let started = Instant::now();
         let result = self
             .broker
             .dispatch_describe(
@@ -369,11 +402,39 @@ impl<'a> Trial<'a> {
                 )
             })
             .map_err(Into::into);
-        self.record("describe", &result);
+        self.record(
+            "describe",
+            &result,
+            started,
+            result.as_ref().map_or(0, bytes),
+        );
+        result
+    }
+
+    async fn describe_type(
+        &mut self,
+        description: &Value,
+        operation: &Value,
+        name: &str,
+    ) -> BenchResult<Value> {
+        let started = Instant::now();
+        let result = self.broker.dispatch_describe_type(
+            &principal().reference(), &self.run, &self.session,
+            &json!({"loadedReference": description["loadedReference"], "operation": operation["operation"], "type": name}),
+        ).await.and_then(|request| {
+            production_type_page(&self.fixture.catalog, &request, AiCapabilityDeliveryLimits::default())
+        }).map_err(Into::into);
+        self.record(
+            "describe_type",
+            &result,
+            started,
+            result.as_ref().map_or(0, bytes),
+        );
         result
     }
 
     async fn execute(&mut self, arguments: &Value) -> BenchResult<ExecutionResult> {
+        let started = Instant::now();
         let result = match self
             .broker
             .authorize_broker_execution(
@@ -387,7 +448,7 @@ impl<'a> Trial<'a> {
             Ok(execution) => self.fixture.execute(execution).await,
             Err(error) => Err(error.into()),
         };
-        self.record("execute", &result);
+        self.record("execute", &result, started, 0);
         if result.is_ok() && self.first_execute.is_none() {
             self.first_execute = Some(self.calls.len());
         }
@@ -399,11 +460,14 @@ impl<'a> Trial<'a> {
         intent: Intent<'_>,
         stale_control: bool,
     ) -> BenchResult<ExecutionResult> {
-        let result = self
-            .discover(json!({
-                "text": intent.text, "maximumResults": MAXIMUM_RESULTS,
-            }))
-            .await;
+        let scoped = self.mode != DiscoveryMode::Default && intent.shape != "aggregate";
+        let mut query = json!({"text": intent.text, "maximumResults": MAXIMUM_RESULTS});
+        if scoped {
+            query["namespace"] = json!(intent.namespace);
+            query["entityOrClass"] = json!(intent.entity);
+            query["kind"] = json!("generated_entity");
+        }
+        let result = self.discover(query).await;
         let candidate = if let Some(candidate) =
             result.as_ref().ok().and_then(|value| intent.select(value))
         {
@@ -417,29 +481,47 @@ impl<'a> Trial<'a> {
                 .cloned()
                 .ok_or("requested entity missing from scoped discovery")?
         };
+        let inline = &candidate["inlineDescription"];
+        if scoped
+            && let Ok(operation) = select_operation(&intent, inline)
+            && let Some(recipe) = operation["idRead"].as_object()
+            && inline["loadedReference"].is_string()
+        {
+            let mut args = Value::Object(recipe.clone());
+            args["loadedReference"] = inline["loadedReference"].clone();
+            args["operation"] = operation["operation"].clone();
+            self.record_selection(&candidate, operation);
+            if let Ok(result) = self.execute(&args).await {
+                return Ok(result);
+            }
+        }
+
         let description = self.describe(&candidate).await?;
-        let operation = description["operations"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|operation| operation["shape"] == intent.shape)
-            .ok_or("requested shape missing from description")?;
-        self.selection = Some(json!({
-            "namespace": candidate["namespace"],
-            "entity": candidate["entity"],
-            "shape": operation["shape"],
-        }));
+        let operation = select_operation(&intent, &description)?;
+        self.record_selection(&candidate, operation);
+        let selections = intent
+            .selections
+            .iter()
+            .map(|requested| {
+                operation["select"]
+                    .as_str()
+                    .into_iter()
+                    .flat_map(|preview| preview.split(", "))
+                    .find(|path| path.eq_ignore_ascii_case(requested))
+                    .ok_or("requested scalar path missing from description")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        operation["maximumItems"]
+            .as_object()
+            .ok_or("no advertised row bound")?;
         let mut args = json!({
             "loadedReference": description["loadedReference"],
             "operation": operation["operation"],
-            "selections": intent.selections,
+            "selections": selections,
             "maximumItems": 1,
         });
         if intent.shape == "aggregate" {
-            // An ungrouped COUNT omits the grouping argument on the broker wire.
-            args["arguments"] = json!([
-                {"name": "metrics.0.operator", "value": "COUNT"},
-            ]);
+            args["arguments"] = self.count_arguments(&description, operation).await?;
         }
         if stale_control {
             let mut stale = args.clone();
@@ -455,6 +537,72 @@ impl<'a> Trial<'a> {
         }
         self.execute(&args).await
     }
+
+    fn record_selection(&mut self, candidate: &Value, operation: &Value) {
+        self.selection = Some(json!({
+            "namespace": candidate["namespace"],
+            "entity": candidate["entity"],
+            "shape": operation["shape"],
+        }));
+    }
+
+    async fn count_arguments(
+        &mut self,
+        description: &Value,
+        operation: &Value,
+    ) -> BenchResult<Value> {
+        let signature = operation["signature"]
+            .as_str()
+            .ok_or("no aggregate signature")?;
+        let (argument, metric_type) = signature
+            .split_once('(')
+            .and_then(|(_, args)| args.split_once(')'))
+            .into_iter()
+            .flat_map(|(args, _)| args.split(", "))
+            .filter_map(|arg| arg.split_once(": ["))
+            .find_map(|(arg, kind)| {
+                let kind = kind.strip_suffix(']')?;
+                (arg == "metrics").then_some((arg, kind))
+            })
+            .ok_or("no metrics array in signature")?;
+        let metric = self
+            .describe_type(description, operation, metric_type)
+            .await?;
+        let operator = metric["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|field| field["name"] == "operator")
+            .ok_or("no metric operator field in expanded type")?;
+        let operator_name = operator["name"].as_str().ok_or("no operator name")?;
+        let operator_type = operator["type"].as_str().ok_or("no operator type")?;
+        let operators = self
+            .describe_type(description, operation, operator_type)
+            .await?;
+        let count = operators["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|value| **value == "COUNT")
+            .ok_or("COUNT not advertised by expanded operator type")?;
+        Ok(json!([{"name": format!("{argument}.0.{operator_name}"), "value": count}]))
+    }
+}
+
+fn select_operation<'a>(intent: &Intent<'_>, description: &'a Value) -> BenchResult<&'a Value> {
+    let mut operations = description["operations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|operation| operation["shape"] == intent.shape)
+        .filter(|operation| intent.shape != "keyset_list" || operation["continuation"] == true);
+    let operation = operations
+        .next()
+        .ok_or("requested operation absent from description")?;
+    if operations.next().is_some() {
+        return Err("requested operation is ambiguous".into());
+    }
+    Ok(operation)
 }
 
 fn nearest_rank(samples: &mut [u64], percent: usize) -> Option<u64> {
@@ -464,7 +612,12 @@ fn nearest_rank(samples: &mut [u64], percent: usize) -> Option<u64> {
         .copied()
 }
 
-pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
+pub(super) async fn measure(entries: usize, flag: &str) -> BenchResult<Value> {
+    let mode = match flag {
+        "--acceptance-inline" => DiscoveryMode::Inline,
+        "--acceptance-scoped" => DiscoveryMode::Scoped,
+        _ => DiscoveryMode::Default,
+    };
     if !matches!(entries, 400 | 40_000) {
         return Err("--acceptance requires 400 or 40000 entries".into());
     }
@@ -487,7 +640,7 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         if intents.len() != question.expected.len() {
             return Err("question and answer lengths disagree".into());
         }
-        let mut trial = Trial::new(&fixture, &host)?;
+        let mut trial = Trial::new(&fixture, &host, mode)?;
         let mut correct_shape = true;
         let mut correct_result = true;
         let mut legs = Vec::new();
@@ -524,7 +677,7 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         }));
     }
 
-    let mut control = Trial::new(&fixture, &host)?;
+    let mut control = Trial::new(&fixture, &host, DiscoveryMode::Default)?;
     control
         .answer(Intent::parse(&questions[0].text)?, true)
         .await?;
@@ -541,7 +694,7 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         Arc::new(CachedSet(Arc::clone(&fixture.indexes))),
         Some(restricted_target),
     )?;
-    let mut restricted = Trial::new(&fixture, &restricted_host)?;
+    let mut restricted = Trial::new(&fixture, &restricted_host, mode)?;
     let permitted = restricted
         .discover(json!({
             "text": "record identity", "maximumResults": MAXIMUM_RESULTS,
@@ -551,6 +704,29 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         .as_array()
         .ok_or("missing candidate list")?;
 
+    let all_calls = cases
+        .iter()
+        .flat_map(|case| case["calls"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    let mut time_to_first = cases
+        .iter()
+        .filter_map(|case| {
+            let count = usize::try_from(case["callsToFirstSuccessfulExecute"].as_u64()?).ok()?;
+            Some(
+                case["calls"]
+                    .as_array()?
+                    .iter()
+                    .take(count)
+                    .filter_map(|call| call["microseconds"].as_u64())
+                    .sum::<u64>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut discovery_times = all_calls
+        .iter()
+        .filter(|call| call["operation"] == "discover")
+        .filter_map(|call| call["microseconds"].as_u64())
+        .collect::<Vec<_>>();
     let p50 = nearest_rank(&mut call_samples, 50);
     let p95 = nearest_rank(&mut call_samples, 95);
     let shape_rate = correct_shapes as f64 / questions.len() as f64;
@@ -558,6 +734,7 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
     Ok(json!({
         "mode": "deterministic", "brokerVersion": AI_CAPABILITY_BROKER_VERSION,
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "discoveryMode": mode,
         "modelRuns": 0, "indexEntries": entries, "targets": fixture.indexes.indexes().len(),
         "startupMicroseconds": startup, "peakResidentKibibytes": super::peak_resident_kibibytes(),
         "questions": questions.len(), "correctShape": correct_shapes, "correctShapeRate": shape_rate,
@@ -565,6 +742,18 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         "firstSuccessfulExecute": {
             "samples": call_samples.len(), "withoutSuccess": questions.len() - call_samples.len(),
             "brokerCallsP50": p50, "brokerCallsP95": p95,
+            "microsecondsP50": nearest_rank(&mut time_to_first, 50),
+            "microsecondsP95": nearest_rank(&mut time_to_first, 95),
+        },
+        "corpusCalls": {
+            "total": all_calls.len(),
+            "failed": all_calls.iter().filter(|call| !call["error"].is_null()).count(),
+            "describe": all_calls.iter().filter(|call| call["operation"] == "describe").count(),
+            "describeType": all_calls.iter().filter(|call| call["operation"] == "describe_type").count(),
+            "inlineDescriptions": all_calls.iter().filter(|call| call["inlineDescription"] == true).count(),
+            "metadataBytes": all_calls.iter().filter_map(|call| call["metadataBytes"].as_u64()).sum::<u64>(),
+            "discoverMetadataBytes": all_calls.iter().filter(|call| call["operation"] == "discover").filter_map(|call| call["metadataBytes"].as_u64()).sum::<u64>(),
+            "discoverP95Microseconds": nearest_rank(&mut discovery_times, 95),
         },
         "unscopedDiscoverP95Microseconds": discover_p95,
         "restrictedCaller": {
@@ -580,4 +769,320 @@ pub(super) async fn measure(entries: usize) -> BenchResult<Value> {
         "staleExecuteControl": {"callsToFirstSuccessfulExecute": control_calls, "calls": control.calls},
         "cases": cases,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Resolver;
+    use super::*;
+    use agql_auth::{ResolvedPrincipal, SystemClock};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use time::Duration;
+
+    fn scoped_query() -> Value {
+        json!({
+            "text": "list IDs for Zqxwide", "namespace": "target0000",
+            "entityOrClass": "Zqxwide", "kind": "generated_entity", "maximumResults": 8,
+        })
+    }
+
+    fn describe_args(candidate: &Value) -> Value {
+        json!({
+            "capabilityId": candidate["capabilityId"],
+            "candidateReference": candidate["candidateReference"],
+        })
+    }
+
+    #[tokio::test]
+    async fn scoped_discovery_can_issue_a_real_description() -> BenchResult<()> {
+        let fixture = Fixture::compile(400).await?;
+        let host = broker(Arc::new(CachedSet(Arc::clone(&fixture.indexes))), None)?;
+        let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default())?;
+        let mut trial = Trial::new(&fixture, &host, DiscoveryMode::Inline)?;
+        let result = trial.discover(scoped_query()).await?;
+        let candidate = &result["candidates"][0];
+        let inline = &candidate["inlineDescription"];
+        assert!(inline["loadedReference"].is_string());
+        assert_ne!(inline["loadedReference"], candidate["candidateReference"]);
+        assert_eq!(inline["operations"].as_array().unwrap().len(), 2);
+        assert!(candidate["operations"].as_array().unwrap().len() > 2);
+        assert!(!result.to_string().contains("Fingerprint"));
+        assert!(bytes(&result) <= 8192);
+        assert_eq!(trial.session.amplification().discover_calls, 1);
+        assert_eq!(trial.session.amplification().describe_calls, 0);
+
+        let reference = principal().reference();
+        let ordinary = host
+            .dispatch_discover_with_catalog(
+                &reference,
+                &trial.run,
+                &session,
+                &scoped_query(),
+                &fixture.catalog,
+                8192,
+            )
+            .await?;
+        let mut inline_candidate = candidate.as_object().unwrap().clone();
+        inline_candidate.remove("inlineDescription");
+        inline_candidate.remove("candidateReference");
+        let mut ordinary_candidate = ordinary["candidates"][0].as_object().unwrap().clone();
+        ordinary_candidate.remove("candidateReference");
+        assert_eq!(ordinary_candidate, inline_candidate);
+
+        for (shape, question) in [
+            ("list", "In target0000, list IDs for Zqxwide (one result)?"),
+            (
+                "keyset_list",
+                "In target0000, page through IDs for Zqxwide (one result)?",
+            ),
+        ] {
+            let operation = select_operation(&Intent::parse(question)?, inline)?;
+            assert_eq!(operation["shape"], shape);
+            assert_eq!(
+                operation["idRead"],
+                json!({"selections": ["id"], "maximumItems": 1})
+            );
+            assert_eq!(operation["continuation"] == true, shape == "keyset_list");
+            let mut execute = operation["idRead"].clone();
+            execute["operation"] = operation["operation"].clone();
+            execute["loadedReference"] = inline["loadedReference"].clone();
+            assert!(trial.execute(&execute).await.is_ok());
+
+            let mut substituted = execute.clone();
+            substituted["loadedReference"] = candidate["candidateReference"].clone();
+            assert!(matches!(
+                host.authorize_broker_execution(&reference, &trial.run, &trial.session, &substituted).await,
+                Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
+            ));
+            assert!(matches!(
+                host.authorize_broker_execution(
+                    &reference,
+                    &run_binding(),
+                    &trial.session,
+                    &execute
+                )
+                .await,
+                Err(AiError::Forbidden)
+            ));
+            execute.as_object_mut().unwrap().remove("loadedReference");
+            execute["candidateReference"] = candidate["candidateReference"].clone();
+            assert!(
+                host.authorize_broker_execution(&reference, &trial.run, &trial.session, &execute)
+                    .await
+                    .is_err()
+            );
+        }
+        let aggregate = candidate["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["shape"] == "aggregate")
+            .unwrap();
+        let omitted = json!({
+            "loadedReference": inline["loadedReference"], "operation": aggregate["operation"],
+        });
+        assert!(matches!(
+            host.authorize_broker_execution(&reference, &trial.run, &trial.session, &omitted).await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_OPERATION_INVALID
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_discovery_falls_back_at_every_budget_or_scope_boundary() -> BenchResult<()> {
+        let fixture = Fixture::compile(400).await?;
+        let host = broker(Arc::new(CachedSet(Arc::clone(&fixture.indexes))), None)?;
+        let reference = principal().reference();
+        let run = run_binding();
+        for (query, describe_bytes, output_bytes) in [
+            (scoped_query(), 1024, 8192),
+            (scoped_query(), 512 * 1024, 1024),
+            (
+                json!({"text": "list IDs for Zqxwide", "namespace": "target0000", "kind": "generated_entity", "maximumResults": 8}),
+                512 * 1024,
+                8192,
+            ),
+            (
+                json!({"text": "list IDs for Zqxwide", "namespace": "target0000", "entityOrClass": "Zqxwide", "kind": "generated_entity", "maximumResults": 1}),
+                512 * 1024,
+                8192,
+            ),
+        ] {
+            let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits {
+                maximum_describe_bytes: describe_bytes,
+                ..AiCapabilityDeliveryLimits::default()
+            })?
+            .with_scoped_discovery_descriptions();
+            let result = host
+                .dispatch_discover_with_catalog(
+                    &reference,
+                    &run,
+                    &session,
+                    &query,
+                    &fixture.catalog,
+                    output_bytes,
+                )
+                .await?;
+            let candidate = &result["candidates"][0];
+            assert!(candidate["candidateReference"].is_string());
+            assert!(candidate.get("inlineDescription").is_none());
+            assert_eq!(session.amplification().describe_calls, 0);
+            let fallback = host
+                .dispatch_describe(&reference, &run, &session, &describe_args(candidate))
+                .await?;
+            assert_ne!(fallback.loaded_reference(), candidate["candidateReference"]);
+        }
+        let session = AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits {
+            maximum_loaded_bindings: 1,
+            maximum_deferred_definitions: 1,
+            ..AiCapabilityDeliveryLimits::default()
+        })?
+        .with_scoped_discovery_descriptions();
+        let attached = host
+            .dispatch_discover_with_catalog(
+                &reference,
+                &run,
+                &session,
+                &scoped_query(),
+                &fixture.catalog,
+                8192,
+            )
+            .await?;
+        let inline = &attached["candidates"][0]["inlineDescription"];
+        let operation = select_operation(
+            &Intent::parse("In target0000, list IDs for Zqxwide (one result)?")?,
+            inline,
+        )?;
+        let mut execute = operation["idRead"].clone();
+        execute["operation"] = operation["operation"].clone();
+        execute["loadedReference"] = inline["loadedReference"].clone();
+        for (catalog, maximum_bytes) in [(&fixture.catalog, 1024), (&AiToolCatalog::new(), 8192)] {
+            let fallback = host
+                .dispatch_discover_with_catalog(
+                    &reference,
+                    &run,
+                    &session,
+                    &scoped_query(),
+                    catalog,
+                    maximum_bytes,
+                )
+                .await?;
+            assert!(fallback["candidates"][0].get("inlineDescription").is_none());
+            // A dropped description never evicts an existing held binding.
+            host.authorize_broker_execution(&reference, &run, &session, &execute)
+                .await?;
+        }
+        Ok(())
+    }
+
+    struct ScopedReads(AtomicU8);
+
+    #[async_trait::async_trait]
+    impl AiCapabilityAuthorityPolicy for ScopedReads {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            index: &AiCapabilityIndex,
+            entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            let state = self.0.load(Ordering::Relaxed);
+            let shape_allowed = match entry.operation_shape {
+                AiCapabilityOperationShape::Entity | AiCapabilityOperationShape::List => true,
+                AiCapabilityOperationShape::KeysetList => state == 0,
+                _ => false,
+            };
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: index.target_id().as_str() == "target-0000" && state < 2 && shape_allowed,
+                policy_fingerprint: "scoped-reads-v1".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_references_follow_current_policy_and_hide_denied_operations() -> BenchResult<()>
+    {
+        let fixture = Fixture::compile(400).await?;
+        let policy = Arc::new(ScopedReads(AtomicU8::new(0)));
+        let host = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal())),
+            Arc::new(CachedSet(Arc::clone(&fixture.indexes))),
+            policy.clone(),
+            Arc::new(SystemClock),
+            Duration::minutes(5),
+        )?;
+        let mut trial = Trial::new(&fixture, &host, DiscoveryMode::Inline)?;
+        let mut denied_target = scoped_query();
+        denied_target["namespace"] = json!("target0001");
+        assert_eq!(
+            trial.discover(denied_target).await?["candidates"],
+            json!([])
+        );
+
+        let result = trial.discover(scoped_query()).await?;
+        let candidate = &result["candidates"][0];
+        let inline = &candidate["inlineDescription"];
+        let metadata = candidate["operations"].as_array().unwrap();
+        assert_eq!(
+            metadata
+                .iter()
+                .filter(|root| root["shape"] == "keyset_list")
+                .count(),
+            2
+        );
+        assert_eq!(inline["operations"].as_array().unwrap().len(), 2);
+        assert!(
+            metadata
+                .iter()
+                .all(|root| root["shape"] == "list" || root["shape"] == "keyset_list")
+        );
+        let operation = select_operation(
+            &Intent::parse("In target0000, list IDs for Zqxwide (one result)?")?,
+            inline,
+        )?;
+        let mut execute = operation["idRead"].clone();
+        execute["operation"] = operation["operation"].clone();
+        execute["loadedReference"] = inline["loadedReference"].clone();
+        let reference = principal().reference();
+
+        let mut hidden = execute.clone();
+        hidden["operation"] = json!("zqxwidesAggregate");
+        assert!(matches!(
+            host.authorize_broker_execution(&reference, &trial.run, &trial.session, &hidden).await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_OPERATION_INVALID
+        ));
+        let pager = select_operation(
+            &Intent::parse("In target0000, page through IDs for Zqxwide (one result)?")?,
+            inline,
+        )?;
+        let mut revoked = execute.clone();
+        revoked["operation"] = pager["operation"].clone();
+        policy.0.store(1, Ordering::Relaxed);
+        assert!(matches!(
+            host.authorize_broker_execution(&reference, &trial.run, &trial.session, &revoked)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert!(matches!(
+            host.authorize_broker_execution(&reference, &trial.run, &trial.session, &execute).await,
+            Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_STALE
+        ));
+        let current = trial.discover(scoped_query()).await?;
+        let inline = &current["candidates"][0]["inlineDescription"];
+        assert_eq!(inline["operations"].as_array().unwrap().len(), 1);
+        execute["loadedReference"] = inline["loadedReference"].clone();
+        assert!(trial.execute(&execute).await.is_ok());
+
+        policy.0.store(2, Ordering::Relaxed);
+        assert!(matches!(
+            host.authorize_broker_execution(&reference, &trial.run, &trial.session, &execute)
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        assert_eq!(
+            trial.discover(scoped_query()).await?["candidates"],
+            json!([])
+        );
+        Ok(())
+    }
 }

@@ -244,23 +244,51 @@ seeded targets serve resolver requests.
 
 The script parses the explicit target, entity and intent in 30 fixed
 questions. Six questions require two operations spanning both targets and
-different entities. For each operation the driver searches the question
-text unscoped, retries with the stated namespace if the requested candidate
-is missing from the first page, describes it, then selects the list,
-keyset or aggregate shape from the description. It authorizes the broker
-execute, compiles the closed plan and runs the resulting GraphQL document
-on the matching seeded target. A shape is correct if all selected legs
-match the expected target, entity and operation category. Task success
-requires successful execution with an exact match on the coordinates and
-returned data for every leg.
+different entities. The baseline searches unscoped and retries with the
+stated namespace when the requested candidate is missing. Use
+`--acceptance-scoped` for explicit namespace and entity filters on ID reads
+and `--acceptance-inline` for the same filters with inline descriptions
+enabled. Each mode runs the same questions and scores against the same
+expected results. The driver chooses the keyset pager from the continuation
+metadata, and derives ungrouped COUNT's argument path and enum value by
+expanding the types advertised in the ordinary description. It compiles and
+executes the authorized closed plan against the seeded GraphQL resolver.
 
-Each question starts with a fresh broker session. Calls include discovery
-misses and dispatch, plan or resolver errors. The count stops at the first
-error-free GraphQL response, before scoring correctness. The report
-includes nearest-rank p50 and p95 over successful samples and separately
-counts questions that never executed successfully. A separate control
-dispatches a stale execute reference, then a valid one, to verify the
-failed call counts exactly once.
+Each question starts with a fresh broker session. Trial calls include
+discovery misses, ordinary describe fallback, type expansions and dispatch,
+plan or resolver errors. The count stops at the first error-free GraphQL
+response before scoring correctness. The report includes nearest-rank p50
+and p95 over successful samples, questions without success, total metadata
+response bytes, and local broker-call timings. Task success requires an
+exact match on the coordinates and returned data for every leg. A separate
+stale-reference control verifies that a failed execute counts once.
+
+One optimized run per mode and size with Rust 1.97.1 measured the opt-in
+against both baselines. Metadata bytes are the sum of discovery, describe
+and type-page response payloads. First-execute time sums local call durations
+through the first successful SQLite result.
+
+| Entries | Discover mode | First execute calls p50 / p95 | First execute time p50 / p95 (ms) | Discover p95 (ms) | Total metadata bytes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 400 | Default | 3 / 5 | 14.81 / 37.99 | 1.02 | 341,921 |
+| 400 | Scoped | 3 / 5 | 14.64 / 36.67 | 1.02 | 244,021 |
+| 400 | Scoped with inline description | 2 / 5 | 25.29 / 39.17 | 31.62 | 202,988 |
+| 40,000 | Default | 3 / 5 | 112.92 / 141.40 | 101.02 | 337,961 |
+| 40,000 | Scoped | 3 / 5 | 43.45 / 124.37 | 97.25 | 241,711 |
+| 40,000 | Scoped with inline description | 2 / 5 | 50.33 / 129.27 | 90.63 | 200,678 |
+
+All six runs matched 30 of 30 tasks and shapes, and the restricted caller
+saw six permitted candidates in each. Inline discovery replaced 24 describe
+calls across the 36 legs. The remaining 12 describe calls and 24 type
+expansions served the COUNT legs. There were zero failed corpus calls. Twenty
+first executions took two calls with the opt-in, and ten took five. The
+two-call median met its target at both sizes. The p95 stayed above four
+because COUNT needs two type pages in this driver. Discovery p95 at 40,000
+entries also stayed above 10 ms. Compared with the same scoped baseline,
+inline discovery raised local median time while reducing total metadata bytes.
+
+The historical results below used a driver that supplied COUNT's dotted
+argument path and enum value directly.
 
 Rerun on a shared AMD Ryzen 9 9955HX host with Rust 1.97.1, using an
 unoptimized build with debug information disabled and the ungrouped-count
@@ -647,6 +675,40 @@ is truncated or partially exposed: an inline `planSchema` that does not fit is
 dropped first, then the signatures, and the response sets
 `signaturesAvailable` to `false`; an oversized type page is refused so the
 model asks for a smaller `limit`.
+
+### Scoped discovery descriptions
+
+Enable `AiCapabilityBrokerSession::with_scoped_discovery_descriptions` for a
+fixed-broker session and tell callers to pass the exact `namespace` and
+`entityOrClass` for a simple list or keyset ID read. Set
+`kind: "generated_entity"` and allow at least two results to detect
+ambiguity. If discovery returns exactly one candidate that matches the two
+names, it may attach an `inlineDescription` to that candidate.
+
+An inline description holds an ordinary run-bound `loadedReference` and
+compact metadata for each eligible operation. The operation's `idRead`
+contains the admitted scalar selection and a validated one-row bound. Use
+these fields with its exact `operation` and the description's
+`loadedReference` to execute. The keyset pager advertises `continuation`
+from the registered compiler contract. An authorization scan is ineligible.
+Execute rechecks current authorization and resolver policy on every call.
+
+The inline reference holds only the roots listed in its description, including
+after policy revalidation. Use ordinary describe for an absent inline
+description or any other operation. An attachment requires fresh describe
+admission, matching registered contracts and signatures, and an unambiguous
+root of its shape.
+The description must fit the describe bound. The complete discovery result
+must fit the smaller of 8 KiB and the host's model-output bound. Discovery
+omits the attachment if either bound would be exceeded or the session asks
+for complete inline plan schemas. The same candidate reference remains
+available for ordinary describe.
+
+Direct broker hosts use `dispatch_discover_with_catalog` with their current
+tool catalog and output bound. The ORM coordinator applies the opt-in when
+dispatching discovery. Discovery keeps its default response and the same
+tool definitions and session identity. Attached metadata uses the
+`capability-broker-discover-inline/v1` disclosure contract.
 
 ### Broker version 3: browsing and continuation handles
 
@@ -1132,6 +1194,7 @@ Delivery work consumes normal bounded-loop capacity:
 | Provider deferred | Provider-native discovery only; exact application call still counts normally |
 | Client deferred, newly selected capability | 1 discover, then the exact application call |
 | Fixed broker, novel capability | discover (or browse) + describe + execute = 3, plus one `describe_type` per expanded type and one browse per extra hierarchy level |
+| Fixed broker, scoped ID read with an inline description | discover + execute = 2 |
 | Fixed broker, still-loaded capability | execute = 1 |
 | Fixed broker, next page of a continuable result | execute = 1 |
 

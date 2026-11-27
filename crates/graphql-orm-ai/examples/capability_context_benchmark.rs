@@ -35,6 +35,8 @@
 //! replaces the per-session loaded reference with a fixed value.
 //! Use `--acceptance 400` or `--acceptance 40000` for the fixed questions
 //! and a per-call trace through the first successful execute and beyond.
+//! `--acceptance-scoped` uses exact discovery filters for ID reads, and
+//! `--acceptance-inline` also opts in to their inline descriptions.
 
 #[path = "capability_context/acceptance.rs"]
 mod acceptance;
@@ -489,8 +491,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     match arguments.as_slice() {
-        [flag, entries] if flag == "--acceptance" => {
-            let point = runtime.block_on(acceptance::measure(entries.parse()?))?;
+        [flag, entries]
+            if matches!(
+                flag.as_str(),
+                "--acceptance" | "--acceptance-scoped" | "--acceptance-inline"
+            ) =>
+        {
+            let point = runtime.block_on(acceptance::measure(entries.parse()?, flag))?;
             println!("{}", serde_json::to_string_pretty(&point)?);
             return Ok(());
         }
@@ -1067,9 +1074,13 @@ fn production_describe(
         .operations()
         .iter()
         .map(|operation| {
-            production_signature(catalog, operation).map(|signature| signature.summary())
+            let mut summary = production_signature(catalog, operation)?.summary();
+            if catalog.query_capability_supports_continuation(operation.capability_id()) {
+                summary["continuation"] = json!(true);
+            }
+            Ok(summary)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, AiError>>()?;
     Ok(description
         .with_operation_signatures(summaries, limits.maximum_describe_bytes)?
         .into_model_result())
