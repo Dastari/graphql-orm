@@ -26,6 +26,7 @@ operation lists capabilities by namespace, capability and operation after
 host policy, and generated keyset roots return server-held continuation
 handles. Fixed-broker sessions rebind once.
 [Broker version 3](docs/capability-discovery-and-execution.md#broker-version-3-browsing-and-continuation-handles) ·
+[Question-to-execute benchmark](docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark) ·
 [migration](MIGRATION.md#capability-broker-version-3-551)
 
 Under the classified native supervised coordinator, a fixed-broker session

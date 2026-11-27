@@ -221,6 +221,92 @@ entity's capability and operation pages, each at most 32 items) and whether
 a keyset operation offers a continuation, which it does from version 3 (see
 [Broker version 3](#broker-version-3-browsing-and-continuation-handles)).
 
+### Question-to-execute acceptance benchmark
+
+Run the same checked-in questions against exactly 400 and 40,000 generated
+entity entries. Each command is a separate process and writes a JSON report
+with the full call sequence and the outcome of each question leg.
+[Fixed question corpus](../examples/capability_context/questions.json)
+
+```bash
+cargo run --locked -p graphql-orm-ai --example capability_context_benchmark -- --acceptance 400
+cargo run --locked -p graphql-orm-ai --example capability_context_benchmark -- --acceptance 40000
+```
+
+The fixture uses two independently seeded in-memory SQLite targets with
+the same generated wide entity and its five related entities. The remaining
+entries are generated, indexed, one-field archive entities with overlapping
+search terms. Some archive targets reuse names from the executable targets.
+Both points use the harness's raised limits. The 40,000-entry point
+exceeds the defaults of 256 targets and 16,384 entries per set. The
+archive entries participate in search and policy admission. Only the two
+seeded targets serve resolver requests.
+
+The script parses the explicit target, entity and intent in 30 fixed
+questions. Six questions require two operations spanning both targets and
+different entities. For each operation the driver searches the question
+text unscoped, retries with the stated namespace if the requested candidate
+is missing from the first page, describes it, then selects the list,
+keyset or aggregate shape from the description. It authorizes the broker
+execute, compiles the closed plan and runs the resulting GraphQL document
+on the matching seeded target. A shape is correct if all selected legs
+match the expected target, entity and operation category. Task success
+requires successful execution with an exact match on the coordinates and
+returned data for every leg.
+
+Each question starts with a fresh broker session. Calls include discovery
+misses and dispatch, plan or resolver errors. The count stops at the first
+error-free GraphQL response, before scoring correctness. The report
+includes nearest-rank p50 and p95 over successful samples and separately
+counts questions that never executed successfully. A separate control
+dispatches a stale execute reference, then a valid one, to verify the
+failed call counts exactly once.
+
+Measured on an AMD Ryzen 9 9955HX with Rust 1.97.1, using an unoptimized
+build with debug information disabled and the broker from review commit
+`646d7d3b`. Measured discover latency includes policy admission. Setup
+includes SDL generation, SQLite seeding, and compiling the catalogues
+and indexes. The points used 6 and 402 targets, respectively. Peak RSS
+covers the whole process.
+
+| Measurement | #551 target | 400 entries | 40,000 entries |
+| --- | --- | ---: | ---: |
+| Correct target, entity and shape | ≥95% | 30/30 | 30/30 |
+| Calls to first successful execute, p50 | ≤2 | 3 | 3 |
+| Calls to first successful execute, p95 | ≤4 | 6 | 6 |
+| Questions with no successful execute | — | 8 | 8 |
+| Full task successes | At least the prior baseline | 18/30 | 18/30 |
+| Two-leg task successes | — | 2/6 | 2/6 |
+| Restricted caller candidates | Permitted candidates at 40,000 | 6, all permitted | 6, all permitted |
+| Unscoped broker discover p95 | ≤10 ms at 40,000 | 5.99 ms | 453.81 ms |
+| Fixture setup | Linear growth | 6.37 s | 536.19 s |
+| Peak process RSS | Linear growth | 159 MiB | 593 MiB |
+
+A fresh question takes at least three calls through discover, describe,
+and execute. The p50 and p95 call targets were missed. In two questions
+a failed first leg took three calls before a second leg succeeded. The
+stale-reference control also included the failed execute in its count of
+four calls.
+
+All 12 ungrouped count legs selected the intended aggregate and failed
+closed during plan validation. The generated aggregate requires an
+explicit empty `groupBy` for an ungrouped count. Broker arguments accept
+scalar leaves such as `metrics.0.operator`, which leaves no path for an
+empty list. List and keyset legs succeeded, including the two questions
+that combine those shapes across targets.
+
+The two-point changes were 13.38 s of setup per 1,000 added entries
+and 11.23 KiB of peak RSS per added entry. Confirming linearity requires
+more points. Unscoped discover p95 missed the 10 ms target at 40,000
+entries on this unoptimized host.
+
+These are deterministic results for prompts with explicit target and
+entity names and a small set of scripted intents. Provider and model
+task success, including comparison with a prior model baseline, remain
+unmeasured. The measurements above cover the broker and SQLite resolver
+paths for the generated read questions. The model-context benchmark
+covers tool-definition sizes, describe sizes and session binding.
+
 ### Catalogue compilation benchmark
 
 In tool profiles 0.29.0, a release profile of the 60-root target recorded

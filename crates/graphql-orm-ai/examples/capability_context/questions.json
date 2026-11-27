@@ -1,0 +1,188 @@
+[
+  {
+    "text": "In target0000, list IDs for Zqxwide (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "Zqxwide", "category": "list", "result": {"edges": [{"node": {"id": "t0-record-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, page through IDs for Zqxwide (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "Zqxwide", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t0-record-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, how many Zqxwide records are there?",
+    "expected": [
+      {"target": "target-0000", "entity": "Zqxwide", "category": "aggregate", "result": [{"metrics": [{"value": "2", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, list IDs for ZqxwidePartA (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartA", "category": "list", "result": {"edges": [{"node": {"id": "t0-a-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, page through IDs for ZqxwidePartA (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartA", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t0-a-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, how many ZqxwidePartA records are there?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartA", "category": "aggregate", "result": [{"metrics": [{"value": "2", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, list IDs for ZqxwidePartB (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartB", "category": "list", "result": {"edges": [{"node": {"id": "t0-b-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, page through IDs for ZqxwidePartB (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartB", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t0-b-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, how many ZqxwidePartB records are there?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartB", "category": "aggregate", "result": [{"metrics": [{"value": "3", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, list IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartC", "category": "list", "result": {"edges": [{"node": {"id": "t0-c-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, page through IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartC", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t0-c-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, how many ZqxwidePartC records are there?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartC", "category": "aggregate", "result": [{"metrics": [{"value": "4", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0001, list IDs for Zqxwide (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "Zqxwide", "category": "list", "result": {"edges": [{"node": {"id": "t1-record-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for Zqxwide (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "Zqxwide", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-record-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, how many Zqxwide records are there?",
+    "expected": [
+      {"target": "target-0001", "entity": "Zqxwide", "category": "aggregate", "result": [{"metrics": [{"value": "3", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0001, list IDs for ZqxwidePartA (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartA", "category": "list", "result": {"edges": [{"node": {"id": "t1-a-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for ZqxwidePartA (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartA", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-a-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, how many ZqxwidePartA records are there?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartA", "category": "aggregate", "result": [{"metrics": [{"value": "3", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0001, list IDs for ZqxwidePartB (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartB", "category": "list", "result": {"edges": [{"node": {"id": "t1-b-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for ZqxwidePartB (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartB", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-b-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, how many ZqxwidePartB records are there?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartB", "category": "aggregate", "result": [{"metrics": [{"value": "4", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0001, list IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartC", "category": "list", "result": {"edges": [{"node": {"id": "t1-c-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartC", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-c-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, how many ZqxwidePartC records are there?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartC", "category": "aggregate", "result": [{"metrics": [{"value": "5", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, list IDs for Zqxwide (one result); then In target0001, how many ZqxwidePartA records are there?",
+    "expected": [
+      {"target": "target-0000", "entity": "Zqxwide", "category": "list", "result": {"edges": [{"node": {"id": "t0-record-1"}}]}},
+      {"target": "target-0001", "entity": "ZqxwidePartA", "category": "aggregate", "result": [{"metrics": [{"value": "3", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, how many ZqxwidePartA records are there; then In target0001, page through IDs for ZqxwidePartB (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartA", "category": "aggregate", "result": [{"metrics": [{"value": "2", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]},
+      {"target": "target-0001", "entity": "ZqxwidePartB", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-b-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0000, how many ZqxwidePartB records are there; then In target0001, list IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "ZqxwidePartB", "category": "aggregate", "result": [{"metrics": [{"value": "3", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]},
+      {"target": "target-0001", "entity": "ZqxwidePartC", "category": "list", "result": {"edges": [{"node": {"id": "t1-c-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for Zqxwide (one result); then In target0000, how many ZqxwidePartC records are there?",
+    "expected": [
+      {"target": "target-0001", "entity": "Zqxwide", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-record-1"}}]}},
+      {"target": "target-0000", "entity": "ZqxwidePartC", "category": "aggregate", "result": [{"metrics": [{"value": "4", "field": null, "kind": "COUNT", "operator": "COUNT"}], "groups": []}]}
+    ]
+  },
+  {
+    "text": "In target0000, list IDs for Zqxwide (one result); then In target0001, page through IDs for ZqxwidePartA (one result)?",
+    "expected": [
+      {"target": "target-0000", "entity": "Zqxwide", "category": "list", "result": {"edges": [{"node": {"id": "t0-record-1"}}]}},
+      {"target": "target-0001", "entity": "ZqxwidePartA", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-a-1"}}]}}
+    ]
+  },
+  {
+    "text": "In target0001, page through IDs for ZqxwidePartB (one result); then In target0000, list IDs for ZqxwidePartC (one result)?",
+    "expected": [
+      {"target": "target-0001", "entity": "ZqxwidePartB", "category": "keyset_list", "result": {"edges": [{"node": {"id": "t1-b-1"}}]}},
+      {"target": "target-0000", "entity": "ZqxwidePartC", "category": "list", "result": {"edges": [{"node": {"id": "t0-c-1"}}]}}
+    ]
+  }
+]
