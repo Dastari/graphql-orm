@@ -376,8 +376,10 @@ how many other entries hold a term, and the rank of an entry a principal may
 see carries no information about entries it may not. An entity entry is also
 found by its roots' operation names and descriptions, and matches a shape
 intent when any of its roots has that shape. Each root's contribution is
-recorded separately, so after host policy the broker scores an entity on its
-own metadata and its admitted roots only (`rank_admitted`).
+recorded separately. After host policy, the broker can use the original order
+if each retained entity keeps all its roots. If a retained entity loses a
+root, the broker scores the retained entries on their own metadata and their
+admitted roots (`rank_admitted`).
 `AiCapabilityIndexSet::ranked_operation_matches` ranks each executable root
 on its own metadata, for delivery that installs one definition per root. A host may later
 implement the closed current-index-set and authority traits with a reviewed
@@ -608,10 +610,10 @@ continuation handles (next section).
 
 Host policy decides the entity and each root. Discover sends each matching
 entity entry followed by its grouped roots in one `authorize_discovery`
-batch. An entity is returned only with the roots admitted, its `operations`
-list only those, and it is ranked again on its own metadata and the admitted
-roots alone (`AiCapabilityIndexSet::rank_admitted`), so a denied root's name,
-description or shape decides neither whether nor where the entity appears.
+batch. An entity's `operations` list contains only the admitted roots. If a
+retained entity loses a root, discovery reranks the retained entries with
+`AiCapabilityIndexSet::rank_admitted` so a denied root's name, description
+or shape decides neither whether nor where the entity appears.
 An entity with no admitted root is not listed. Describe asks about the entity
 and then each root entry, and lists only the roots admitted (none admitted
 refuses the load); its entity-level `resultDescription` and
