@@ -72,6 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.235.0**; **`graphql-orm-macros` 0.235.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; **`graphql-orm-ai` 0.168.0**; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
+- **No action** — ORM/macros 0.238.0 write the target of a nested read-predicate closure once for filter, hand-written and relation targets too; limits are unchanged and some refused compositions now build (#785). [Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets)
 - **No action** — ORM/macros 0.235.0 use checked loader lookups and keep the authorized direct-query fallback for generated relations (#542). [Migration](../../MIGRATION.md#02340-to-02350-optional-relation-loaders)
 - **No action** — ORM/macros 0.234.0 use `time` internally and preserve existing date-time behavior (#768). [Migration](../../MIGRATION.md#02330-to-02340-internal-date-time-engine)
 - **No action** — AI 0.168.0 admits direct subscription waits whose capability fingerprint is allowlisted (#937). **Action needed** if you relied on the old refusal. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01670-to-01680-subscription-wait-allowlists)

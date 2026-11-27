@@ -276,6 +276,11 @@ impl Target {
     }
 
     fn predicate(&self, legacy: bool) -> ReadPredicate {
+        self.build(legacy).unwrap()
+    }
+
+    /// The predicate, or the refusal of a composition over a budget.
+    fn build(&self, legacy: bool) -> async_graphql::Result<ReadPredicate> {
         // The original rendering of every closure composed from the leaf.
         let original = |predicate: ReadPredicate| {
             if legacy {
@@ -291,7 +296,7 @@ impl Target {
                 ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap()
             }
         };
-        match self {
+        Ok(match self {
             AtLeast(value) => score(ReadPredicateOp::Gte, ">=", *value),
             Below(value) => score(ReadPredicateOp::Lt, "<", *value),
             ScoreIsNull if legacy => closure_legacy::null_test::<B, Node>("score", true),
@@ -304,8 +309,7 @@ impl Target {
                 original(ReadPredicate::from_filter::<B, _>(&Fragment(self.fragment())).unwrap())
             }
             Related(keys, target) => {
-                ReadPredicate::related::<B, Node, Node>(keys.columns(), target.predicate(legacy))
-                    .unwrap()
+                ReadPredicate::related::<B, Node, Node>(keys.columns(), target.build(legacy)?)?
             }
             ParentFilter(at_least, below) => original(
                 ReadPredicate::from_filter::<B, _>(
@@ -314,19 +318,18 @@ impl Target {
                 )
                 .unwrap(),
             ),
-            Not(target) => target.predicate(legacy).not().unwrap(),
-            And(left, right) => left.predicate(legacy).and(right.predicate(legacy)).unwrap(),
-            Or(left, right) => left.predicate(legacy).or(right.predicate(legacy)).unwrap(),
+            Not(target) => target.build(legacy)?.not()?,
+            And(left, right) => left.build(legacy)?.and(right.build(legacy)?)?,
+            Or(left, right) => left.build(legacy)?.or(right.build(legacy)?)?,
             Closure(quantifier, keys, target, depth) => {
                 ReadPredicate::related_closure_within::<B, Node>(
                     *quantifier,
                     keys.columns(),
-                    target.predicate(legacy),
+                    target.build(legacy)?,
                     *depth,
-                )
-                .unwrap()
+                )?
             }
-        }
+        })
     }
 
     /// The reference evaluator, per row: Kleene logic, `None` is UNKNOWN.
@@ -904,6 +907,7 @@ async fn every_backend_admits_the_reference_sets() {
     cases.extend(composed_cases());
     let first_shape_case = cases.len();
     cases.extend(target_shape_cases());
+    let mut refused_originals = Vec::new();
     for (index, (name, target)) in cases.iter().enumerate() {
         let expected = rows
             .iter()
@@ -954,9 +958,14 @@ async fn every_backend_admits_the_reference_sets() {
                 holds_relation(outer_target),
                 "{name}: {candidate_sql}"
             );
-            // The original rendering admits the same rows from more SQL.
+            // The original rendering admits the same rows from more SQL,
+            // where it fits the composition budgets at all.
+            let Ok(original) = target.build(true) else {
+                refused_originals.push(name.as_str());
+                continue;
+            };
             let mut original = EntityQuery::<Node>::new()
-                .with_read_visibility(&ReadVisibility::Complete(target.predicate(true)))
+                .with_read_visibility(&ReadVisibility::Complete(original))
                 .unwrap()
                 .fetch_all(&db)
                 .await
@@ -985,6 +994,18 @@ async fn every_backend_admits_the_reference_sets() {
         cases.len()
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    // SQL Server allows nine relations in one predicate. The original
+    // rendering writes a relation around a closure eight times, so some
+    // shapes build only with the shared rendering there.
+    eprintln!(
+        "original rendering refused for {} shape cases: {refused_originals:?}",
+        refused_originals.len()
+    );
+    assert_eq!(
+        refused_originals.is_empty(),
+        B::DIALECT != DatabaseBackend::Mssql,
+        "{refused_originals:?}"
+    );
     // The cases are not vacuous: they admit and refuse rows in both forms.
     let admits = |target: &Target| target.truths(&rows).contains(&Some(true));
     for group in [&cases[..first_shape_case], &cases[first_shape_case..]] {

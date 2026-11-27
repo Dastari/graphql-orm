@@ -10,6 +10,37 @@ supersedes: []
 
 # Migration Guide
 
+## 0.237.0 to 0.238.0: Nested closure targets
+
+**No action.** Upgrade ORM and macros together. A read-predicate closure
+whose target holds another closure now writes that target once, whatever the
+target is built from: hand-written and generated filters, `related` and
+`not_related`, and their `and`, `or` and `not`, as well as the column tests
+0.233.0 covered. The closure computes the target's truth as one value per
+row. A relation's truth is the greatest truth among its related rows, FALSE
+when there is none and UNKNOWN when a key column is NULL. Every row still
+gets the same TRUE, FALSE or UNKNOWN verdict, and the same rows are admitted.
+
+- **Evaluation.** A hand-written fragment in such a target is evaluated once
+  per row, where the original rendering tested it for TRUE and for FALSE at
+  two sites. An expression that depends only on the row and its bind values
+  gives the same result.
+- **Unchanged renderings.** A closure whose target holds no closure. A target
+  that `not()` would refuse, such as one with an empty `in_list`. On SQL
+  Server, a target that reads a column whose name is not ASCII, or two
+  columns whose names differ only by case. SQL Server has no boolean values,
+  so it still tests a filter for TRUE and for FALSE: a filter appears twice
+  there and once elsewhere.
+- **Limits.** `READ_PREDICATE_CLOSURE_MAX_NESTING` (2),
+  `READ_PREDICATE_MAX_RENDERED_BYTES` (1 MiB) and
+  `READ_PREDICATE_MSSQL_MAX_NESTING` (75) are unchanged: they bound execution
+  cost and a server limit, which the smaller SQL does not change. The
+  composition budgets are measured on the SQL that is rendered, so a nested
+  composition previously refused with `AUTHORIZATION_MISCONFIGURED` for its
+  size, its `CASE` nesting or its relation total can now build. A closure
+  that built before still builds: it keeps the original rendering when the
+  shared one does not fit a limit.
+
 ## 0.234.0 to 0.235.0: Optional relation loaders
 
 **No action.** Upgrade ORM and macros together. Generated relation

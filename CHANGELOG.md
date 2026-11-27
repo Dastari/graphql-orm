@@ -14,6 +14,18 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.238.0
+
+- **No action** (closes #785). A read-predicate closure whose target holds
+  another closure writes that target once for every target shape:
+  hand-written and generated filters, relations and their `and`, `or` and
+  `not`, as well as the column tests of 0.233.0. The rendered SQL grows by
+  one closure per nesting level instead of four. The same rows are admitted.
+  The composition limits are unchanged and are measured on the smaller
+  rendering, so some nested compositions previously refused with
+  `AUTHORIZATION_MISCONFIGURED` now build.
+  [Migration](MIGRATION.md#02370-to-02380-nested-closure-targets)
+
 ## Unreleased - ORM/macros 0.235.0
 
 - **No action** (refs #542). Generated to-one and to-many resolvers use

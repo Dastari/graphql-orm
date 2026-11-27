@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.238.0 aligns with the ORM's
+[nested closure target update](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.235.0 generates a checked loader lookup for both to-one and
 to-many relation fields. See the
 [migration guide](../../MIGRATION.md#02340-to-02350-optional-relation-loaders).

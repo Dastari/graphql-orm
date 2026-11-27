@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.238.0 writes the target of a nested closure read predicate once
+for filter, hand-written and relation targets.
+[Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.235.0 preserves authorized direct queries for generated
 relations without a compatible registered loader. See
 [generated relation loaders](../../docs/reference/graphql-orm/entities-and-relations.md#current-authority-for-generated-relationship-targets).

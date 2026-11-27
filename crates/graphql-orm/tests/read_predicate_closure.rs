@@ -689,7 +689,7 @@ mod portable {
         assert_eq!(
             (original, shared),
             match B::DIALECT {
-                DatabaseBackend::Mssql => (0, 1),
+                DatabaseBackend::Mssql => (0, 2),
                 _ => (2, 22),
             }
         );
@@ -796,9 +796,10 @@ mod portable {
     #[test]
     fn statement_nesting_is_budgeted_on_sql_server() {
         let two_levels = any(PARENT, related_to_itself(all(PARENT, passes())));
-        // A standalone closure shares the target. Nested closures and
-        // relation wrappers use the original shape and budgets.
-        for (target, room, levels) in [(all(PARENT, passes()), 4, 66), (two_levels, 0, 73)] {
+        // A standalone closure shares the target, and a closure around a
+        // relation that holds a closure writes that relation once. Relation
+        // wrappers around a closure use the original shape and budgets.
+        for (target, room, levels) in [(all(PARENT, passes()), 4, 66), (two_levels, 2, 71)] {
             if B::DIALECT == DatabaseBackend::Mssql {
                 assert_eq!(subquery_nesting(&rendered(&target)), levels);
             }
@@ -1605,7 +1606,6 @@ mod portable {
         };
         let closure = |quantifier, target| {
             ReadPredicate::related_closure_within::<B, ClosureNode>(quantifier, PARENT, target, 2)
-                .unwrap()
         };
         let written = || {
             ReadPredicate::from_filter::<B, _>(&WrittenScore(format!(
@@ -1647,6 +1647,8 @@ mod portable {
             ("generated", &generated),
             ("relation", &|| related_to_itself(passes())),
         ];
+        // Compositions SQL Server's nine-relation total refuses.
+        let (mut refused, mut refused_originals) = (0, 0);
         for (leaf_name, leaf) in leaves {
             for (wrap_name, wrap) in wraps {
                 for (outer, negate) in [
@@ -1660,8 +1662,8 @@ mod portable {
                         } else {
                             leaf()
                         };
-                        let first = closure(ReadPredicateQuantifier::All, leaf);
-                        let second = closure(outer, wrap(first.clone()));
+                        let first = closure(ReadPredicateQuantifier::All, leaf).unwrap();
+                        let second = closure(outer, wrap(first.clone())).ok()?;
                         let visible = |predicate: ReadPredicate| {
                             rendered(&if negate {
                                 predicate.not().unwrap()
@@ -1669,16 +1671,31 @@ mod portable {
                                 predicate
                             })
                         };
-                        (visible(first), visible(second))
+                        Some((visible(first), visible(second)))
                     };
-                    let (first, second) = build(false);
-                    let (original_first, original_second) = build(true);
-                    // The first closure holds no closure: both renderings
-                    // are the original one.
-                    assert_eq!(first, original_first, "{name}");
+                    let Some((first, second)) = build(false) else {
+                        assert!(build(true).is_none(), "{name}");
+                        refused += 1;
+                        continue;
+                    };
                     for level in 1..=2 {
                         assert_eq!(second.matches(&opening(level)).count(), 1, "{name}");
                     }
+                    let growth = second.len() - first.len();
+                    assert!(growth <= first.len() + 1_400, "{name}: {growth}");
+                    let Some((original_first, original_second)) = build(true) else {
+                        eprintln!(
+                            "{:?}, {name}: {} / {} bytes, original refused",
+                            B::DIALECT,
+                            first.len(),
+                            second.len()
+                        );
+                        refused_originals += 1;
+                        continue;
+                    };
+                    // The first closure holds no closure: both renderings
+                    // are the original one.
+                    assert_eq!(first, original_first, "{name}");
                     // The original rendering writes the first closure four
                     // times, or eight under a relation, which also writes
                     // its FALSE rows.
@@ -1688,8 +1705,13 @@ mod portable {
                     );
                     // One closure's SQL, the wrapper, and the fixed
                     // projection of the shared walk.
-                    let growth = second.len() - first.len();
-                    assert!(growth <= first.len() + 1_400, "{name}: {growth}");
+                    eprintln!(
+                        "{:?}, {name}: {} / {} bytes, original {}",
+                        B::DIALECT,
+                        first.len(),
+                        second.len(),
+                        original_second.len()
+                    );
                     assert!(
                         original_second.len() - first.len() >= 3 * first.len(),
                         "{name}"
@@ -1697,6 +1719,20 @@ mod portable {
                 }
             }
         }
+        eprintln!(
+            "{:?}: {refused} shapes refused, {refused_originals} only in the original rendering",
+            B::DIALECT
+        );
+        // The original rendering of a closure around a closure over a
+        // relation writes sixteen relations: over SQL Server's total.
+        assert_eq!(
+            (refused, refused_originals),
+            if B::DIALECT == DatabaseBackend::Mssql {
+                (0, 12)
+            } else {
+                (0, 0)
+            }
+        );
     }
 
     fn empty_score_list() -> ReadPredicate {
