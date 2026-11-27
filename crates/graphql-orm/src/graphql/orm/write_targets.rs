@@ -151,8 +151,54 @@ fn bulk_limit_exceeded() -> sqlx::Error {
 /// [`PaginationConfig::max_scanned_rows`](super::PaginationConfig::max_scanned_rows)
 /// of them; a scan that would need more is refused as an authorized read is.
 /// Repository writes keep the unbounded locking read.
+///
+/// This is the target admission of a generated bulk write (`write_pipeline`).
+/// A GraphQL write presents its request with the authority of its bulk
+/// admission: one that was not earned for `T` under that request on `db`, the
+/// transaction's `Database`, is refused, and the authority is issued for
+/// exactly the admitted targets in this transaction. No target issues
+/// nothing.
 #[doc(hidden)]
 pub async fn bulk_write_targets<T, B>(
+    db: &Database<B>,
+    request: Option<super::__GeneratedWriteRequestAuthority<'_, '_>>,
+    tx: &mut MutationContext<'_, B>,
+    query: EntityQuery<T, B>,
+    key_value: fn(&T) -> SqlValue,
+) -> crate::Result<Vec<T>>
+where
+    B: WriteBackend,
+    T: Entity
+        + DatabaseEntity
+        + super::GeneratedWriteConfig
+        + FromSqlRow<B>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    // Claimed before the first await: one bulk target admission per
+    // authority, whose result alone it is issued for.
+    let claim = match request {
+        Some((ctx, authority)) => {
+            Some(authority.__claim_bulk_targets::<T, B>(ctx, db, tx.__base_database())?)
+        }
+        None => None,
+    };
+    let targets =
+        admit_bulk_write_targets(db, request.map(|(ctx, _)| ctx), tx, query, key_value).await?;
+    if let Some(claim) = claim {
+        claim.__complete_bulk_targets(
+            tx.__identity(),
+            targets
+                .iter()
+                .map(super::GeneratedWriteConfig::__gom_write_key),
+        );
+    }
+    Ok(targets)
+}
+
+async fn admit_bulk_write_targets<T, B>(
     db: &Database<B>,
     ctx: Option<&async_graphql::Context<'_>>,
     tx: &mut MutationContext<'_, B>,

@@ -10,6 +10,70 @@ supersedes: []
 
 # Migration Guide
 
+## 0.236.0 to 0.237.0: Bound generated write authority
+
+**No action** for supported callers: hosts that use the derives, the
+repository API, `Database::transaction` and
+`MutationContext::run_mutation_hook`. Upgrade ORM and macros together. The
+SDL and catalogues are unchanged (#921).
+
+The hidden write pipeline now reads a generated write's backend,
+authentication mode, scope declarations and assurance coordinate from the
+entity's generated configuration. The pipeline issues
+`GeneratedWriteAuthority` after entity admission for creates and after target
+admission for updates, deletes, upserts and bulk writes. The pipeline runs
+target admission once per request admission. It binds the authority to one
+request and invocation, one operation, one `Database` handle, one transaction and the
+rows that were admitted. In an upsert's create branch, both hook events must
+carry each conflict-key column once with the exact bind value used in the
+locked lookup, including the serialized representation of JSON.
+
+Generated mutations change in a few narrow cases:
+
+- **Assurance coordinate.** A generated write always enforces the assurance
+  requirement of its own root field. Before, a generated resolver enforced
+  the requirement of the field being resolved, which is the same field
+  unless a custom resolver calls a generated mutation resolver method under
+  its own root. **Action needed** only for such a custom resolver: the
+  caller must now satisfy the generated operation's requirement as well.
+- **`Before` hook id of a single-row update.** The event's `id` is the stored
+  key of the locked row, as the `After` event's already was. Before, it was
+  the request's `id` argument. The two differ only where the database
+  matches keys that are spelled differently, for example under a
+  case-insensitive collation. **No action** unless a hook compares that id
+  with the request's own spelling.
+- **Field denial on an inserting upsert.** A denied write to a conflict field
+  returns `FORBIDDEN` even if the optional field would otherwise be omitted
+  under `ignore_denied_field_write`. The insert uses the key from the locked
+  lookup. **No action.**
+
+**Action needed** for host code that calls the hidden, macro-internal
+pipeline functions directly, against their documentation. Their signatures
+changed, so that code no longer compiles:
+
+- `__admit_generated_write_request` takes an entity type,
+  a `GeneratedWriteKind` and the scope template argument values. The request
+  it returns is typed by the entity's backend. Authentication mode, scope
+  declarations and the assurance coordinate come from that entity.
+- `GeneratedWriteEntity::new` is replaced by `GeneratedWriteEntity::of::<T>()`.
+- `__admit_entity` and `__admit_entity_bulk` take no entity and no backend,
+  and `__admit_entity_on` is removed. A nested child is admitted through its
+  parent's admission with `__admit_generated_nested_create_request`.
+- `__lock_generated_write_target` and `__read_generated_write_target` are
+  replaced by methods of the admission. An upsert's target admission is
+  `__lookup_upsert_target`, which runs the locked lookup itself, followed by
+  `__admit_upsert_target`.
+- `bulk_write_targets` takes the request with its authority instead of the
+  GraphQL context.
+
+A hook dispatch whose authority does not match its request, invocation,
+operation, entity, `Database`, transaction or row is now refused with an
+error. Before, it ran the hook without request authority. These functions
+are still not a supported API. Dispatch a hook from host code with
+`MutationContext::run_mutation_hook`.
+See
+[what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
+
 ## 0.235.0 to 0.236.0: ORM integration test harnesses
 
 **No action.** Upgrade ORM and macros together. For workspace test commands
