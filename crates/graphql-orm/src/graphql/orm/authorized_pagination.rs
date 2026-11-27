@@ -1299,9 +1299,9 @@ pub struct ReadPredicate {
     /// alone does not give it. `None` while `negation` is supported means
     /// that `policy` is three-valued SQL as written.
     logic: Option<Logic>,
-    /// A closure over this predicate keeps the original TRUE and FALSE
-    /// sites. Handwritten SQL requires them by default, including through
-    /// generated relation filters that incorporate a row policy.
+    /// Nested closures over this predicate must keep the original TRUE and
+    /// FALSE sites. This is required for handwritten SQL by default,
+    /// including when a generated relation filter incorporates it.
     original_sites: bool,
 }
 
@@ -2949,11 +2949,10 @@ impl ReadPredicate {
         })
     }
 
-    /// Test support: closures over this predicate, or over any predicate
-    /// composed from it, keep the original rendering, which tests the
-    /// target for TRUE and for FALSE separately, for the governed row and
-    /// again for the reached rows. Both renderings admit the same rows; the
-    /// parity suites compare them.
+    /// Test support: disable shared rendering for nested closures over
+    /// this predicate or any predicate composed from it. The nested
+    /// closures test the target for TRUE and FALSE separately for the
+    /// governed and reached rows.
     #[doc(hidden)]
     pub fn __gom_original_closure_rendering(mut self) -> Self {
         self.original_sites = true;
@@ -3266,12 +3265,14 @@ impl ReadPredicate {
     /// computed per governed or reached row from one projection of the
     /// columns it reads. This covers built-in column comparisons and NULL
     /// tests, stable filters, relations and their `and`, `or` and `not`.
-    /// Handwritten fragments keep separate TRUE and FALSE evaluation
-    /// sites unless the host supplies a stability guarantee via
-    /// [`ReadVisibilityFilter::is_stable_for_closure`]. That requirement
-    /// applies to fragments inside an inner closure, relation or generated
-    /// relation filter. Targets with unsupported negation or a deny fallback
-    /// also keep the original rendering. SQL Server tests scalar conditions
+    /// In nested compositions, handwritten fragments keep separate TRUE and
+    /// FALSE evaluation sites unless the host supplies a stability guarantee
+    /// via [`ReadVisibilityFilter::is_stable_for_closure`]. This also covers
+    /// fragments inside relations and generated relation filters. Nested
+    /// targets with unsupported negation or a deny fallback also keep the
+    /// original rendering. PostgreSQL standalone closures evaluate a native
+    /// Boolean target once at the anchor and once per reached row in the
+    /// recursive step. SQL Server tests scalar conditions
     /// for TRUE and FALSE and requires projected column names to be ASCII
     /// and distinct without regard to case. SQLite and PostgreSQL carry
     /// the truth in the recursive tuple so collation-equal pointers with
@@ -3454,14 +3455,18 @@ impl ReadPredicate {
         predicate.negation = negation;
         predicate.column_tests_only = target.column_tests_only;
         predicate.original_sites = target.original_sites;
-        // SQLite keeps the original standalone and fallback forms, and
-        // an unstable target keeps the original sites on every backend.
-        if dialect == DatabaseBackend::Sqlite || target.original_sites {
+        // SQLite keeps the original standalone and fallback forms. SQL
+        // Server keeps the original sites for an unstable target.
+        if dialect == DatabaseBackend::Sqlite
+            || (dialect == DatabaseBackend::Mssql && target.original_sites)
+        {
             return Ok(predicate);
         }
 
         let (compact_truth, mut compact_values) = match &target.policy {
-            Policy::Closure { scalar, .. } if target.column_tests_only => {
+            Policy::Closure { scalar, .. }
+                if target.column_tests_only && !target.original_sites =>
+            {
                 // A closure already returns nullable 0/1. Convert that
                 // scalar to the aggregate's 0/1/2 encoding without a
                 // second walk to find its FALSE rows. ISNULL avoids SQL
@@ -3476,6 +3481,9 @@ impl ReadPredicate {
             }
             _ if closures != 0 => return Ok(predicate),
             _ if dialect == DatabaseBackend::Postgres && uses_native_truth => {
+                // The standalone PostgreSQL renderer has always evaluated
+                // native Boolean targets once per walk row. Keep the
+                // separate TRUE/FALSE SQL above for composition only.
                 let mut values = Vec::new();
                 let sql = sql_truth(
                     dialect,

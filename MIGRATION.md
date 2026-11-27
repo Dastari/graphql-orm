@@ -20,12 +20,14 @@ three-valued verdict per row. A relation contributes the greatest truth
 among its related rows, FALSE when there is none and UNKNOWN when a key
 column is NULL.
 
-- **Handwritten SQL.** The ORM preserves separate TRUE and FALSE evaluation
-  sites by default, even when the fragment is inside a nested closure, a
-  relation, or a generated relation filter. A host may implement
+- **Handwritten SQL.** Nested closures keep the existing TRUE and FALSE
+  evaluation sites by default, including fragments inside relations or
+  generated relation filters. A host may implement
   `ReadVisibilityFilter::is_stable_for_closure` to enable sharing when
   repeated evaluations for the same row and binds always give the same
-  verdict and have no side effects.
+  verdict and have no side effects. On PostgreSQL, a standalone closure
+  over a native Boolean target retains one evaluation at the anchor and
+  one at the recursive step per reached row.
 - **Eligibility.** Sharing also requires a target with supported negation,
   without the deny fallback `1 = 0`, whose row columns can be projected.
   Generated calendar-relative date filters keep the original sites because

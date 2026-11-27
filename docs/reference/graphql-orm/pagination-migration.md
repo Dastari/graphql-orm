@@ -382,12 +382,15 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   three-valued verdict per row from a projection of the columns the target
   reads. This covers column comparisons and NULL tests, stable filters,
   relations and their `and`, `or` and `not` combinations. A relation's
-  verdict is the greatest truth among its related rows. A handwritten
-  fragment keeps separate TRUE and FALSE evaluation sites by default,
-  including inside an inner closure or generated relation filter. A host
-  can opt in through `ReadVisibilityFilter::is_stable_for_closure` when the
-  SQL is stable and side-effect-free. A deny fallback or unsupported
-  negation also keeps the original rendering. SQL Server tests scalar
+  verdict is the greatest truth among its related rows. In nested
+  compositions, a handwritten fragment keeps the existing TRUE and FALSE
+  evaluation sites by default, including inside a generated relation
+  filter. A host can opt in through
+  `ReadVisibilityFilter::is_stable_for_closure` when the SQL is stable and
+  side-effect-free. PostgreSQL standalone closures evaluate a native
+  Boolean target once in the anchor and once per reached row in the
+  recursive step. Nested targets with a deny fallback or unsupported
+  negation keep the original rendering. SQL Server tests scalar
   conditions for TRUE and FALSE and requires projected column names to be
   ASCII and distinct without regard to case. SQLite and PostgreSQL carry
   the target's truth in the recursive tuple, keeping collation-equal

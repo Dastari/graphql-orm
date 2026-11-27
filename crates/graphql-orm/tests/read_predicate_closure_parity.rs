@@ -1101,6 +1101,100 @@ fn closure_sql(predicate: ReadPredicate) -> String {
         .0
 }
 
+#[cfg(feature = "postgres")]
+fn alternating_postgres_target() -> ReadPredicate {
+    fragment_predicate(
+        FilterExpression::trusted_fragment(
+            "nextval('closure_truth_calls') % ? = ? AND __gom_self.id IS NOT NULL",
+            vec![SqlValue::Int(2), SqlValue::Int(0)],
+        ),
+        false,
+    )
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_standalone_volatile_target_keeps_pre_pr_sql_sites() {
+    use ReadPredicateQuantifier::Any;
+
+    let inner = parent_closure(Any, alternating_postgres_target());
+    let render = |predicate| {
+        EntityQuery::<Node>::new()
+            .with_read_visibility(&ReadVisibility::Complete(predicate))
+            .unwrap()
+            .try_build_delete_sql()
+            .unwrap()
+    };
+    let (sql, binds) = render(inner.clone());
+    // Before #785, PostgreSQL encoded the native Boolean verdict once in
+    // the anchor and again in the recursive step, in that order.
+    let target = "nextval('closure_truth_calls')";
+    assert_eq!(sql.matches(target).count(), 2, "{sql}");
+    assert_eq!(sql.matches("COALESCE(2 *").count(), 2, "{sql}");
+    assert!(
+        sql.contains(&format!(
+            r#"{target} % $1 = $2 AND "closure_parity_nodes".id IS NOT NULL"#
+        )) && sql.contains(&format!(
+            "{target} % $3 = $4 AND __gom_closure_1_t.id IS NOT NULL"
+        )),
+        "{sql}"
+    );
+    let expected_binds = |sites| {
+        [2, 0]
+            .repeat(sites)
+            .into_iter()
+            .map(SqlValue::Int)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(binds, expected_binds(2));
+
+    // Composition still uses the inner closure's separate TRUE and FALSE
+    // sites, with the inner binds replayed at each outer evaluation site.
+    let (nested, binds) = render(parent_closure(Any, inner));
+    assert_eq!(nested.matches(target).count(), 16, "{nested}");
+    assert!(!nested.contains("COALESCE(2 *"), "{nested}");
+    assert_eq!(binds, expected_binds(16));
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "owned database lane"]
+async fn postgres_standalone_volatile_target_evaluates_once_per_walk_row() {
+    use ReadPredicateQuantifier::Any;
+    let (db, mut owner) = fixture().await;
+    for sql in [
+        "CREATE SEQUENCE closure_truth_calls",
+        "INSERT INTO closure_parity_nodes (id, parent_id) VALUES (1001, 1002), (1002, NULL)",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    // The anchor's FALSE is followed by a TRUE at its parent. Evaluating
+    // NOT(target) again for the FALSE anchor consumes that parent's TRUE.
+    let admitted = EntityQuery::<Node>::new()
+        .where_clause("id = ?", SqlValue::Int(1001))
+        .with_read_visibility(&ReadVisibility::Complete(parent_closure(
+            Any,
+            alternating_postgres_target(),
+        )))
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let calls: i64 = graphql_orm::sqlx::query_scalar("SELECT last_value FROM closure_truth_calls")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    owner.cleanup().unwrap();
+    assert_eq!((admitted, calls), (vec![1001], 2));
+}
+
 #[test]
 fn handwritten_volatile_fragments_keep_original_sites() {
     use ReadPredicateQuantifier::{All, Any};
