@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.234.0 to 0.235.0: Optional relation loaders
+
+**No action.** Upgrade ORM and macros together. Generated relation
+resolvers still use authorized direct queries when a compatible loader
+is absent, including in handwritten schemas.
+
 ## 0.233.0 to 0.234.0: internal date-time engine
 
 **No action.** Upgrade ORM and macros together. The internal engine uses
