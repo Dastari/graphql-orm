@@ -1836,7 +1836,7 @@ impl OrmAiCoordinatorCheckpointService {
         if canonical_json_hash(&value)? != adoption.outcome_fingerprint {
             return Err(AiError::Conflict);
         }
-        let original: crate::orm_subscription_waits::ProtectedWaitOutcome =
+        let mut original: crate::orm_subscription_waits::ProtectedWaitOutcome =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
         if original.waiter_id.0 != waiter.id
             || original.provider_call_id != call_id
@@ -1844,11 +1844,15 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::Conflict);
         }
+        original.egress_manifest.estimated_bytes = original.egress_manifest.estimated_bytes.max(
+            crate::provider::tool_result_egress_bytes(call_id, tool_id, &original.output),
+        );
         let matches = if let Some(hash) = withheld_hash {
             let original_bytes = original.output.to_string().len();
             hash == original.egress_manifest.stable_hash()
                 && output.to_string().len() <= original_bytes
-                && withheld_replay_manifest(&original.egress_manifest, output).as_ref()
+                && withheld_replay_manifest(&original.egress_manifest, call_id, tool_id, output)
+                    .as_ref()
                     == Some(transfer)
         } else {
             &original.output == output && &original.egress_manifest == transfer
@@ -2265,10 +2269,45 @@ impl OrmAiCoordinatorCheckpointService {
                 .len()
                 .checked_sub(evidence.current_tool_count)
                 .ok_or(AiError::Conflict)?;
-            for (item, transfer) in evidence.tools[..historical_count]
+            let historical = evidence.tools[..historical_count]
                 .iter()
-                .zip(continuation.replay_transfers())
-            {
+                .zip(continuation.replay_transfers());
+            let mut waits = historical.clone().filter_map(|(item, transfer)| {
+                match replay_tool_source(transfer) {
+                    Some((ReplayToolSource::Subscription(waiter_id), _)) => {
+                        Some((item.provider_turn_index, waiter_id))
+                    }
+                    _ => None,
+                }
+            });
+            let wait = if let Some((turn, waiter_id)) = waits.next() {
+                if waits.next().is_some() {
+                    return Err(AiError::Conflict);
+                }
+                let waiter = AiSubscriptionWaiterRecord::find_by_id(
+                    self.run_service.custody_database(),
+                    &waiter_id,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+                if waiter.run_id != lease.run_id().0
+                    || waiter.session_id != lease.session_id().0
+                    || waiter.scope_kind != scope.kind
+                    || waiter.scope_id != scope.id
+                    || waiter.tenant_id != scope.tenant_id
+                    || waiter.owner_subject != lease.principal_reference().subject
+                    || waiter.owner_principal_kind != principal_kind
+                    || waiter.state != "adopted"
+                    || waiter.source_lease_generation >= checkpoint.lease_generation
+                {
+                    return Err(AiError::Conflict);
+                }
+                Some((turn, waiter))
+            } else {
+                None
+            };
+            for (item, transfer) in historical {
                 if !route.matches_manifest(
                     transfer,
                     lease,
@@ -2280,36 +2319,26 @@ impl OrmAiCoordinatorCheckpointService {
                 }
                 let (source, withheld_hash) =
                     replay_tool_source(transfer).ok_or(AiError::EgressDenied)?;
-                if withheld_hash.is_some() && !valid_withheld_replay_output(transfer, &item.output)
+                if withheld_hash.is_some()
+                    && !valid_withheld_replay_output(
+                        transfer,
+                        &item.call_id,
+                        &item.tool_id,
+                        &item.output,
+                    )
                 {
                     return Err(AiError::EgressDenied);
                 }
                 let database = self.run_service.custody_database();
-                let waiter = if let ReplayToolSource::Subscription(waiter_id) = source {
-                    let waiter = AiSubscriptionWaiterRecord::find_by_id(database, &waiter_id)
-                        .await
-                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                        .ok_or(AiError::NotFound)?;
-                    if waiter.run_id != lease.run_id().0
-                        || waiter.session_id != lease.session_id().0
-                        || waiter.scope_kind != scope.kind
-                        || waiter.scope_id != scope.id
-                        || waiter.tenant_id != scope.tenant_id
-                        || waiter.owner_subject != lease.principal_reference().subject
-                        || waiter.owner_principal_kind != principal_kind
-                        || waiter.state != "adopted"
-                        || waiter.source_lease_generation >= checkpoint.lease_generation
-                    {
-                        return Err(AiError::Conflict);
+                let (tool_id, waiter) = match source {
+                    ReplayToolSource::Application(id) => (id, None),
+                    ReplayToolSource::Subscription(id) => {
+                        let (_, waiter) = wait
+                            .as_ref()
+                            .filter(|(_, waiter)| waiter.id == id)
+                            .ok_or(AiError::Conflict)?;
+                        (waiter.tool_call_id, Some(waiter))
                     }
-                    Some(waiter)
-                } else {
-                    None
-                };
-                let tool_id = match (source, &waiter) {
-                    (ReplayToolSource::Application(id), _) => id,
-                    (ReplayToolSource::Subscription(_), Some(waiter)) => waiter.tool_call_id,
-                    (ReplayToolSource::Subscription(_), None) => return Err(AiError::Conflict),
                 };
                 if !durable_ids.insert(tool_id) || !provider_call_ids.insert(item.call_id.as_str())
                 {
@@ -2332,10 +2361,16 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-                let (historical_attempt, historical_generation) = waiter.as_ref().map_or(
-                    (checkpoint.attempt_id, checkpoint.lease_generation),
-                    |waiter| (waiter.source_attempt_id, waiter.source_lease_generation),
-                );
+                // Parking a wait ends the attempt. The wait and earlier
+                // turns belong to its registering fence; subsequent turns
+                // belong to the fence that wrote this checkpoint.
+                let (historical_attempt, historical_generation) = wait
+                    .as_ref()
+                    .filter(|(turn, _)| item.provider_turn_index <= *turn)
+                    .map_or(
+                        (checkpoint.attempt_id, checkpoint.lease_generation),
+                        |(_, waiter)| (waiter.source_attempt_id, waiter.source_lease_generation),
+                    );
                 let turn_budget_matches =
                     match historical_turn_budgets.entry(item.provider_turn_index) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -2429,7 +2464,7 @@ impl OrmAiCoordinatorCheckpointService {
                         lease,
                         &scope,
                         &policy,
-                        &waiter,
+                        waiter,
                         &item.call_id,
                         &item.tool_id,
                         &item.output,
@@ -2449,7 +2484,7 @@ impl OrmAiCoordinatorCheckpointService {
                     .as_deref()
                     .ok_or(AiError::Conflict)?;
                 if call.result_egress_manifest_hash.as_deref() != Some(manifest_hash) {
-                    return Err(AiError::EgressDenied);
+                    return Err(AiError::Conflict);
                 }
                 if withheld_hash.is_none() {
                     if classification != classification_value(transfer.maximum_classification())

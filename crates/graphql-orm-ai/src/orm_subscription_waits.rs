@@ -1989,9 +1989,11 @@ impl OrmAiSubscriptionWaitService {
             &opened.waiter.capability_fingerprint,
         )
         .await?;
-        let bytes = serde_json::to_vec(&output)
-            .map_err(|_| AiError::PersistenceFailed)?
-            .len();
+        let bytes = crate::provider::tool_result_egress_bytes(
+            &opened.provider_call_id,
+            &opened.tool_id,
+            &output,
+        );
         let manifest = opened.route.subscription_wait_manifest(
             scope.clone(),
             AiSessionId(opened.waiter.session_id),
@@ -1999,7 +2001,7 @@ impl OrmAiSubscriptionWaitService {
             opened.provider_kind.clone(),
             opened.provider_model.clone(),
             source,
-            u64::try_from(bytes).map_err(|_| AiError::PersistenceFailed)?,
+            bytes,
         );
         let decision = self
             .runtime
@@ -2525,7 +2527,7 @@ impl OrmAiSubscriptionWaitService {
         if canonical_json_hash(&outcome_value)? != adoption.outcome_fingerprint {
             return Err(AiError::Conflict);
         }
-        let outcome: ProtectedWaitOutcome =
+        let mut outcome: ProtectedWaitOutcome =
             serde_json::from_value(outcome_value).map_err(|_| AiError::PersistenceFailed)?;
         let provider: ProtectedProviderResult =
             serde_json::from_value(request_payload.provider_result.clone())
@@ -2697,6 +2699,17 @@ impl OrmAiSubscriptionWaitService {
         ) {
             return Err(AiError::Conflict);
         }
+        // A queued outcome written by an older version may quote only the
+        // output. Reauthorize the full result at adoption before dispatch.
+        outcome.egress_manifest.estimated_bytes =
+            outcome
+                .egress_manifest
+                .estimated_bytes
+                .max(crate::provider::tool_result_egress_bytes(
+                    &outcome.provider_call_id,
+                    &outcome.tool_id,
+                    &outcome.output,
+                ));
         let decision = self
             .runtime
             .authorize_egress(&principal_reference, &outcome.egress_manifest)

@@ -450,7 +450,21 @@ pub(crate) fn replay_tool_source(
             None,
         )),
         "application_subscription_event" | "subscription_wait_outcome" => {
-            let (id, _) = source.reference.strip_prefix("v1:")?.split_once(':')?;
+            let (id, suffix) = source.reference.strip_prefix("v1:")?.split_once(':')?;
+            let valid = match source.kind.as_str() {
+                "application_subscription_event" => {
+                    source.trust == crate::AiSourceTrust::ResolverResult
+                        && crate::valid_sha256(suffix)
+                }
+                _ => {
+                    source.trust == crate::AiSourceTrust::TrustedRuntime
+                        && source.classification == crate::DataClassification::Public
+                        && matches!(suffix, "timeout" | "event_limit")
+                }
+            };
+            if !valid {
+                return None;
+            }
             Some((
                 ReplayToolSource::Subscription(crate::tool_media::source_call_hint(id)?),
                 None,
@@ -481,10 +495,12 @@ pub(crate) fn withheld_subscription_output(
 
 pub(crate) fn valid_withheld_replay_output(
     manifest: &AiEgressManifest,
+    call_id: &str,
+    tool_id: &str,
     output: &serde_json::Value,
 ) -> bool {
     let bytes = output.to_string().len();
-    manifest.estimated_bytes == bytes as u64
+    manifest.estimated_bytes == crate::provider::tool_result_egress_bytes(call_id, tool_id, output)
         && [
             crate::AiSubscriptionResultRefusal::AuthorityRevoked,
             crate::AiSubscriptionResultRefusal::CapabilityStale,
@@ -495,6 +511,8 @@ pub(crate) fn valid_withheld_replay_output(
 
 pub(crate) fn withheld_replay_manifest(
     original: &AiEgressManifest,
+    call_id: &str,
+    tool_id: &str,
     marker: &serde_json::Value,
 ) -> Option<AiEgressManifest> {
     let (origin, None) = replay_tool_source(original)? else {
@@ -511,7 +529,7 @@ pub(crate) fn withheld_replay_manifest(
         classification: crate::DataClassification::Public,
         trust: crate::AiSourceTrust::TrustedRuntime,
     }];
-    withheld.estimated_bytes = u64::try_from(marker.to_string().len()).ok()?;
+    withheld.estimated_bytes = crate::provider::tool_result_egress_bytes(call_id, tool_id, marker);
     withheld.estimated_tokens = 0;
     withheld.attachment_count = 0;
     Some(withheld)
@@ -585,7 +603,10 @@ impl AiProviderCallPlan {
         let mut replaced_sources = Vec::new();
         for message in messages {
             let ModelConversationMessage::Tool {
-                call_id, output, ..
+                call_id,
+                tool_id,
+                output,
+                ..
             } = message
             else {
                 continue;
@@ -595,14 +616,15 @@ impl AiProviderCallPlan {
                 continue;
             };
             if replay_tool_source(transfer).is_some_and(|(_, hash)| hash.is_some()) {
-                if !valid_withheld_replay_output(transfer, output) {
+                if !valid_withheld_replay_output(transfer, call_id, tool_id, output) {
                     return Err(failed);
                 }
                 continue;
             }
             let marker =
                 withheld_subscription_output(refusal, output.to_string().len()).ok_or(failed)?;
-            let replacement = withheld_replay_manifest(transfer, &marker).ok_or(failed)?;
+            let replacement =
+                withheld_replay_manifest(transfer, call_id, tool_id, &marker).ok_or(failed)?;
             replaced_sources.push(transfer.sources[0].clone());
             *transfer = replacement;
             *output = marker;
@@ -2096,6 +2118,7 @@ impl AiProviderCallPlan {
         lease: &AiRunLease,
         continuation: ModelContinuation,
     ) -> Self {
+        self.request.tools[0].parameters["properties"] = serde_json::json!({});
         self.request.continuation = Some(continuation);
         self.request.continuation_mode = ModelContinuationMode::StatelessReplay;
         let mut inference = Self::test_chat_plan(lease, self.budget.scope.clone())
@@ -17993,6 +18016,8 @@ mod tests {
             third_plan.transfers[1],
             withheld_replay_manifest(
                 &original_transfer,
+                "stateless-history-call-1",
+                "records.read",
                 &withheld_subscription_output(
                     crate::AiSubscriptionResultRefusal::AuthorityRevoked,
                     previous_bytes,

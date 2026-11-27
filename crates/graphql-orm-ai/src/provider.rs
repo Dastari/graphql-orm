@@ -1082,7 +1082,9 @@ fn valid_stateless_user_block(block: &ModelInputBlock) -> bool {
     }
 }
 
-fn tool_result_egress_bytes(request: &ModelRequest) -> Vec<u64> {
+fn tool_result_values(
+    request: &ModelRequest,
+) -> impl Iterator<Item = (bool, &str, &str, &serde_json::Value)> {
     let historical = request
         .continuation
         .as_ref()
@@ -1097,32 +1099,35 @@ fn tool_result_egress_bytes(request: &ModelRequest) -> Vec<u64> {
                 tool_id,
                 output,
                 ..
-            } => Some((call_id, tool_id, output)),
+            } => Some((true, call_id.as_str(), tool_id.as_str(), output)),
             ModelConversationMessage::User { .. } | ModelConversationMessage::Assistant { .. } => {
                 None
             }
         });
-    historical
-        .chain(request.input.iter().filter_map(|block| match block {
-            ModelInputBlock::ToolResult {
-                call_id,
-                tool_id,
-                output,
-            } => Some((call_id, tool_id, output)),
-            ModelInputBlock::Text { .. }
-            | ModelInputBlock::Attachment { .. }
-            | ModelInputBlock::Json { .. } => None,
-        }))
-        .map(|(call_id, tool_id, output)| {
-            u64::try_from(
-                call_id
-                    .len()
-                    .saturating_add(tool_id.len())
-                    .saturating_add(output.to_string().len()),
-            )
-            .unwrap_or(u64::MAX)
-        })
-        .collect()
+    historical.chain(request.input.iter().filter_map(|block| match block {
+        ModelInputBlock::ToolResult {
+            call_id,
+            tool_id,
+            output,
+        } => Some((false, call_id.as_str(), tool_id.as_str(), output)),
+        ModelInputBlock::Text { .. }
+        | ModelInputBlock::Attachment { .. }
+        | ModelInputBlock::Json { .. } => None,
+    }))
+}
+
+pub(crate) fn tool_result_egress_bytes(
+    call_id: &str,
+    tool_id: &str,
+    output: &serde_json::Value,
+) -> u64 {
+    u64::try_from(
+        call_id
+            .len()
+            .saturating_add(tool_id.len())
+            .saturating_add(output.to_string().len()),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn serialized_bytes(value: &impl Serialize) -> Option<u64> {
@@ -2020,38 +2025,63 @@ impl ProviderRequestContext {
                 return Err(ProviderError::EgressDenied);
             }
         } else {
-            let mut tool_result_bytes = tool_result_egress_bytes(request);
-            let tool_result_transfers = self
+            use crate::provider_calls::{
+                ReplayToolSource, replay_tool_source, valid_withheld_replay_output,
+            };
+            let results = tool_result_values(request).collect::<Vec<_>>();
+            let transfers = self
                 .transfers
                 .iter()
                 .filter(|transfer| transfer.manifest.capability == AiEgressCapability::ToolResult)
                 .collect::<Vec<_>>();
-            let mut tool_result_hashes = BTreeSet::new();
-            let mut tool_result_sources = BTreeSet::new();
-            if tool_result_transfers.len() != tool_result_bytes.len()
-                || tool_result_transfers.iter().any(|transfer| {
-                    transfer.manifest.provider_kind != provider_kind.as_str()
-                        || transfer.manifest.model != request.model
-                        || transfer.manifest.stable_hash() != transfer.proof.manifest_hash()
-                        || transfer.manifest.sources.len() != 1
-                        || transfer.manifest.sources[0].kind != "application_tool_result"
-                        || !tool_result_hashes.insert(transfer.manifest.stable_hash())
-                        || !tool_result_sources
-                            .insert(transfer.manifest.sources[0].reference.as_str())
-                })
-            {
+            if transfers.len() != results.len() {
                 return Err(ProviderError::EgressDenied);
             }
-            tool_result_bytes.sort_unstable();
-            let mut transfer_capacities = tool_result_transfers
-                .iter()
-                .map(|transfer| transfer.manifest.estimated_bytes)
-                .collect::<Vec<_>>();
-            transfer_capacities.sort_unstable();
-            if tool_result_bytes
-                .iter()
-                .zip(transfer_capacities)
-                .any(|(required, capacity)| capacity < *required)
+            let mut hashes = BTreeSet::new();
+            let mut references = BTreeSet::new();
+            let mut ordinary_bytes = Vec::new();
+            let mut ordinary_capacities = Vec::new();
+            for ((historical, call_id, tool_id, output), transfer) in
+                results.into_iter().zip(transfers)
+            {
+                let manifest = &transfer.manifest;
+                let [source] = manifest.sources.as_slice() else {
+                    return Err(ProviderError::EgressDenied);
+                };
+                let hash = manifest.stable_hash();
+                if manifest.provider_kind != provider_kind.as_str()
+                    || manifest.model != request.model
+                    || hash != transfer.proof.manifest_hash()
+                    || !hashes.insert(hash)
+                    || !references.insert(source.reference.as_str())
+                {
+                    return Err(ProviderError::EgressDenied);
+                }
+                let bytes = tool_result_egress_bytes(call_id, tool_id, output);
+                if source.kind == "application_tool_result" {
+                    ordinary_bytes.push(bytes);
+                    ordinary_capacities.push(manifest.estimated_bytes);
+                } else if !match replay_tool_source(manifest) {
+                    Some((_, Some(_))) => {
+                        historical
+                            && valid_withheld_replay_output(manifest, call_id, tool_id, output)
+                    }
+                    Some((ReplayToolSource::Subscription(_), None)) => {
+                        manifest.estimated_bytes >= bytes
+                    }
+                    _ => false,
+                } {
+                    return Err(ProviderError::EgressDenied);
+                }
+            }
+            // Ordinary tool proofs have historically allowed capacities in
+            // any order. A withheld marker must match its exact history slot.
+            ordinary_bytes.sort_unstable();
+            ordinary_capacities.sort_unstable();
+            if ordinary_bytes
+                .into_iter()
+                .zip(ordinary_capacities)
+                .any(|(required, capacity)| capacity < required)
             {
                 return Err(ProviderError::EgressDenied);
             }

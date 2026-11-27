@@ -9374,7 +9374,7 @@ mod tests {
                 broker_with_failed_index
                     .dispatch_describe_type(
                         &principal_reference, &run, &session,
-                        &json!({"loadedReference": reference, "typeName": "Parent", "operation": "noSuchOperation"}),
+                        &json!({"loadedReference": reference, "type": "Parent", "operation": "noSuchOperation"}),
                     )
                     .await,
                 Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE
