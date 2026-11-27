@@ -72,14 +72,10 @@ impl AiCapabilitySignature {
             .schema()
             .as_object()
             .ok_or_else(|| invalid("capability plan schema is not an object"))?;
-        let properties = root
-            .get("properties")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let properties = root.get("properties").and_then(Value::as_object);
+        let property = |name: &str| properties?.get(name);
         let required = required_names(root);
-        let selection_paths = properties
-            .get("selections")
+        let selection_paths = property("selections")
             .and_then(|selections| selections.get("items"))
             .and_then(|items| items.get("enum"))
             .and_then(Value::as_array)
@@ -92,8 +88,7 @@ impl AiCapabilitySignature {
             })
             .unwrap_or_default();
         let path_map = |key: &str| {
-            properties
-                .get(key)
+            property(key)
                 .and_then(|value| value.get("properties"))
                 .and_then(Value::as_object)
                 .map(|paths| {
@@ -106,12 +101,11 @@ impl AiCapabilitySignature {
         };
         let relationship_arguments = path_map("relationshipArguments");
         let relationship_maximum_items = path_map("relationshipMaximumItems");
-        let maximum_items = properties
-            .get("maximumItems")
+        let maximum_items = property("maximumItems")
             .map(|schema| (schema.clone(), required.contains("maximumItems")));
         Ok(Self {
             operation,
-            arguments: properties.get("arguments").cloned(),
+            arguments: property("arguments").cloned(),
             plan,
             selection_paths,
             relationship_arguments,

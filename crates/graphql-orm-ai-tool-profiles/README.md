@@ -14,6 +14,9 @@ The next breaking tool-profile release adds continuable keyset pages, compact mu
 and subscription signatures, and capability contract fingerprints.
 See the [migration guide](MIGRATION.md).
 
+AI tool profiles 0.38.0 reduces per-plan compiler work by reusing the validated
+semantic catalogue. See the [migration guide](MIGRATION.md#0380-capability-plan-compilation).
+
 AI tool profiles 0.37.0 adds a streaming iterator over the grouped root
 matches of a ranked entity.
 [Migration guide](MIGRATION.md#0370-grouped-root-iteration)

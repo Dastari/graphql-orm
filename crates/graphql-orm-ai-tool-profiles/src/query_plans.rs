@@ -28,6 +28,7 @@ use crate::{
     AiDisclosureShape, AiError, AiSharedTypePlanSchema, AiToolDescriptor, AiToolId,
     AiToolOperationKind, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
     GraphqlOperationContract, ToolMaturity, canonical_json::canonical_json_bytes,
+    execution::ValidatedSemanticCatalog,
 };
 
 /// Current automatic query-capability contract version.
@@ -875,7 +876,7 @@ pub struct AiGraphqlQueryCapability {
     // Shared by every capability of one catalogue. A private copy per
     // capability made catalogue memory and compile time quadratic in the
     // number of roots.
-    semantic_catalog: Arc<GraphqlSemanticCatalog>,
+    semantic_catalog: ValidatedSemanticCatalog,
     schema: Arc<FinishedSchema>,
     limits: AiGraphqlQueryCapabilityLimits,
     output: QueryOutput,
@@ -1356,9 +1357,6 @@ impl AiGraphqlQueryCapability {
         if page.is_some() && expected_kind != GraphqlOperationKind::Query {
             return Err(configuration_error("only a query compiles as a page").into());
         }
-        self.semantic_catalog
-            .validate()
-            .map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
         if self.operation.kind != expected_kind {
             return Err(configuration_error(
                 "semantic operation kind does not match the plan compiler",
@@ -1577,7 +1575,7 @@ impl AiGraphqlQueryCapability {
             disclosure_schema.fingerprint.clone(),
         )
         .map_err(|_| configuration_error("compiled query contract is invalid"))?
-        .with_semantic_operation_kind(
+        .with_validated_semantic_operation(
             &self.semantic_catalog,
             expected_kind,
             &self.operation.field_name,
@@ -1987,8 +1985,7 @@ impl AiGraphqlQueryCapabilityCatalog {
         options: AiGraphqlQueryCapabilityOptions,
     ) -> Result<Self, AiError> {
         validate_public_token(subgraph_id, "subgraph ID")?;
-        semantic_catalog
-            .validate()
+        let shared_semantic_catalog = ValidatedSemanticCatalog::new(semantic_catalog)
             .map_err(|_| configuration_error("semantic catalogue is invalid"))?;
         if finished_sdl.len() > limits.maximum_schema_bytes as usize {
             return Err(configuration_error("finished GraphQL SDL is too large"));
@@ -2000,7 +1997,6 @@ impl AiGraphqlQueryCapabilityCatalog {
                 semantic_catalog,
             )?,
         );
-        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_query_roots = schema.query_root_fields()?;
         let semantic_query_roots = semantic_catalog
@@ -2379,8 +2375,7 @@ impl AiGraphqlMutationCapabilityCatalog {
         options: AiGraphqlQueryCapabilityOptions,
     ) -> Result<Self, AiError> {
         validate_public_token(subgraph_id, "subgraph ID")?;
-        semantic_catalog
-            .validate()
+        let shared_semantic_catalog = ValidatedSemanticCatalog::new(semantic_catalog)
             .map_err(|_| configuration_error("semantic catalogue is invalid"))?;
         if finished_sdl.len() > limits.maximum_schema_bytes as usize {
             return Err(configuration_error("finished GraphQL SDL is too large"));
@@ -2392,7 +2387,6 @@ impl AiGraphqlMutationCapabilityCatalog {
                 semantic_catalog,
             )?,
         );
-        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_mutation_roots = schema.mutation_root_fields()?;
         let semantic_mutations = semantic_catalog
@@ -3197,8 +3191,7 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
         options: AiGraphqlQueryCapabilityOptions,
     ) -> Result<Self, AiError> {
         validate_public_token(subgraph_id, "subgraph ID")?;
-        semantic_catalog
-            .validate()
+        let shared_semantic_catalog = ValidatedSemanticCatalog::new(semantic_catalog)
             .map_err(|_| configuration_error("semantic catalogue is invalid"))?;
         let limits = AiGraphqlSubscriptionCapabilityLimits::new(
             limits.query,
@@ -3214,7 +3207,6 @@ impl AiGraphqlSubscriptionCapabilityCatalog {
                 semantic_catalog,
             )?,
         );
-        let shared_semantic_catalog = Arc::new(semantic_catalog.clone());
         validate_semantic_entities_against_schema(&schema, semantic_catalog)?;
         let schema_roots = schema.subscription_root_fields()?;
         let operations = semantic_catalog
@@ -4140,7 +4132,7 @@ fn compile_capability(
     target_id: GraphqlExecutionTargetId,
     schema: &Arc<FinishedSchema>,
     schema_fingerprint: &str,
-    semantic_catalog: &Arc<GraphqlSemanticCatalog>,
+    semantic_catalog: &ValidatedSemanticCatalog,
     operation: &GraphqlSemanticOperationDescriptor,
     limits: AiGraphqlQueryCapabilityLimits,
     options: &AiGraphqlQueryCapabilityOptions,
@@ -4247,7 +4239,7 @@ fn compile_capability(
             contract_fingerprint,
             schema_fingerprint: schema_fingerprint.to_owned(),
             target_id,
-            semantic_catalog: Arc::clone(semantic_catalog),
+            semantic_catalog: semantic_catalog.clone(),
             schema: Arc::clone(schema),
             limits,
             output,
@@ -7949,10 +7941,6 @@ fn prevalidate_json_plan(
         }
         Ok(())
     }
-    capability
-        .semantic_catalog
-        .validate()
-        .map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
     let root = capability
         .schema
         .operation_root_field(capability.operation.kind, &capability.operation.field_name)?;
@@ -9638,6 +9626,81 @@ mod tests {
     }
 
     #[test]
+    fn first_id_reads_reuse_validated_semantics_and_match_the_raw_binding() {
+        use crate::execution::RAW_SEMANTIC_BINDINGS;
+
+        let (sdl, semantics) = input_collision_fixture(false);
+        let offset = input_collision_capabilities(&sdl, &semantics)
+            .capabilities()
+            .find(|capability| capability.field_name() == "Subscriptions")
+            .unwrap()
+            .clone();
+        let keyset =
+            keyset_root_with_connection("edges: [SubscriptionEdge!]!, pageInfo: PageInfo!");
+        let plan = json!({
+            "arguments": {},
+            "relationshipArguments": {},
+            "relationshipMaximumItems": {},
+            "selections": ["id"],
+            "maximumItems": 1,
+        });
+
+        for capability in [&offset, &keyset] {
+            let paged = capability.supports_continuation();
+            RAW_SEMANTIC_BINDINGS.with(|count| count.set(0));
+            let compiled = if paged {
+                capability.compile_compact_page(plan.clone(), None)
+            } else {
+                capability.compile_compact(plan.clone())
+            }
+            .expect("first ID read");
+            let raw_binding_calls = RAW_SEMANTIC_BINDINGS.with(std::cell::Cell::get);
+            let descriptor = compiled.descriptor();
+            let actual = descriptor.graphql_contract.as_ref().unwrap();
+            let mut unbound = actual.clone();
+            unbound.semantic_operation = None;
+            let expected = unbound
+                .clone()
+                .with_semantic_operation_kind(
+                    &capability.semantic_catalog,
+                    GraphqlOperationKind::Query,
+                    capability.field_name(),
+                    &descriptor.document,
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(actual).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+            );
+            assert_eq!(raw_binding_calls, 0);
+
+            let mut stale = (*capability.semantic_catalog).clone();
+            stale.fingerprint = "0".repeat(64);
+            assert!(
+                unbound
+                    .with_semantic_operation_kind(
+                        &stale,
+                        GraphqlOperationKind::Query,
+                        capability.field_name(),
+                        &descriptor.document,
+                    )
+                    .is_err()
+            );
+
+            let mut too_many = plan.clone();
+            too_many["maximumItems"] = json!(capability.limits.maximum_list_items + 1);
+            for invalid in [too_many, json!({ "selections": ["id"] })] {
+                let result = if paged {
+                    capability.compile_compact_page(invalid, None)
+                } else {
+                    capability.compile_compact(invalid)
+                };
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
     fn keyset_pages_select_server_page_info_and_take_a_server_cursor() {
         let (sdl, base) = input_collision_fixture(false);
         let sdl = sdl
@@ -10372,7 +10435,7 @@ mod tests {
             );
             let mut staged = public.clone();
             staged.schema = Arc::new(schema.clone());
-            staged.semantic_catalog = Arc::new(semantics.clone());
+            staged.semantic_catalog = ValidatedSemanticCatalog::new(&semantics).unwrap();
             staged.variable_schemas = VariableSchemas::default();
             for result in [staged.compile_compact(compact), staged.compile(nested)] {
                 assert!(matches!(
@@ -11485,7 +11548,7 @@ mod tests {
             );
             let mut staged = capability.clone();
             staged.schema = Arc::new(FinishedSchema::parse(&malicious).unwrap());
-            staged.semantic_catalog = Arc::new(changed);
+            staged.semantic_catalog = ValidatedSemanticCatalog::new(&changed).unwrap();
             staged.variable_schemas = VariableSchemas::default();
             let supplied = json!({"where": {"id": value}}).as_object().unwrap().clone();
             let mut context = CompileContext::new(&staged);
