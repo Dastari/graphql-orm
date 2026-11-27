@@ -12,17 +12,21 @@ supersedes: []
 
 Entity derives validate `default_sort` against persisted columns and render
 identifiers for the selected backend.
-See the [migration guide](../../MIGRATION.md#validate-default-sorts-against-persisted-columns-542).
+See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942).
 
 Generated relation search documents reject statically unreadable target
 fields unless the target field explicitly opts in.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
 
 In the next breaking ORM/macros release, `db_column` must designate one
 physical column. A literal dot requires one delimited identifier, such as
 `db_column = "\"event.code\""` on SQLite and PostgreSQL or
 `db_column = "[event.code]"` on SQL Server. See the
 [migration guide](../../MIGRATION.md#3-declare-dotted-database-columns-explicitly-793).
+
+Version 0.235.0 generates a checked loader lookup for both to-one and
+to-many relation fields. See the
+[migration guide](../../MIGRATION.md#02340-to-02350-optional-relation-loaders).
 
 Version 0.234.0 aligns with the ORM's internal date-time engine update.
 See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).

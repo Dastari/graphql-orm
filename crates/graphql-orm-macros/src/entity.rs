@@ -4402,7 +4402,7 @@ pub(crate) fn default_relation_source_field(parsed_fields: &[ParsedField]) -> St
 
 struct DefaultSort {
     sql: String,
-    terms: Vec<(String, bool)>,
+    terms: Vec<(String, String, bool)>,
 }
 
 /// Render physical columns with optional ASC or DESC. Validate every term
@@ -4465,13 +4465,18 @@ fn render_default_sort(
                     ),
                 )
             })?;
-        let mut term = backend_render_identifier_path(backend, column);
+        let expression = backend_render_identifier_path(backend, column);
+        let mut term = expression.clone();
         if !direction.is_empty() {
             term.push(' ');
             term.push_str(direction);
         }
         sql.push(term);
-        terms.push((declared.clone(), direction.eq_ignore_ascii_case("DESC")));
+        terms.push((
+            declared.clone(),
+            expression,
+            direction.eq_ignore_ascii_case("DESC"),
+        ));
         let Some(next) = next else { break };
         rest = next.trim_start();
     }
@@ -6954,13 +6959,23 @@ fn generate_entity_tokens(
             sql: primary_key_default_sort(backend, &primary_key_cols),
             terms: primary_key_declarations
                 .into_iter()
-                .map(|column| (column, false))
+                .zip(&primary_key_cols)
+                .map(|(column, key)| (column, backend_render_identifier_path(backend, key), false))
                 .collect(),
         },
     };
-    let default_sort_terms = terms.iter().map(|(column, descending)| quote! {
-        ::graphql_orm::graphql::orm::DefaultSortTerm { column: #column, descending: #descending }
-    }).collect::<Vec<_>>();
+    let default_sort_terms = terms
+        .iter()
+        .map(|(column, expression, descending)| {
+            quote! {
+                ::graphql_orm::graphql::orm::DefaultSortTerm {
+                    column: #column,
+                    expression: #expression,
+                    descending: #descending,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
     let primary_key = primary_key_cols.first().map(String::as_str).unwrap_or("id");
     let primary_key_literals: Vec<syn::LitStr> = primary_key_cols
         .iter()

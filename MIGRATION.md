@@ -10,31 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased)
+## Breaking release (unreleased, ORM/macros 0.236.0)
 
-Upgrade ORM and macros together to the next breaking ORM/macros release.
-
-### Validate default sorts against persisted columns (#542)
-
-**Action needed.** Review each entity's `default_sort`. Use a comma-separated
-list of persisted physical column names, each with optional `ASC` or `DESC`.
-A column may be qualified with the entity's own table. Delimit names that
-contain punctuation or whitespace using the database's identifier syntax.
-
-Expressions such as `(SELECT …) ASC`, `pk + 0 DESC` and `column DESC NULLS LAST`
-no longer compile. Sort by `pk DESC` directly for the arithmetic example.
-Move derived values or null ranks into declared database columns and order
-by those columns, or use an explicit backend-specific query for ordering
-that needs SQL expressions.
-
-The rendered sort contributes to the client interpretation fingerprint.
-A schema's fingerprint changes if any entity's rendered sort SQL changes.
-Regenerate affected catalogues and refresh pinned fingerprints before deploying.
-
-Handwritten `DatabaseEntity` implementations that use runtime schema
-conversion must supply `DEFAULT_SORT_TERMS` for a nonempty `DEFAULT_SORT`.
-When constructing `EntityMetadata` directly, set `default_sort_terms` to the
-corresponding column declarations and directions.
+Upgrade ORM and macros together to 0.236.0.
 
 ### 1. Match transaction modes with a wildcard (#833)
 
@@ -174,6 +152,42 @@ once. Pinned rules for brokered mutations stop admitting them after any
 catalogue edit until refreshed (known limitation). See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references).
 No data migration is needed.
+
+### 10. Validate default sorts against persisted columns (#542, #942)
+
+**Action needed.** Review each entity's `default_sort`. Use a comma-separated
+list of persisted physical column names, each with optional `ASC` or `DESC`.
+A column may be qualified with the entity's own table. Delimit names that
+contain punctuation or whitespace using the database's identifier syntax.
+
+Expressions such as `(SELECT …) ASC`, `pk + 0 DESC` and `column DESC NULLS LAST`
+no longer compile. Sort by `pk DESC` directly for the arithmetic example.
+Move derived values or null ranks into declared database columns and order
+by those columns, or use an explicit backend-specific query for ordering
+that needs SQL expressions.
+
+Regenerate catalogues from the upgraded schema and refresh pinned client
+interpretation fingerprints before deploying. Default sort SQL can change
+when reserved or uppercase identifiers are quoted, spacing is normalized,
+or SQL Server qualifiers are bracketed.
+
+For SQL Server entities without an explicit `default_sort`, the runtime
+schema's default-order field IDs now use `table.id` in place of
+`table.[id]`. Regenerate stored runtime schema documents derived from static
+entities and refresh fingerprints and references that use those IDs.
+
+Handwritten `DatabaseEntity` implementations that use runtime schema
+conversion must supply `DEFAULT_SORT_TERMS` for a nonempty `DEFAULT_SORT`.
+When constructing `EntityMetadata` directly, set `default_sort_terms` to the
+corresponding column declarations and directions. Set each term's
+`expression` to its backend-rendered column reference, including any table
+qualifier and omitting the direction.
+
+## 0.234.0 to 0.235.0: Optional relation loaders
+
+**No action.** Upgrade ORM and macros together. Generated relation
+resolvers still use authorized direct queries when a compatible loader
+is absent, including in handwritten schemas.
 
 ## 0.233.0 to 0.234.0: internal date-time engine
 

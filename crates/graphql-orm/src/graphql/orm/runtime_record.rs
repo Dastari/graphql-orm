@@ -289,7 +289,7 @@ impl RuntimeDateTime {
         let parsed = temporal::parse_rfc3339(value).map_err(|error| {
             RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
         })?;
-        Self(parsed.canonical_utc()).portable()
+        Self::from_timestamp(parsed).portable()
     }
 
     /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
@@ -310,7 +310,7 @@ impl RuntimeDateTime {
                 RuntimeRecordErrorCode::InvalidValue,
             ));
         }
-        Self(parsed.canonical_utc()).portable()
+        Self::from_timestamp(parsed).portable()
     }
 
     /// Decode a value a backend already holds, or its serialized form, without
@@ -332,7 +332,7 @@ impl RuntimeDateTime {
             .map_err(|error| {
                 RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
             })?;
-        Ok(Self(parsed.canonical_utc()))
+        Ok(Self::from_timestamp(parsed))
     }
 
     /// Whether this value can be stored and read back on every backend: its
@@ -368,6 +368,10 @@ impl RuntimeDateTime {
         Self(temporal::Timestamp::from_utc(value).canonical_utc())
     }
 
+    pub(super) fn from_timestamp(value: temporal::Timestamp) -> Self {
+        Self(value.canonical_utc())
+    }
+
     pub(super) fn native_timestamp_bind(&self) -> super::SqlValue {
         // Our canonical form includes extended years for previously stored values.
         let value = self
@@ -382,6 +386,11 @@ impl RuntimeDateTime {
             nanos % 1_000_000_000,
         );
         super::SqlValue::native_timestamp(self.0.clone(), normalized.unwrap_or(value))
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub(super) fn into_canonical(self) -> String {
+        self.0
     }
 
     /// Return the canonical UTC RFC 3339 representation.
