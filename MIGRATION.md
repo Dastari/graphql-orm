@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.235.0 to 0.236.0: Bound generated write authority
+## 0.236.0 to 0.237.0: Bound generated write authority
 
 **No action** for supported callers: hosts that use the derives, the
 repository API, `Database::transaction` and
@@ -68,6 +68,12 @@ are still not a supported API. Dispatch a hook from host code with
 `MutationContext::run_mutation_hook`.
 See
 [what the pipeline does and does not enforce](docs/reference/graphql-orm/strict-authorization.md#what-the-pipeline-does-and-does-not-enforce).
+
+## 0.235.0 to 0.236.0: ORM integration test harnesses
+
+**No action.** Upgrade ORM and macros together. For workspace test commands
+that target a moved test binary, use its new harness and filter by the original
+module name. See the [integration test harnesses](docs/development/testing.md#orm-integration-test-harnesses).
 
 ## 0.234.0 to 0.235.0: Optional relation loaders
 
