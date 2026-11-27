@@ -12,6 +12,7 @@ pub(crate) struct Field {
     pub name: String,
     pub description: String,
     pub output_type: TokenStream,
+    // The getter body after authorization, including fallible output validation.
     pub read: TokenStream,
     pub policy: TokenStream,
 }

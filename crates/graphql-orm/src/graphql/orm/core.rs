@@ -27,6 +27,10 @@ pub enum SqlValue {
     StringNull,
     /// Date or timestamp with a legacy text representation.
     Temporal(TemporalValue),
+    /// Typed null for an opted-in offset timestamp field.
+    #[cfg(feature = "time")]
+    #[doc(hidden)]
+    OffsetDateTimeNull,
     /// Binary value.
     Bytes(Vec<u8>),
     /// Typed null for binary values.
@@ -178,7 +182,7 @@ impl SqlValue {
 
 /// A temporal parameter with the text spelling used by compatibility binds.
 ///
-/// Construct one with [`SqlValue::from`] for a chrono value or
+/// Construct one with [`SqlValue::from`] for a chrono or enabled `time` value or
 /// [`SqlValue::temporal_text`] for an explicitly temporal text field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TemporalValue {
@@ -190,6 +194,11 @@ pub struct TemporalValue {
 enum TemporalText {
     Input(String),
     Chrono(String),
+    #[cfg(feature = "time")]
+    TimeOffset {
+        text: String,
+        value: time::OffsetDateTime,
+    },
 }
 
 /// Parsed type of a temporal parameter.
@@ -216,18 +225,30 @@ impl TemporalValue {
     pub fn as_text(&self) -> &str {
         match &self.text {
             TemporalText::Input(text) | TemporalText::Chrono(text) => text,
+            #[cfg(feature = "time")]
+            TemporalText::TimeOffset { text, .. } => text,
         }
     }
 
     pub(crate) fn text_capacity(&self) -> usize {
         match &self.text {
             TemporalText::Input(text) | TemporalText::Chrono(text) => text.capacity(),
+            #[cfg(feature = "time")]
+            TemporalText::TimeOffset { text, .. } => text.capacity(),
         }
     }
 
     #[cfg(feature = "mssql")]
-    pub(crate) fn is_chrono(&self) -> bool {
-        matches!(self.text, TemporalText::Chrono(_))
+    pub(crate) fn is_typed(&self) -> bool {
+        !matches!(self.text, TemporalText::Input(_))
+    }
+
+    #[cfg(all(feature = "time", any(feature = "sqlite", feature = "postgres")))]
+    pub(crate) fn time_offset(&self) -> Option<time::OffsetDateTime> {
+        match self.text {
+            TemporalText::TimeOffset { value, .. } => Some(value),
+            _ => None,
+        }
     }
 }
 
@@ -304,6 +325,51 @@ impl From<chrono::DateTime<chrono::FixedOffset>> for SqlValue {
     }
 }
 
+#[cfg(feature = "time")]
+impl From<time::Date> for SqlValue {
+    fn from(date: time::Date) -> Self {
+        match crate::temporal::to_chrono_date(date) {
+            Some(date) => Self::from(date),
+            None => Self::temporal_text(crate::temporal::display_date(date)),
+        }
+    }
+}
+
+#[cfg(feature = "time")]
+impl From<time::PrimitiveDateTime> for SqlValue {
+    fn from(value: time::PrimitiveDateTime) -> Self {
+        match crate::temporal::to_chrono_naive(value, false) {
+            Some(value) => Self::from(value),
+            None => Self::temporal_text(value.to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "time")]
+impl From<time::OffsetDateTime> for SqlValue {
+    fn from(value: time::OffsetDateTime) -> Self {
+        let kind = chrono::DateTime::from_timestamp(value.unix_timestamp(), value.nanosecond())
+            .zip(chrono::FixedOffset::east_opt(
+                value.offset().whole_seconds(),
+            ))
+            .map_or(TemporalKind::Unparsed, |(utc, offset)| {
+                TemporalKind::DateTimeOffset(utc.with_timezone(&offset))
+            });
+        let text = match &kind {
+            TemporalKind::DateTimeOffset(stamp)
+                if crate::temporal::to_chrono_date(value.date()).is_some() =>
+            {
+                stamp.to_string()
+            }
+            _ => value.to_string(),
+        };
+        Self::Temporal(TemporalValue {
+            kind,
+            text: TemporalText::TimeOffset { text, value },
+        })
+    }
+}
+
 /// Produce a stable internal event/search identifier for a binary entity key.
 ///
 /// SQL bindings always retain the original bytes; this encoding is used only
@@ -344,6 +410,8 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
                 let encoded = serde_json::to_string(value).unwrap_or_default();
                 format!("j{}:{encoded}", encoded.len())
             }
+            #[cfg(feature = "time")]
+            SqlValue::OffsetDateTimeNull => "n".to_string(),
             SqlValue::StringNull
             | SqlValue::BytesNull
             | SqlValue::JsonNull

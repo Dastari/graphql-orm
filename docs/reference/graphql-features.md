@@ -13,8 +13,10 @@ supersedes: []
 The workspace's async-graphql dependency disables defaults and supplies no
 named features. Each package adds only its required capabilities:
 
-- ORM: `dataloader`, `uuid`, `decimal`; `runtime-graphql` explicitly adds
-  `dynamic-schema`. Default SQLite does not enable runtime GraphQL.
+- ORM: `dataloader`, `uuid`, `decimal`. The `runtime-graphql` feature adds
+  `dynamic-schema`, and the `time` feature adds the `time` scalars. Both are
+  opt-in. Per-field timestamp mapping is configured separately.
+  [Host timestamp example](../../crates/graphql-orm/README.md#host-timestamps-with-time).
 - AI: `uuid` and base static objects/inputs/errors/Json. Its ORM dependency
   contributes ORM's required facilities. Attachments do not need `tempfile`.
 - Tool-profiles: base errors and parser; no UUID scalar contract or feature.

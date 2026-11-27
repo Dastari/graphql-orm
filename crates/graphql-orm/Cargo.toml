@@ -27,7 +27,7 @@ postgres = [
   "graphql-orm-macros/postgres",
   "sqlx/runtime-tokio-rustls",
   "sqlx/postgres",
-  "sqlx/chrono",
+  "chrono",
   "sqlx/json",
   "sqlx/rust_decimal",
   "sqlx/uuid",
@@ -35,6 +35,8 @@ postgres = [
 mssql = [
   "graphql-orm-macros/mssql",
   "dep:tiberius",
+  "chrono",
+  "tiberius/chrono",
   "tiberius/time",
   "dep:quick-xml",
   "dep:connection-string",
@@ -42,6 +44,8 @@ mssql = [
   "tokio/net",
   "tokio/rt",
 ]
+chrono = ["sqlx/chrono"]
+time = ["async-graphql/time", "graphql-orm-macros/time", "sqlx/time"]
 runtime-graphql = ["async-graphql/dynamic-schema", "dep:async-trait"]
 change-journal = []
 owned-planning-replay = []
@@ -89,6 +93,7 @@ jsonwebtoken = { workspace = true }
 graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }
+time = { version = "0.3.53", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util"] }
 trybuild = "1"
 proptest = { workspace = true }

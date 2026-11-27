@@ -68,7 +68,7 @@ sha1 = "0.10"
 signal-hook = "0.4"
 sqlx = { version = "0.8", default-features = false }
 syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
-tiberius = { git = "https://github.com/first-assist/tiberius.git", rev = "4d67cd1ad873dba0f42a838925f15fcfd40c2c67", version = "0.12.4", default-features = false, features = ["tds73", "native-tls", "tokio", "tokio-util", "chrono", "rust_decimal", "sql-browser-tokio"] }
+tiberius = { git = "https://github.com/first-assist/tiberius.git", rev = "4d67cd1ad873dba0f42a838925f15fcfd40c2c67", version = "0.12.4", default-features = false, features = ["tds73", "native-tls", "tokio", "tokio-util", "rust_decimal", "sql-browser-tokio"] }
 thiserror = "2"
 tokio = { version = "1" }
 tokio-stream = { version = "0.1", features = ["sync"] }

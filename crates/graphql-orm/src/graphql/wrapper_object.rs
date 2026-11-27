@@ -185,7 +185,10 @@ impl ScalarFieldPolicy {
     }
 }
 
-/// Authorize a generated field before cloning its value and resolving its output type.
+/// Authorize a generated field before reading or validating its value.
+///
+/// Map authorization and read errors to the selected response path before
+/// handing a successful value to its GraphQL output type.
 pub async fn resolve_scalar<B: crate::graphql::orm::OrmBackend, T: OutputType>(
     ctx: &Context<'_>,
     policy: ScalarFieldPolicy,

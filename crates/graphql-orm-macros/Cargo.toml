@@ -27,6 +27,7 @@ schema-export-only = []
 sqlite = []
 postgres = []
 mssql = []
+time = []
 
 [dependencies]
 convert_case = "0.7"

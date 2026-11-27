@@ -21,6 +21,12 @@ for historical context.
   reduce the amount of code compiled per entity.
   [Migration](MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
 
+## Unreleased - ORM/macros 0.241.0
+
+- **No action** (refs #768). Hosts can enable `time` and opt individual
+  `OffsetDateTime` fields into timestamp mapping and lifetime metadata.
+  [Migration](MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+
 ## Unreleased - ORM/macros 0.240.0
 
 - **No action** (refs #677, #724). Generated GraphQL upserts and creates on
