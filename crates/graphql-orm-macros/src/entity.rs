@@ -14,7 +14,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) stable_type_id: Option<String>,
     pub(crate) backend: Option<String>,
     pub(crate) table_name: Option<String>,
-    pub(crate) plural_name: Option<String>,
+    pub(crate) plural_name: Option<syn::LitStr>,
     pub(crate) description: Option<String>,
     pub(crate) classification: String,
     pub(crate) default_sort: Option<String>,
@@ -302,9 +302,7 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let lit: syn::LitStr = value.parse()?;
                     metadata.backend = Some(lit.value());
                 } else if meta.path.is_ident("plural") {
-                    let value = meta.value()?;
-                    let lit: syn::LitStr = value.parse()?;
-                    metadata.plural_name = Some(lit.value());
+                    metadata.plural_name = Some(meta.value()?.parse()?);
                 } else if meta.path.is_ident("description") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -4870,8 +4868,8 @@ fn generate_entity_tokens(
     );
     let plural_name = entity_meta
         .plural_name
-        .as_deref()
-        .map(|s| s.to_string())
+        .as_ref()
+        .map(syn::LitStr::value)
         .unwrap_or_else(|| format!("{}s", struct_name));
     let composite_unique_indexes = entity_meta
         .unique_composite

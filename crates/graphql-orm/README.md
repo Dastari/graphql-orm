@@ -1187,6 +1187,9 @@ schema_roots! {
 }
 ```
 
+The `plural` override also contributes to the Rust type names for
+generated bulk mutation results, such as `UpdateAccountsResult`.
+
 This declares the types and schema builders. Connect a
 `Database::<SqliteBackend>`, choose whether to validate/plan/apply schema, and
 put the resulting `AppSchema` behind an `async-graphql` HTTP integration. A

@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.239.0
+
+- **No action** (refs #542). `GraphQLOperations` reports invalid plural
+  overrides at the attribute value when they prevent generation of bulk
+  mutation result types.
+
 ## Unreleased - ORM/macros 0.238.0
 
 - **No action** (closes #785). Nested read-predicate closures share the

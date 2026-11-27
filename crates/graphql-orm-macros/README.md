@@ -1044,6 +1044,10 @@ struct Note {
 }
 ```
 
+`GraphQLOperations` uses the `plural` override in bulk mutation result
+type names such as `DeleteNotesResult`. If the override prevents
+forming a Rust identifier, the derive points to the string literal.
+
 The generated surface depends on the selected backend and schema policy.
 MSSQL and `external_read_only` schemas retain reads but omit generated
 mutations and subscriptions. Repository-only entities intentionally report no

@@ -1698,7 +1698,8 @@ fn generated_resolver_schema_signature(
         entity_meta.table_name.as_deref().unwrap_or("unknown"),
         entity_meta
             .plural_name
-            .clone()
+            .as_ref()
+            .map(syn::LitStr::value)
             .unwrap_or_else(|| format!("{}s", struct_name)),
         entity_meta.schema_policy,
         entity_meta.auth,
@@ -2123,7 +2124,8 @@ fn generate_graphql_operations_unfiltered(
     let sql_dialect = backend_dialect_tokens(backend);
     let plural_name = entity_meta
         .plural_name
-        .clone()
+        .as_ref()
+        .map(syn::LitStr::value)
         .unwrap_or_else(|| format!("{}s", struct_name));
 
     // Generate optional post-mutation hook code if a hook path is configured.
@@ -2955,13 +2957,28 @@ fn generate_graphql_operations_unfiltered(
     let affected_count_field_name = apply_graphql_case("affectedCount", field_case);
     let upsert_result_type =
         syn::Ident::new(&format!("Upsert{}Result", struct_name), struct_name.span());
-    let update_many_result_type =
-        syn::Ident::new(&format!("Update{}Result", plural_name), struct_name.span());
-    let update_many_result_type_str = format!("Update{}Result", plural_name);
-    let delete_many_result_type =
-        syn::Ident::new(&format!("Delete{}Result", plural_name), struct_name.span());
+    let plural_span = entity_meta
+        .plural_name
+        .as_ref()
+        .map_or_else(|| struct_name.span(), syn::LitStr::span);
+    let bulk_result_ident = |name: &str| {
+        // Token parsing can discard comments. A slash cannot be part of an identifier.
+        if !name.contains('/')
+            && let Ok(mut ident) = syn::parse_str::<syn::Ident>(name)
+        {
+            ident.set_span(struct_name.span());
+            return Ok(ident);
+        }
+        Err(syn::Error::new(
+            plural_span,
+            "graphql_entity plural must form valid Rust identifiers for generated bulk mutation results",
+        ))
+    };
+    let update_many_result_type_str = format!("Update{plural_name}Result");
+    let delete_many_result_type_str = format!("Delete{plural_name}Result");
+    let update_many_result_type = bulk_result_ident(&update_many_result_type_str)?;
+    let delete_many_result_type = bulk_result_ident(&delete_many_result_type_str)?;
     let upsert_result_type_str = format!("Upsert{}Result", struct_name);
-    let delete_many_result_type_str = format!("Delete{}Result", plural_name);
     let subscription_key_arg_name = apply_graphql_case("key", argument_case);
     let subscription_keys_arg_name = apply_graphql_case("keys", argument_case);
     let subscription_keys_arg_description = format!(
