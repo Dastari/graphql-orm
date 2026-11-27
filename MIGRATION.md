@@ -185,8 +185,10 @@ broker execute that resolves to one to
 `OrmAiSubscriptionWaitService::register_wait` with
 `AiSubscriptionWaitRegistrationContext::with_capability_delivery`, on a wait
 service built with `with_capability_broker`, which re-admits the wait through
-the host's broker at every claim, delivery and resumption. The wait
-is classified by the resolved subscription's own fingerprint, keeps the
+the host's broker at every claim, delivery and resumption. Configure the
+broker with `with_revocation_version` and implement admission on checkpoint
+adapters. Host-driven turns must apply final admission before dispatch.
+The wait is classified by the resolved subscription's own fingerprint, keeps the
 schema module 0.86.0 dual identity, and answers the provider's broker call.
 The discover and execute broker fingerprints change in this same release.
 Rule allowlists now admit a subscription by its capability fingerprint, and

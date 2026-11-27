@@ -63,24 +63,37 @@ subscription fingerprints. This completes the #551 broker scope.
    host capability policy decide brokered capabilities). Every service
    instance that claims or resumes waits needs it. A broker-routed wait is
    re-admitted by that broker for its registering run at registration and
-   again at every claim, delivery and resumption. The authoritative final
-   check is made by the coordinator itself: before every provider turn,
-   after cancellation, rule resolution and (supervised) provider-session
-   reclaim, with nothing awaited between its answer and the call into the
-   provider executor, both coordinators call
-   `admit_subscription_results` on their checkpoint adapter. The durable-wait
-   adapters re-admit every adopted broker-routed wait of the run there. A
-   refused result that turn would deliver fails the run (`Failed`,
-   `capability_stale` or `subscription_authority_revoked`); a refused result
-   already in stateless replay history is replaced with a fixed withheld
-   marker (`historicalToolContentWithheld`) and its payload is never resent.
-   The broker reads its current index again after host policy has been
-   awaited. What is guaranteed is ordering: a revocation or catalogue change
-   committed before that final check wins. Nothing is promised once the
-   provider executor has been called (its own pre-transport steps and
-   transport), and a provider that already received a result keeps it. Host
-   checkpoint adapters that do not implement `admit_subscription_results`
-   withhold nothing. An entry removed from the
+   again at every claim, delivery and resumption. Configure the broker with
+   `AiCapabilityDiscoveryBroker::with_revocation_version` and implement
+   `AiCapabilityRevocationVersion`. Publish a strictly larger version with
+   each policy revocation and index replacement. For a multi-write update,
+   report `None` until the new state and version are both visible. A broker
+   lacking the version source cannot register brokered waits.
+
+   Both coordinators call `admit_subscription_results` as their last
+   asynchronous preparation step before invoking the provider executor.
+   Admission reads the version, re-admits every adopted brokered wait,
+   awaits fallback admission, re-checks the admitted index fingerprints,
+   and compares the version again. It repeats the whole pass on drift or an
+   unstable version, with at most three attempts, then fails closed. There
+   is no await between the final successful comparison and return. This
+   orders delivery against changes published before that comparison. The
+   executor and transport run after it.
+
+   Host implementations of both checkpoint-adapter traits must now
+   implement `admit_subscription_results` explicitly. An adapter with no
+   waits returns an empty result. An adapter wrapping the durable-wait
+   service forwards admission. Hosts driving turns themselves must run
+   final admission after other asynchronous preparation, apply it with
+   `AiProviderCallPlan::withhold_subscription_results`, and update their
+   loop guard with `rebind_withheld_history` if the chain changed. Refuse
+   dispatch on either error, and call the executor without awaiting other
+   work. Refused current results fail the turn with `capability_stale` or
+   `subscription_authority_revoked`. Refused stateless history is replaced
+   with a fixed marker. Replay egress manifests account for the marker and
+   checkpoint adoption preserves it on restart.
+
+   An entry removed from the
    current index, replaced, or without the in-process proof closes the wait
    as `capability_stale`, and a host policy denial closes it as
    `subscription_authority_revoked`, including a refusal found while a
@@ -123,13 +136,11 @@ subscription fingerprints. This completes the #551 broker scope.
      mutation whose reviewed approval changed or an index that lost its
      in-process proof.
 
-   The rule decision is made from the loaded binding before any principal
-   or index resolution, so it does not depend on catalogue state. The
-   current-index reachability decision is made before the principal is
-   resolved, and call shape (continuation plan fields, observation, operation
-   name) is validated only after reachability, so a held reference the
-   session no longer reaches never answers with its own reauthorization or
-   malformed-arguments outcome.
+   Both held and unknown references consult the same current index source,
+   and an unavailable index answers `selection_stale`. The session and
+   current index determine reachability before principal resolution and
+   operation selection. Continuation plan fields and observation are
+   validated after reachability.
    `describe_type` applies the same check and answers the same way. A
    continuation of a capability that is never continued (a mutation,
    subscription or static tool) is first checked against the current index

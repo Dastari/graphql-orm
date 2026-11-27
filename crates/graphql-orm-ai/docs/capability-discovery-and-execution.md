@@ -922,6 +922,7 @@ service. For a provider turn whose one call is
 the wait with the delivery attached:
 
 ```rust,ignore
+let broker = Arc::new(broker.with_revocation_version(host_revocation_version));
 let waits = OrmAiSubscriptionWaitService::new(/* ... */)
     .with_capability_broker(broker.clone());
 let context = AiSubscriptionWaitRegistrationContext::new(/* as for a direct wait */)?
@@ -969,16 +970,34 @@ their checkpoint adapter; the durable-wait adapters re-admit every adopted
 broker-routed wait of the run. A refused result the turn would deliver fails
 the run with `capability_stale` or `subscription_authority_revoked`. A
 refused result in stateless replay history is replaced with a fixed
-withheld marker and never resent. The broker reads its current index again
-after host policy awaited. The guarantee is ordering: a change committed
-before that final check wins; nothing is promised once the provider executor
-has been called.
+withheld marker. Egress authorizes the marker and the revised inference
+request, and checkpoint adoption preserves the marker across restarts.
+
+The host implements `AiCapabilityRevocationVersion` and publishes an
+increasing version with every revoking change to broker policy or index.
+Return `None` while an update spans multiple writes. Final admission reads
+the version, checks every adopted brokered wait, awaits the fallback
+adapter, rechecks the admitted index fingerprints, then compares the version
+again. It restarts the entire pass on a change or an unstable version and
+fails closed after three attempts. There is no await between a successful
+final comparison and the admission return. A revocation published before
+that comparison is accounted for. The provider executor and transport run
+after this boundary.
+
+Hosts driving their own turns call `admit_subscription_results` after all
+other asynchronous preparation, apply the decision with
+`AiProviderCallPlan::withhold_subscription_results`, and rebind their
+`AiAgentLoopGuard` if the chain changed. Refuse the turn on either error.
+Dispatch immediately after these steps. Checkpoint adapters must explicitly
+implement admission. Adapters wrapping a wait adopter must delegate to it.
 
 **Unreachable references are stale.** Session clones share loaded state. A
 reference a session does not reach (a subscription or mutation family it
 does not broker, or a static tool outside its list) is `selection_stale` at
-execute, exactly as an unknown reference, so one clone cannot learn what
-another loaded.
+execute and `describe_type`, exactly as an unknown reference. Each
+well-formed reference consults the index source once. Index-source failure
+also gives `selection_stale`. A hidden entry does not reach principal
+resolution or operation selection.
 
 **Two identities.** The wait's tool-call row uses the dual identity of a
 brokered mutation (AI schema module 0.86.0): `tool_id` and

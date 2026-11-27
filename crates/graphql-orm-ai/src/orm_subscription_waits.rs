@@ -289,6 +289,15 @@ impl AiWithheldSubscriptionResult {
     }
 }
 
+/// One unbracketed admission pass: the refused results, and each admitted
+/// broker-routed wait's run with the index set it was admitted against.
+#[derive(Default)]
+struct AdmissionPass {
+    brokered: bool,
+    withheld: Vec<AiWithheldSubscriptionResult>,
+    admitted: Vec<(crate::AiCapabilityRunBinding, String)>,
+}
+
 /// Fenced claim held by one bounded subscription-source worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiSubscriptionWaitClaim {
@@ -524,19 +533,19 @@ struct ProtectedProviderToolCall {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProtectedWaitOutcome {
+pub(crate) struct ProtectedWaitOutcome {
     format_version: u32,
-    waiter_id: AiSubscriptionWaiterId,
+    pub(crate) waiter_id: AiSubscriptionWaiterId,
     outcome_kind: String,
     source_event_fingerprint: Option<String>,
     source_event: Option<Value>,
-    output: Value,
-    egress_manifest: AiEgressManifest,
+    pub(crate) output: Value,
+    pub(crate) egress_manifest: AiEgressManifest,
     egress_decision_id: crate::AiEgressDecisionId,
     pending_continuation: ModelContinuation,
     replay_tool_transfers: Vec<AiEgressManifest>,
-    provider_call_id: String,
-    tool_id: String,
+    pub(crate) provider_call_id: String,
+    pub(crate) tool_id: String,
     provider_turns: u32,
     total_tool_calls: u32,
 }
@@ -2844,6 +2853,7 @@ impl OrmAiSubscriptionWaitService {
             &waiter,
         )
         .await
+        .map(|_| ())
     }
 
     /// Final admission of every broker-routed wait result this run has
@@ -2858,14 +2868,84 @@ impl OrmAiSubscriptionWaitService {
     /// stateless replay history. Direct waits are not broker-routed and are
     /// never returned.
     ///
+    /// Admission reads the broker's revocation version, checks the waits,
+    /// rechecks the admitted index fingerprints, and compares the version
+    /// again. It retries the entire pass at most three times on drift or
+    /// unstable versions. Nothing is awaited after the successful comparison.
+    ///
     /// # Errors
     ///
     /// Fails closed for more than 64 adopted waits in one run, an
-    /// unresolvable principal, unavailable protection, or a malformed wait.
+    /// unresolvable principal, unavailable protection, a malformed wait, or
+    /// broker state that cannot be proved stable.
     pub async fn admit_subscription_results(
         &self,
         lease: &AiRunLease,
     ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
+        self.admit_bracketed(lease, || async { Ok(Vec::new()) })
+            .await
+    }
+
+    /// Final admission bracketed by the broker's revocation version.
+    ///
+    /// Reads the version, checks every adopted broker-routed wait, runs
+    /// `fallback` (another adapter's own admission), then rechecks each
+    /// admitted wait's index fingerprint and compares the version last.
+    /// On change or an unstable version, the entire pass retries up to
+    /// three attempts and then fails closed. Nothing is awaited after the final comparison,
+    /// so a revocation committed before it always wins.
+    pub(crate) async fn admit_bracketed<F, Fut>(
+        &self,
+        lease: &AiRunLease,
+        fallback: F,
+    ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<AiWithheldSubscriptionResult>, AiError>>,
+    {
+        const MAXIMUM_ATTEMPTS: usize = 3;
+        for _ in 0..MAXIMUM_ATTEMPTS {
+            let before = self
+                .capability_broker
+                .as_ref()
+                .and_then(|broker| broker.revocation_version());
+            let pass = Box::pin(self.check_subscription_results(lease)).await?;
+            let mut withheld = pass.withheld;
+            withheld.extend(fallback().await?);
+            // The final comparison: nothing is awaited after it.
+            if !pass.brokered || self.admission_unchanged(before, &pass.admitted) {
+                return Ok(withheld);
+            }
+        }
+        Err(AiError::Conflict)
+    }
+
+    /// Whether the broker's revocation version still reads `before` and
+    /// every admitted wait's current index set is the one it was admitted
+    /// against. Synchronous: no await can separate it from the caller.
+    fn admission_unchanged(
+        &self,
+        before: Option<u64>,
+        admitted: &[(crate::AiCapabilityRunBinding, String)],
+    ) -> bool {
+        let Some(broker) = &self.capability_broker else {
+            return false;
+        };
+        before.is_some()
+            && admitted.iter().all(|(run, fingerprint)| {
+                broker
+                    .current_index_set_fingerprint(run)
+                    .is_ok_and(|current| &current == fingerprint)
+            })
+            && broker.revocation_version() == before
+    }
+
+    /// One unbracketed admission pass over the run's adopted broker-routed
+    /// waits.
+    async fn check_subscription_results(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<AdmissionPass, AiError> {
         const MAXIMUM_ADOPTED_WAITS: usize = 64;
         let waiters = AiSubscriptionWaiterRecord::query(self.custody_database().pool())
             .filter(AiSubscriptionWaiterRecordWhereInput {
@@ -2900,7 +2980,16 @@ impl OrmAiSubscriptionWaitService {
             }
         }
         if brokered.is_empty() {
-            return Ok(Vec::new());
+            return Ok(AdmissionPass::default());
+        }
+        // Brokered waits are admitted only through a broker that versions
+        // its revocations.
+        if self
+            .capability_broker
+            .as_ref()
+            .is_none_or(|broker| !broker.has_revocation_version())
+        {
+            return Err(AiError::Forbidden);
         }
         let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
             .await
@@ -2914,7 +3003,10 @@ impl OrmAiSubscriptionWaitService {
         self.ensure_fresh(&principal, principal_reference)?;
         let scope = record_scope(&session);
         let policy = self.current_protection_policy(&principal, &scope).await?;
-        let mut withheld = Vec::new();
+        let mut pass = AdmissionPass {
+            brokered: true,
+            ..AdmissionPass::default()
+        };
         for (waiter, call) in brokered {
             let request_value = self
                 .open(
@@ -2944,21 +3036,26 @@ impl OrmAiSubscriptionWaitService {
                 &resolved.tool_fingerprint,
             ) {
                 Ok(()) => {
-                    self.readmit_stored_broker_call(Some(resolved), principal_reference, &waiter)
-                        .await
+                    Box::pin(self.readmit_stored_broker_call(
+                        Some(resolved),
+                        principal_reference,
+                        &waiter,
+                    ))
+                    .await
                 }
                 Err(error) => Err(error),
             };
             match admitted {
-                Ok(()) => {}
+                Ok(Some(observed)) => pass.admitted.push(observed),
+                Ok(None) => return Err(AiError::Conflict),
                 Err(error) if capability_is_stale(&error) => {
-                    withheld.push(AiWithheldSubscriptionResult::new(
+                    pass.withheld.push(AiWithheldSubscriptionResult::new(
                         call.provider_call_id,
                         AiSubscriptionResultRefusal::CapabilityStale,
-                    ))
+                    ));
                 }
                 Err(AiError::Forbidden | AiError::NotFound | AiError::ReauthorizationFailed) => {
-                    withheld.push(AiWithheldSubscriptionResult::new(
+                    pass.withheld.push(AiWithheldSubscriptionResult::new(
                         call.provider_call_id,
                         AiSubscriptionResultRefusal::AuthorityRevoked,
                     ));
@@ -2966,7 +3063,7 @@ impl OrmAiSubscriptionWaitService {
                 Err(error) => return Err(error),
             }
         }
-        Ok(withheld)
+        Ok(pass)
     }
 
     async fn consume_wait_adoption(
@@ -3428,6 +3525,11 @@ impl OrmAiSubscriptionWaitService {
         };
         let delivery = context.delivery.as_ref().ok_or(AiError::Forbidden)?;
         let broker = self.capability_broker.as_ref().ok_or(AiError::Forbidden)?;
+        // Final admission compares the broker's revocation version; a broker
+        // without one could never prove a delivery current.
+        if !broker.has_revocation_version() {
+            return Err(AiError::Forbidden);
+        }
         let session = delivery.session();
         if operation != crate::AiCapabilityBrokerOperation::Execute
             || !session.brokers_subscriptions()
@@ -3485,19 +3587,20 @@ impl OrmAiSubscriptionWaitService {
         resolved: Option<&ProtectedResolvedCall>,
         principal_reference: &PrincipalReference,
         waiter: &AiSubscriptionWaiterRecord,
-    ) -> Result<(), AiError> {
+    ) -> Result<Option<(crate::AiCapabilityRunBinding, String)>, AiError> {
         let Some(resolved) = resolved else {
-            return Ok(());
+            return Ok(None);
         };
         let broker = self.capability_broker.as_ref().ok_or(AiError::Forbidden)?;
         let run = resolved.broker_run.binding(waiter)?;
-        Box::pin(broker.readmit_brokered_subscription(
+        let index_fingerprint = Box::pin(broker.readmit_brokered_subscription(
             principal_reference,
             &run,
             &AiToolId::parse(resolved.tool_id.clone())?,
             &resolved.tool_fingerprint,
         ))
-        .await
+        .await?;
+        Ok(Some((run, index_fingerprint)))
     }
 
     /// Proves the registered subscription capability `id` still carries the
@@ -4082,9 +4185,10 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
         &self,
         lease: &AiRunLease,
     ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
-        let mut withheld = self.waits.admit_subscription_results(lease).await?;
-        withheld.extend(self.fallback.admit_subscription_results(lease).await?);
-        Ok(withheld)
+        // The fallback's own admission runs inside the version bracket.
+        self.waits
+            .admit_bracketed(lease, || self.fallback.admit_subscription_results(lease))
+            .await
     }
 
     async fn adopt_tool_batch(
@@ -4126,9 +4230,10 @@ impl crate::AiAgentSupervisedCheckpointControl for AiSupervisedSubscriptionCheck
         &self,
         lease: &AiRunLease,
     ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
-        let mut withheld = self.waits.admit_subscription_results(lease).await?;
-        withheld.extend(self.fallback.admit_subscription_results(lease).await?);
-        Ok(withheld)
+        // The fallback's own admission runs inside the version bracket.
+        self.waits
+            .admit_bracketed(lease, || self.fallback.admit_subscription_results(lease))
+            .await
     }
 
     async fn adopt(
@@ -4569,6 +4674,13 @@ mod tests {
 
     #[async_trait]
     impl crate::AiAgentSupervisedCheckpointControl for EmptySupervisedCheckpointControl {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt(
             &self,
             _lease: &AiRunLease,
@@ -4995,6 +5107,8 @@ mod tests {
         broker: Arc<crate::AiCapabilityDiscoveryBroker>,
         broker_index: Arc<brokered::WaitCurrentIndex>,
         broker_allowed: Arc<AtomicBool>,
+        broker_revoke_after_next: Arc<AtomicBool>,
+        broker_version: Arc<std::sync::atomic::AtomicU64>,
     }
 
     /// The finished SDL of the fixture's one replayable subscription.
@@ -5197,6 +5311,8 @@ mod tests {
             &capability_catalog,
         ));
         let broker_allowed = Arc::new(AtomicBool::new(true));
+        let broker_revoke_after_next = Arc::new(AtomicBool::new(false));
+        let broker_version = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let broker = Arc::new(
             crate::AiCapabilityDiscoveryBroker::new(
                 Arc::new(TestPrincipalResolver {
@@ -5205,11 +5321,18 @@ mod tests {
                     clock: clock.clone(),
                 }),
                 broker_index.clone(),
-                Arc::new(brokered::WaitBrokerAuthority(broker_allowed.clone())),
+                Arc::new(brokered::WaitBrokerAuthority {
+                    allowed: broker_allowed.clone(),
+                    revoke_after_next: broker_revoke_after_next.clone(),
+                    version: broker_version.clone(),
+                }),
                 clock.clone(),
                 Duration::seconds(30),
             )
-            .expect("broker"),
+            .expect("broker")
+            .with_revocation_version(Arc::new(brokered::WaitRevocationVersion(
+                broker_version.clone(),
+            ))),
         );
         let service = Arc::new(
             OrmAiSubscriptionWaitService::new(
@@ -5246,6 +5369,8 @@ mod tests {
             broker,
             broker_index,
             broker_allowed,
+            broker_revoke_after_next,
+            broker_version,
         }
     }
 

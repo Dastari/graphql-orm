@@ -387,30 +387,159 @@ mod frozen_tool_surface_budget_tests {
     }
 }
 
-/// Fixed model-facing replacement of one durable-wait result withheld from
-/// stateless replay history. It carries no part of the payload.
+/// Why a planned provider turn cannot be dispatched after a durable-wait
+/// admission ([`AiProviderCallPlan::withhold_subscription_results`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiSubscriptionAdmissionFailure {
+    /// The turn would deliver a refused result now.
+    Refused(crate::AiSubscriptionResultRefusal),
+    /// Admission or the marker's exact replay and egress binding could not
+    /// be proved.
+    Unapplied,
+}
+
+impl AiSubscriptionAdmissionFailure {
+    /// The durable code a refused turn records.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Refused(refusal) => refusal.code(),
+            Self::Unapplied => "subscription_result_admission_failed",
+        }
+    }
+}
+
+const WITHHELD_REPLAY_SOURCE: &str = "withheld_subscription_result";
+
+#[derive(Clone, Copy)]
+pub(crate) enum ReplayToolSource {
+    Application(uuid::Uuid),
+    Subscription(uuid::Uuid),
+}
+
+/// The durable origin of a replay transfer and, for a withheld marker, the
+/// original manifest hash. A marker does not retain the payload's source.
+pub(crate) fn replay_tool_source(
+    manifest: &AiEgressManifest,
+) -> Option<(ReplayToolSource, Option<&str>)> {
+    let [source] = manifest.sources.as_slice() else {
+        return None;
+    };
+    match source.kind.as_str() {
+        WITHHELD_REPLAY_SOURCE => {
+            let (family, reference) = source.reference.split_once(':')?;
+            let (id, hash) = reference.split_once(':')?;
+            let id = crate::tool_media::source_call_hint(id)?;
+            if !crate::valid_sha256(hash)
+                || source.classification != crate::DataClassification::Public
+                || source.trust != crate::AiSourceTrust::TrustedRuntime
+                || manifest.estimated_tokens != 0
+                || manifest.attachment_count != 0
+            {
+                return None;
+            }
+            let origin = match family {
+                "application" => ReplayToolSource::Application(id),
+                "subscription" => ReplayToolSource::Subscription(id),
+                _ => return None,
+            };
+            Some((origin, Some(hash)))
+        }
+        "application_tool_result" => Some((
+            ReplayToolSource::Application(crate::tool_media::source_call_hint(&source.reference)?),
+            None,
+        )),
+        "application_subscription_event" | "subscription_wait_outcome" => {
+            let (id, _) = source.reference.strip_prefix("v1:")?.split_once(':')?;
+            Some((
+                ReplayToolSource::Subscription(crate::tool_media::source_call_hint(id)?),
+                None,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The fixed model-facing substitute for a withheld replay result. Choose the
+/// largest marker that fits within the original serialized output's size.
 pub(crate) fn withheld_subscription_output(
     refusal: crate::AiSubscriptionResultRefusal,
-) -> serde_json::Value {
-    serde_json::json!({
-        "historicalToolContentWithheld": true,
-        "executionRepeated": false,
-        "reason": refusal.code(),
-    })
+    maximum_bytes: usize,
+) -> Option<serde_json::Value> {
+    [
+        serde_json::json!({
+            "historicalToolContentWithheld": true,
+            "executionRepeated": false,
+            "reason": refusal.code(),
+        }),
+        serde_json::json!({"historicalToolContentWithheld": true}),
+        serde_json::json!({}),
+    ]
+    .into_iter()
+    .find(|marker| marker.to_string().len() <= maximum_bytes)
+}
+
+pub(crate) fn valid_withheld_replay_output(
+    manifest: &AiEgressManifest,
+    output: &serde_json::Value,
+) -> bool {
+    let bytes = output.to_string().len();
+    manifest.estimated_bytes == bytes as u64
+        && [
+            crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+            crate::AiSubscriptionResultRefusal::CapabilityStale,
+        ]
+        .into_iter()
+        .any(|refusal| withheld_subscription_output(refusal, bytes).as_ref() == Some(output))
+}
+
+pub(crate) fn withheld_replay_manifest(
+    original: &AiEgressManifest,
+    marker: &serde_json::Value,
+) -> Option<AiEgressManifest> {
+    let (origin, None) = replay_tool_source(original)? else {
+        return None;
+    };
+    let (family, id) = match origin {
+        ReplayToolSource::Application(id) => ("application", id),
+        ReplayToolSource::Subscription(id) => ("subscription", id),
+    };
+    let mut withheld = original.clone();
+    withheld.sources = vec![crate::AiDataSourceRef {
+        kind: WITHHELD_REPLAY_SOURCE.to_owned(),
+        reference: format!("{family}:{id}:{}", original.stable_hash()),
+        classification: crate::DataClassification::Public,
+        trust: crate::AiSourceTrust::TrustedRuntime,
+    }];
+    withheld.estimated_bytes = u64::try_from(marker.to_string().len()).ok()?;
+    withheld.estimated_tokens = 0;
+    withheld.attachment_count = 0;
+    Some(withheld)
 }
 
 impl AiProviderCallPlan {
-    /// Applies a coordinator's final durable-wait admission to this turn.
+    /// Applies a final durable-wait admission
+    /// ([`crate::AiAgentCheckpointAdopter::admit_subscription_results`]) to
+    /// this planned turn. Hosts that drive provider turns themselves call it
+    /// immediately before [`AiProviderCallExecutor::execute`].
     ///
-    /// A withheld result this turn would deliver now (a tool result in the
-    /// request input) refuses the turn with its refusal. A withheld result in
-    /// stateless replay history is replaced with
-    /// [`withheld_subscription_output`]. Returns whether history changed, so
-    /// the caller rebinds its expected continuation chain.
-    pub(crate) fn withhold_subscription_results(
+    /// A refused result this turn would deliver now (a tool result in the
+    /// request input) refuses the turn. A refused result in stateless replay
+    /// history is replaced with a fixed marker. The result and inference
+    /// manifests are updated for the replacement, within the original budget
+    /// ceiling. Returns whether history changed. An
+    /// [`crate::AiAgentLoopGuard`] must then be rebound to the new chain with
+    /// [`crate::AiAgentLoopGuard::rebind_withheld_history`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiSubscriptionAdmissionFailure::Refused`] for a refused
+    /// result delivered now and [`AiSubscriptionAdmissionFailure::Unapplied`]
+    /// if the marker cannot be bound to the replay transfer and budget.
+    pub fn withhold_subscription_results(
         &mut self,
         withheld: &[crate::AiWithheldSubscriptionResult],
-    ) -> Result<bool, crate::AiSubscriptionResultRefusal> {
+    ) -> Result<bool, AiSubscriptionAdmissionFailure> {
         if withheld.is_empty() {
             return Ok(false);
         }
@@ -424,33 +553,103 @@ impl AiProviderCallPlan {
             if let ModelInputBlock::ToolResult { call_id, .. } = input
                 && let Some(refusal) = refusal_of(call_id)
             {
-                return Err(refusal);
+                return Err(AiSubscriptionAdmissionFailure::Refused(refusal));
             }
         }
-        let mut changed = false;
-        if let Some(ModelContinuation::StatelessConversation { messages, .. }) =
-            &mut self.request.continuation
-        {
-            for message in messages {
-                if let ModelConversationMessage::Tool {
-                    call_id, output, ..
-                } = message
-                    && let Some(refusal) = refusal_of(call_id)
-                {
-                    let marker = withheld_subscription_output(refusal);
-                    if *output != marker {
-                        *output = marker;
-                        changed = true;
-                    }
+        let Some(ModelContinuation::StatelessConversation { messages, .. }) =
+            &self.request.continuation
+        else {
+            return Ok(false);
+        };
+        if !messages.iter().any(|message| {
+            matches!(message, ModelConversationMessage::Tool { call_id, .. }
+                if refusal_of(call_id).is_some())
+        }) {
+            return Ok(false);
+        }
+
+        // Continuations append transfers in message order, then append
+        // transfers for the current input. Stage all changes together so a
+        // failed binding cannot leave a partially rewritten plan.
+        let failed = AiSubscriptionAdmissionFailure::Unapplied;
+        let mut request = self.request.clone();
+        let mut transfers = self.transfers.clone();
+        let Some(ModelContinuation::StatelessConversation { messages, .. }) =
+            &mut request.continuation
+        else {
+            return Err(failed);
+        };
+        let mut tool_transfers = transfers
+            .iter_mut()
+            .filter(|manifest| manifest.capability == AiEgressCapability::ToolResult);
+        let mut replaced_sources = Vec::new();
+        for message in messages {
+            let ModelConversationMessage::Tool {
+                call_id, output, ..
+            } = message
+            else {
+                continue;
+            };
+            let transfer = tool_transfers.next().ok_or(failed)?;
+            let Some(refusal) = refusal_of(call_id) else {
+                continue;
+            };
+            if replay_tool_source(transfer).is_some_and(|(_, hash)| hash.is_some()) {
+                if !valid_withheld_replay_output(transfer, output) {
+                    return Err(failed);
                 }
+                continue;
             }
+            let marker =
+                withheld_subscription_output(refusal, output.to_string().len()).ok_or(failed)?;
+            let replacement = withheld_replay_manifest(transfer, &marker).ok_or(failed)?;
+            replaced_sources.push(transfer.sources[0].clone());
+            *transfer = replacement;
+            *output = marker;
         }
-        Ok(changed)
+        if tool_transfers.count()
+            != request
+                .input
+                .iter()
+                .filter(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+                .count()
+        {
+            return Err(failed);
+        }
+        if replaced_sources.is_empty() {
+            return Ok(false);
+        }
+        let bytes = request
+            .conservative_provider_egress_bytes(&self.provider_kind)
+            .map_err(|_| failed)?;
+        let inference = transfers
+            .iter_mut()
+            .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+            .ok_or(failed)?;
+        if bytes
+            > self
+                .request
+                .conservative_provider_egress_bytes(&self.provider_kind)
+                .map_err(|_| failed)?
+        {
+            return Err(failed);
+        }
+        inference.estimated_bytes = bytes;
+        inference.estimated_tokens = bytes;
+        inference
+            .sources
+            .retain(|source| !replaced_sources.contains(source));
+
+        self.request = request;
+        self.transfers = transfers;
+        self.replan_continuation = None;
+        Ok(true)
     }
 
     /// The chain reference of this plan's continuation and input, as the
-    /// provider executor records it.
-    pub(crate) fn continuation_chain_reference(&self) -> Option<String> {
+    /// provider executor records it and an [`crate::AiAgentLoopGuard`]
+    /// expects it.
+    pub fn continuation_chain_reference(&self) -> Option<String> {
         self.request
             .continuation
             .as_ref()
@@ -1891,10 +2090,29 @@ impl AiProviderCallPlan {
     }
 
     /// Replaces the planned continuation of a test plan.
-    #[cfg(test)]
-    pub(crate) fn test_with_continuation(mut self, continuation: ModelContinuation) -> Self {
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn test_with_continuation(
+        mut self,
+        lease: &AiRunLease,
+        continuation: ModelContinuation,
+    ) -> Self {
         self.request.continuation = Some(continuation);
         self.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        let mut inference = Self::test_chat_plan(lease, self.budget.scope.clone())
+            .transfers
+            .remove(0);
+        inference.model.clone_from(&self.request.model);
+        let mut replay = inference.clone();
+        replay.capability = AiEgressCapability::ToolResult;
+        replay.sources = vec![crate::AiDataSourceRef {
+            kind: "application_tool_result".to_owned(),
+            reference: uuid::Uuid::new_v4().to_string(),
+            classification: crate::DataClassification::Confidential,
+            trust: crate::AiSourceTrust::ResolverResult,
+        }];
+        let mut current = replay.clone();
+        current.sources[0].reference = uuid::Uuid::new_v4().to_string();
+        self.transfers = vec![inference, replay, current];
         self
     }
 
@@ -17391,6 +17609,509 @@ mod tests {
                 .filter(|manifest| manifest.capability == AiEgressCapability::ToolResult)
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withheld_replayed_result_is_dispatched_as_a_marker_and_never_resent_after_restart() {
+        let fixture = fixture_with_event_batches([
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: "stateless-history-call-1".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: "stateless-history-call-1".to_owned(),
+                    arguments: json!({"recordId": "54"}),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 18,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: "stateless-history-call-2".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: "stateless-history-call-2".to_owned(),
+                    arguments: json!({"recordId": "55"}),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 28,
+                    output_tokens: 6,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: "stateless-history-call-3".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: "stateless-history-call-3".to_owned(),
+                    arguments: json!({"recordId": "56"}),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 38,
+                    output_tokens: 7,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
+        ])
+        .await;
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_authorized_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("tool-result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
+        );
+
+        let first_result = provider_executor
+            .execute(&fixture.lease, stateless_tool_plan(&fixture))
+            .await
+            .expect("first stateless provider turn should normalize");
+        assert_eq!(
+            guard
+                .observe_provider_turn(&first_result)
+                .expect("first stateless tool turn should bind"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 0,
+                call_count: 1,
+            }
+        );
+        let (rules, first_provider_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result], 0);
+        let first_lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &first_result,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                first_provider_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("first stateless provider turn should checkpoint");
+        let first_tool = tool_service
+            .execute_read_only(
+                &first_lease,
+                &first_result,
+                AiApplicationToolCallContext::new(
+                    0,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-history",
+                    "stateless-history-provider-turn-1",
+                )
+                .expect("first tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("first historical tool should execute through the resolver");
+        guard
+            .observe_tool_result(&first_tool)
+            .expect("first historical output should match");
+        let first_continuation = guard
+            .continuation()
+            .expect("first stateless batch should continue");
+        let (_, first_batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&first_result], 1);
+        let first_batch_lease = checkpoint_service
+            .persist_tool_batch(
+                first_tool.lease(),
+                &first_result,
+                std::slice::from_ref(&first_tool),
+                &first_continuation,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                first_batch_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("first stateless batch should checkpoint");
+        let first_checkpoint_id = first_batch_lease
+            .latest_checkpoint_id()
+            .expect("first stateless checkpoint should link");
+        let first_consumed_lease = checkpoint_service
+            .consume_before_provider(&first_batch_lease, first_checkpoint_id)
+            .await
+            .expect("first stateless batch should consume exactly once");
+
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("tool should remain registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let next_request = ModelRequest {
+            model: "mock-model".to_owned(),
+            instructions: Vec::new(),
+            input: Vec::new(),
+            continuation: None,
+            continuation_mode: ModelContinuationMode::StatelessReplay,
+            tools: vec![ModelToolDefinition {
+                tool_id: descriptor.id.as_str().to_owned(),
+                provider_name: "records_read".to_owned(),
+                fingerprint: descriptor.fingerprint.clone(),
+                description: descriptor.description.clone(),
+                parameters: descriptor.argument_schema.clone(),
+                strict: true,
+                defer_loading: false,
+            }],
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(100),
+        };
+        let mut next_base = plan(&fixture);
+        next_base.budget.idempotency_key = format!("provider:{}:2", fixture.lease.attempt_id());
+        let mut second_plan = AiProviderCallPlan::new_continuation_with_tools(
+            next_base.provider_kind,
+            next_request,
+            next_base.budget,
+            next_base.transfers,
+            "stateless-history-provider-turn-2",
+            first_continuation,
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("second stateless plan should bind historical output");
+        second_plan.transfers[0].estimated_bytes = second_plan.request.conservative_egress_bytes();
+        let second_result = provider_executor
+            .execute(&first_consumed_lease, second_plan)
+            .await
+            .expect("second stateless provider turn should reauthorize replay");
+        assert_eq!(
+            guard
+                .observe_provider_turn(&second_result)
+                .expect("second stateless tool turn should bind"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 1,
+                call_count: 1,
+            }
+        );
+        let (_, second_provider_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 1);
+        let second_lease = checkpoint_service
+            .persist_provider_turn(
+                &first_consumed_lease,
+                &second_result,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                second_provider_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("second stateless provider turn should checkpoint");
+        let second_tool = tool_service
+            .execute_read_only(
+                &second_lease,
+                &second_result,
+                AiApplicationToolCallContext::new(
+                    1,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-history",
+                    "stateless-history-provider-turn-2",
+                )
+                .expect("second tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("second historical tool should execute through the resolver");
+        guard
+            .observe_tool_result(&second_tool)
+            .expect("second historical output should match");
+        let second_continuation = guard
+            .continuation()
+            .expect("second stateless batch should continue");
+        assert_eq!(second_continuation.replay_transfers().len(), 1);
+        let (_, second_batch_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 2);
+        let second_batch_lease = checkpoint_service
+            .persist_tool_batch(
+                second_tool.lease(),
+                &second_result,
+                std::slice::from_ref(&second_tool),
+                &second_continuation,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                second_batch_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("second stateless batch should checkpoint full history");
+        let second_consumed_lease = checkpoint_service
+            .consume_before_provider(
+                &second_batch_lease,
+                second_batch_lease
+                    .latest_checkpoint_id()
+                    .expect("second stateless checkpoint should link"),
+            )
+            .await
+            .expect("second stateless batch should consume");
+        let mut third_base = plan(&fixture);
+        third_base.budget.idempotency_key = format!("provider:{}:3", fixture.lease.attempt_id());
+        let third_request = ModelRequest {
+            input: Vec::new(),
+            continuation: None,
+            ..second_result.request_snapshot.clone()
+        };
+        let mut third_plan = AiProviderCallPlan::new_continuation_with_tools(
+            third_base.provider_kind,
+            third_request,
+            third_base.budget,
+            third_base.transfers,
+            "stateless-history-provider-turn-3",
+            second_continuation,
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("third stateless plan should bind the replayed history");
+        third_plan.transfers[0].estimated_bytes = third_plan.request.conservative_egress_bytes();
+        let previous_output = match third_plan.request.continuation.as_ref() {
+            Some(ModelContinuation::StatelessConversation { messages, .. }) => messages
+                .iter()
+                .find_map(|message| match message {
+                    ModelConversationMessage::Tool {
+                        call_id, output, ..
+                    } if call_id == "stateless-history-call-1" => Some(output.clone()),
+                    _ => None,
+                })
+                .expect("the first result is replayed history"),
+            _ => panic!("stateless history"),
+        };
+        let previous_bytes = previous_output.to_string().len();
+        let original_transfer = third_plan.transfers[1].clone();
+        let bytes_before = third_plan.egress_requirement().expect("egress quote").bytes;
+        let budget_before = third_plan.budget.estimate;
+        // The coordinator's final admission refused the first result: it is
+        // withheld from the replayed history, and the guard follows.
+        let before = third_plan.continuation_chain_reference();
+        assert_eq!(
+            third_plan.withhold_subscription_results(&[crate::AiWithheldSubscriptionResult::new(
+                "stateless-history-call-1",
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+            )]),
+            Ok(true)
+        );
+        guard
+            .rebind_withheld_history(before.as_deref(), third_plan.continuation_chain_reference())
+            .expect("the guard follows the withheld history");
+        let requirement = third_plan
+            .egress_requirement()
+            .expect("withheld egress quote");
+        assert!(requirement.bytes < bytes_before);
+        assert_eq!(third_plan.transfers[0].estimated_bytes, requirement.bytes);
+        assert_eq!(third_plan.transfers[0].estimated_tokens, requirement.tokens);
+        assert_eq!(third_plan.budget.estimate, budget_before);
+        assert_eq!(
+            third_plan.transfers[1],
+            withheld_replay_manifest(
+                &original_transfer,
+                &withheld_subscription_output(
+                    crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+                    previous_bytes,
+                )
+                .expect("withheld marker"),
+            )
+            .expect("replacement transfer")
+        );
+        assert!(
+            third_plan
+                .transfers
+                .iter()
+                .all(|manifest| { !manifest.sources.contains(&original_transfer.sources[0]) })
+        );
+        let third_result = provider_executor
+            .execute(&second_consumed_lease, third_plan)
+            .await
+            .expect("the real executor dispatches the withheld history");
+        let sent = serde_json::to_string(&third_result.request_snapshot).expect("snapshot");
+        assert!(
+            !sent.contains(&previous_output.to_string()),
+            "the withheld payload never reaches the provider"
+        );
+        let ModelContinuation::StatelessConversation { messages, .. } = third_result
+            .request_snapshot
+            .continuation
+            .as_ref()
+            .expect("stateless history was sent")
+        else {
+            panic!("stateless history");
+        };
+        let withheld_output = messages
+            .iter()
+            .find_map(|message| match message {
+                ModelConversationMessage::Tool {
+                    call_id, output, ..
+                } if call_id == "stateless-history-call-1" => Some(output.clone()),
+                _ => None,
+            })
+            .expect("the history entry stays");
+        assert_eq!(
+            Some(withheld_output),
+            withheld_subscription_output(
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+                previous_bytes,
+            )
+        );
+        assert_eq!(
+            guard
+                .observe_provider_turn(&third_result)
+                .expect("the third turn chains from the withheld history"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 2,
+                call_count: 1,
+            }
+        );
+        // A restarted adopter must accept the marker and preserve it in
+        // the continuation without restoring the original result.
+        let (_, third_provider_rule_usage) = test_rule_checkpoint(
+            &fixture.scope,
+            &[&first_result, &second_result, &third_result],
+            2,
+        );
+        let third_lease = checkpoint_service
+            .persist_provider_turn(
+                &second_consumed_lease,
+                &third_result,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                third_provider_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("third stateless provider turn should checkpoint");
+        let third_tool = tool_service
+            .execute_read_only(
+                &third_lease,
+                &third_result,
+                AiApplicationToolCallContext::new(
+                    2,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-history",
+                    "stateless-history-provider-turn-3",
+                )
+                .expect("third tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("third tool should execute");
+        guard
+            .observe_tool_result(&third_tool)
+            .expect("third output should match");
+        let third_continuation = guard
+            .continuation()
+            .expect("third stateless batch should continue");
+        assert!(
+            !serde_json::to_string(&third_continuation.checkpoint_value())
+                .expect("checkpoint")
+                .contains(&previous_output.to_string()),
+            "the persisted continuation keeps the marker, not the payload"
+        );
+        let (_, third_batch_rule_usage) = test_rule_checkpoint(
+            &fixture.scope,
+            &[&first_result, &second_result, &third_result],
+            3,
+        );
+        let third_batch_lease = checkpoint_service
+            .persist_tool_batch(
+                third_tool.lease(),
+                &third_result,
+                std::slice::from_ref(&third_tool),
+                &third_continuation,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                &rules,
+                third_batch_rule_usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("third stateless batch should checkpoint");
+        let adopted = checkpoint_service
+            .adopt_tool_batch(&third_batch_lease)
+            .await
+            .expect("the restarted adopter validates the marker")
+            .expect("linked stateless history");
+        assert_eq!(
+            adopted.continuation().checkpoint_value(),
+            third_continuation.checkpoint_value()
         );
     }
 

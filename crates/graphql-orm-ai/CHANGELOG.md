@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.170.0 (breaking release)
+## Unreleased - 0.171.0 (breaking release)
 
 - **Breaking (#551).** Generated subscriptions can join the fixed capability
   broker as durable waits. This completes the #551 broker scope: generated
@@ -55,10 +55,14 @@ supersedes: []
   `admit_subscription_results` checkpoint-adapter method. A refused result
   the turn would deliver fails the run with `capability_stale` or
   `subscription_authority_revoked`; one in stateless replay history is
-  replaced with a fixed withheld marker and never resent. Re-admission reads
-  the broker index again after host policy awaited. The guarantee is
-  ordering: a change committed before that check wins; nothing is promised
-  about provider transport. A late refusal while a timeout is delivered
+  replaced with a fixed marker, gets updated egress manifests, and remains
+  withheld after checkpoint adoption. Brokered waits require
+  `AiCapabilityRevocationVersion`. Final admission reads the version,
+  checks all adopted waits, awaits fallback admission, rechecks index
+  fingerprints, and compares the version again. On drift or an unstable
+  version it retries the whole pass up to three attempts and fails closed.
+  Nothing is awaited after the successful comparison. The executor and
+  transport run after this boundary. A late refusal while a timeout is delivered
   closes the wait with its code instead of leaving the claim held. Per-turn, per-run and
   rule-usage limits are those of a direct wait. No schema module change. The discover
   and execute broker definitions change in the same release as broker
@@ -78,12 +82,13 @@ supersedes: []
   instead of `Forbidden`, with or without a continuation. That covers a
   subscription or mutation family it does not broker, a static tool outside
   its list, a generated mutation its bound rules do not admit (decided from
-  the loaded binding's reviewed approval before any index lookup), and an
+  the loaded binding's reviewed approval), and an
   entry the current index no longer lets it reach. A clone sharing loaded
   state, or a run whose rules refuse the mutation, therefore cannot tell a
   hidden capability from an unknown one. `describe_type` answers the same
-  way. Current-index reachability is decided before the principal is
-  resolved, and call shape (continuation plan fields, observation,
+  way. Held and unknown references consult the same index source, and
+  source failure is `selection_stale`. Reachability is decided before the
+  principal is resolved, and call shape (continuation plan fields, observation,
   operation name) is validated only after reachability, so neither a
   principal-resolution outcome nor a shape error distinguishes a held
   reference from an unknown one. A continuation of a capability that is
@@ -97,8 +102,10 @@ supersedes: []
   direct and brokered waits alike.
 - New API: `AiCapabilityBrokerSession::with_brokered_subscriptions`,
   `AiAgentCheckpointAdopter::admit_subscription_results` and
-  `AiAgentSupervisedCheckpointControl::admit_subscription_results` (default:
-  withhold nothing), `OrmAiSubscriptionWaitService::admit_subscription_results`,
+  `AiAgentSupervisedCheckpointControl::admit_subscription_results` (both
+  required), `OrmAiSubscriptionWaitService::admit_subscription_results`,
+  `AiCapabilityRevocationVersion`, `AiCapabilityDiscoveryBroker::with_revocation_version`,
+  `AiProviderCallPlan::withhold_subscription_results`,
   `AiWithheldSubscriptionResult`, `AiSubscriptionResultRefusal`,
   `brokers_subscriptions` and `holds_loaded_subscription`,
   `AiCapabilityExecution::is_subscription_wait`,

@@ -17,6 +17,9 @@ use crate::orm_runs::{
     PreparedCoordinatorCheckpoint, PreparedCoordinatorCheckpointTool, coordinator_checkpoint_hash,
 };
 use crate::persistence::*;
+use crate::provider_calls::{
+    ReplayToolSource, replay_tool_source, valid_withheld_replay_output, withheld_replay_manifest,
+};
 use crate::{
     AiAccessPolicy, AiAdoptedAutomaticMutationBatch, AiAdoptedClassifiedMutationBatch,
     AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
@@ -26,6 +29,7 @@ use crate::{
     AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute, ContentProtectionContext,
     ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind, ToolMaturity,
 };
+use graphql_orm::graphql::orm::{QueryBuilderTrait, UuidFilter};
 
 mod native;
 mod tool_media;
@@ -1678,9 +1682,7 @@ impl OrmAiCoordinatorCheckpointService {
                     scope,
                     result.provider_kind().as_str(),
                     result.provider_model(),
-                ) || transfer.sources.len() != 1
-                    || transfer.sources[0].kind != "application_tool_result"
-                    || crate::tool_media::source_call_hint(&transfer.sources[0].reference).is_none()
+                ) || replay_tool_source(transfer).is_none()
                     || !unique_manifest_hashes.insert(transfer.stable_hash())
                 {
                     return Err(AiError::EgressDenied);
@@ -1773,6 +1775,85 @@ impl OrmAiCoordinatorCheckpointService {
                 },
             )
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn validate_subscription_replay(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        policy: &AiContentProtectionPolicy,
+        waiter: &AiSubscriptionWaiterRecord,
+        call_id: &str,
+        tool_id: &str,
+        output: &serde_json::Value,
+        transfer: &AiEgressManifest,
+        withheld_hash: Option<&str>,
+    ) -> Result<(), AiError> {
+        let adoption =
+            AiSubscriptionWaitAdoptionRecord::query(self.run_service.custody_database().pool())
+                .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
+                    waiter_id: Some(UuidFilter {
+                        eq: Some(waiter.id),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .first()
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        if adoption.run_id != waiter.run_id
+            || adoption.tool_call_id != waiter.tool_call_id
+            || adoption.state != "consumed"
+            || adoption.consumed_at.is_none()
+            || adoption.claimed_attempt_id.is_none()
+            || adoption.claimed_lease_generation.is_none_or(|generation| {
+                generation <= waiter.source_lease_generation
+                    || generation > lease.lease_generation()
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        let value = self
+            .open(
+                policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_subscription_wait_adoptions".to_owned(),
+                    row_id: adoption.id.to_string(),
+                    field: "protected_outcome".to_owned(),
+                    scope: scope.clone(),
+                },
+                adoption
+                    .protected_outcome
+                    .as_ref()
+                    .ok_or(AiError::Conflict)?,
+            )
+            .await?;
+        if canonical_json_hash(&value)? != adoption.outcome_fingerprint {
+            return Err(AiError::Conflict);
+        }
+        let original: crate::orm_subscription_waits::ProtectedWaitOutcome =
+            serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
+        if original.waiter_id.0 != waiter.id
+            || original.provider_call_id != call_id
+            || original.tool_id != tool_id
+        {
+            return Err(AiError::Conflict);
+        }
+        let matches = if let Some(hash) = withheld_hash {
+            let original_bytes = original.output.to_string().len();
+            hash == original.egress_manifest.stable_hash()
+                && output.to_string().len() <= original_bytes
+                && withheld_replay_manifest(&original.egress_manifest, output).as_ref()
+                    == Some(transfer)
+        } else {
+            &original.output == output && &original.egress_manifest == transfer
+        };
+        if !matches {
+            return Err(AiError::EgressDenied);
+        }
+        Ok(())
     }
 
     async fn current_policy(
@@ -2191,29 +2272,50 @@ impl OrmAiCoordinatorCheckpointService {
                     &scope,
                     &reservation.provider_kind,
                     &reservation.provider_model,
-                ) || transfer.sources.len() != 1
-                    || transfer.sources[0].kind != "application_tool_result"
+                ) {
+                    return Err(AiError::EgressDenied);
+                }
+                let (source, withheld_hash) =
+                    replay_tool_source(transfer).ok_or(AiError::EgressDenied)?;
+                if withheld_hash.is_some() && !valid_withheld_replay_output(transfer, &item.output)
                 {
                     return Err(AiError::EgressDenied);
                 }
-                let tool_id = crate::tool_media::source_call_hint(&transfer.sources[0].reference)
-                    .ok_or(AiError::Conflict)?;
+                let database = self.run_service.custody_database();
+                let waiter = if let ReplayToolSource::Subscription(waiter_id) = source {
+                    let waiter = AiSubscriptionWaiterRecord::find_by_id(database, &waiter_id)
+                        .await
+                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                        .ok_or(AiError::NotFound)?;
+                    if waiter.run_id != lease.run_id().0
+                        || waiter.session_id != lease.session_id().0
+                        || waiter.scope_kind != scope.kind
+                        || waiter.scope_id != scope.id
+                        || waiter.tenant_id != scope.tenant_id
+                        || waiter.owner_subject != lease.principal_reference().subject
+                        || waiter.owner_principal_kind != principal_kind
+                        || waiter.state != "adopted"
+                        || waiter.source_lease_generation >= checkpoint.lease_generation
+                    {
+                        return Err(AiError::Conflict);
+                    }
+                    Some(waiter)
+                } else {
+                    None
+                };
+                let tool_id = match (source, &waiter) {
+                    (ReplayToolSource::Application(id), _) => id,
+                    (ReplayToolSource::Subscription(_), Some(waiter)) => waiter.tool_call_id,
+                    (ReplayToolSource::Subscription(_), None) => return Err(AiError::Conflict),
+                };
                 if !durable_ids.insert(tool_id) || !provider_call_ids.insert(item.call_id.as_str())
                 {
                     return Err(AiError::Conflict);
                 }
-                let call =
-                    AiToolCallRecord::find_by_id(self.run_service.custody_database(), &tool_id)
-                        .await
-                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                        .ok_or(AiError::NotFound)?;
-                if transfer.sources[0].reference
-                    != self
-                        .expected_application_source(lease, &scope, &call, &item.output)
-                        .await?
-                {
-                    return Err(AiError::EgressDenied);
-                }
+                let call = AiToolCallRecord::find_by_id(database, &tool_id)
+                    .await
+                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                    .ok_or(AiError::NotFound)?;
                 let step =
                     AiRunStepRecord::find_by_id(self.run_service.custody_database(), &tool_id)
                         .await
@@ -2227,8 +2329,10 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-                let manifest_hash = transfer.stable_hash();
-                let classification = classification_value(transfer.maximum_classification());
+                let (historical_attempt, historical_generation) = waiter.as_ref().map_or(
+                    (checkpoint.attempt_id, checkpoint.lease_generation),
+                    |waiter| (waiter.source_attempt_id, waiter.source_lease_generation),
+                );
                 let turn_budget_matches =
                     match historical_turn_budgets.entry(item.provider_turn_index) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -2249,32 +2353,33 @@ impl OrmAiCoordinatorCheckpointService {
                     || !checkpoint_budget_matches(
                         &historical_budget,
                         lease,
-                        checkpoint.attempt_id,
-                        checkpoint.lease_generation,
+                        historical_attempt,
+                        historical_generation,
                         &scope,
                         &principal_kind,
                         &reservation.provider_kind,
                         &reservation.provider_model,
                     )
                     || call.run_id != lease.run_id().0
-                    || call.lease_generation != checkpoint.lease_generation
+                    || call.lease_generation != historical_generation
                     || call.provider_call_id != item.call_id
                     || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
                     || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
                     || call.provider_response_id.is_some()
                     || call.provider_turn_index != item.provider_turn_index
                     || usize::try_from(call.tool_call_index).ok() != Some(item.tool_call_index)
-                    || call.tool_id != item.tool_id
-                    || call.tool_fingerprint != item.tool_fingerprint
-                    || call.argument_hash != canonical_json_hash(&item.arguments)?
+                    || !crate::orm_tools::row_records_parts(
+                        &call,
+                        &item.call_id,
+                        &item.tool_id,
+                        &item.tool_fingerprint,
+                        &item.arguments,
+                    )?
                     || call.risk != "read_only"
                     || call.approval_id.is_some()
                     || !matches!(call.state.as_str(), "completed" | "execution_failed")
-                    || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
-                    || call.result_egress_decision_id.is_none()
                     || call.authorization_code.is_none()
                     || call.disclosure_schema_fingerprint.is_none()
-                    || call.result_classification.as_deref() != Some(classification)
                     || (call.state == "completed"
                         && (call.authorization_policy_version.is_none()
                             || call.authorization_state_digest.is_none()))
@@ -2284,7 +2389,7 @@ impl OrmAiCoordinatorCheckpointService {
                         .as_deref()
                         .is_none_or(|value| !valid_reference(value))
                     || step.run_id != lease.run_id().0
-                    || step.lease_generation != checkpoint.lease_generation
+                    || step.lease_generation != historical_generation
                     || step.state != call.state
                     || step.finished_at.is_none()
                 {
@@ -2302,20 +2407,71 @@ impl OrmAiCoordinatorCheckpointService {
                         call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
                     )
                     .await?;
-                let result = self
-                    .open(
+                if !crate::orm_tools::protected_arguments_match(
+                    &call,
+                    &item.tool_fingerprint,
+                    &item.arguments,
+                    &arguments,
+                )? {
+                    return Err(AiError::Conflict);
+                }
+                if let Some(waiter) = waiter {
+                    if call.state != "completed"
+                        || call.authorization_code.as_deref() != Some("subscription_wait_adopted")
+                        || call.tool_fingerprint != waiter.capability_fingerprint
+                    {
+                        return Err(AiError::Conflict);
+                    }
+                    self.validate_subscription_replay(
+                        lease,
+                        &scope,
                         &policy,
-                        ContentProtectionContext {
-                            entity: "graphql_orm_ai_tool_calls".to_owned(),
-                            row_id: tool_id.to_string(),
-                            field: "protected_result".to_owned(),
-                            scope: scope.clone(),
-                        },
-                        call.protected_result.as_ref().ok_or(AiError::Conflict)?,
+                        &waiter,
+                        &item.call_id,
+                        &item.tool_id,
+                        &item.output,
+                        transfer,
+                        withheld_hash,
                     )
                     .await?;
-                if arguments != item.arguments || result != item.output {
+                    continue;
+                }
+                if call.provider_tool_id.is_some() {
                     return Err(AiError::Conflict);
+                }
+                let original_manifest_hash = transfer.stable_hash();
+                let manifest_hash = withheld_hash.unwrap_or(&original_manifest_hash);
+                let classification = call
+                    .result_classification
+                    .as_deref()
+                    .ok_or(AiError::Conflict)?;
+                if call.result_egress_manifest_hash.as_deref() != Some(manifest_hash) {
+                    return Err(AiError::EgressDenied);
+                }
+                if withheld_hash.is_none() {
+                    if classification != classification_value(transfer.maximum_classification())
+                        || transfer.sources[0].reference
+                            != self
+                                .expected_application_source(lease, &scope, &call, &item.output)
+                                .await?
+                    {
+                        return Err(AiError::EgressDenied);
+                    }
+                    let result = self
+                        .open(
+                            &policy,
+                            ContentProtectionContext {
+                                entity: "graphql_orm_ai_tool_calls".to_owned(),
+                                row_id: tool_id.to_string(),
+                                field: "protected_result".to_owned(),
+                                scope: scope.clone(),
+                            },
+                            call.protected_result.as_ref().ok_or(AiError::Conflict)?,
+                        )
+                        .await?;
+                    if result != item.output {
+                        return Err(AiError::Conflict);
+                    }
                 }
                 let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
                 let event = AiEgressEventRecord::find_by_id(
@@ -2334,8 +2490,11 @@ impl OrmAiCoordinatorCheckpointService {
                     || event.capability != "tool_result"
                     || event.classification != classification
                     || event.outcome != "allow"
-                    || u64::try_from(event.estimated_bytes).ok() != Some(transfer.estimated_bytes)
-                    || u64::try_from(event.estimated_tokens).ok() != Some(transfer.estimated_tokens)
+                    || (withheld_hash.is_none()
+                        && (u64::try_from(event.estimated_bytes).ok()
+                            != Some(transfer.estimated_bytes)
+                            || u64::try_from(event.estimated_tokens).ok()
+                                != Some(transfer.estimated_tokens)))
                 {
                     return Err(AiError::EgressDenied);
                 }
@@ -2489,6 +2648,15 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
 
 #[async_trait]
 impl AiAgentCheckpointAdopter for OrmAiCoordinatorCheckpointService {
+    /// The canonical adapter resumes no durable waits, so it withholds no
+    /// subscription result.
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        Ok(Vec::new())
+    }
+
     async fn adopt_tool_batch(
         &self,
         lease: &AiRunLease,
