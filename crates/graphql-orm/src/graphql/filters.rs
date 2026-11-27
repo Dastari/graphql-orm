@@ -551,6 +551,18 @@ pub struct DateFilter {
 }
 
 impl DateFilter {
+    /// Whether this filter uses the database clock.
+    #[doc(hidden)]
+    pub fn has_calendar_predicate(&self) -> bool {
+        self.in_past == Some(true)
+            || self.in_future == Some(true)
+            || self.is_today == Some(true)
+            || self.recent_days.is_some()
+            || self.within_days.is_some()
+            || self.gte_relative.is_some()
+            || self.lte_relative.is_some()
+    }
+
     /// Validate bounds shared by GraphQL-decoded and programmatically built filters.
     pub fn validate(&self) -> crate::Result<()> {
         if let Some(days) = self.recent_days {

@@ -4550,6 +4550,8 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// for a global opt-out. Defaults to `false`: denial fails the mutation.
     /// Applies to optional create/upsert fields and supplied update fields;
     /// required create/upsert fields and repository checks remain strict.
+    /// A denied conflict field on the insert branch of an upsert returns
+    /// `FORBIDDEN` even if the field is optional and this method returns `true`.
     /// Policy errors always propagate, regardless of this setting.
     fn ignore_denied_field_write(
         &self,
