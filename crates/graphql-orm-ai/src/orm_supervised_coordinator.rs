@@ -530,8 +530,10 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
     /// hand-off to the provider executor. A returned result that the turn
     /// would deliver now fails the run with the result's code; one in
     /// stateless replay history is replaced with a fixed withheld marker.
-    /// The default withholds nothing; the durable-wait adapters re-admit
-    /// every adopted broker-routed wait.
+    /// It is required so every adapter decides it explicitly: an adapter
+    /// that resumes no durable waits returns no results; the durable-wait
+    /// adapters re-admit every adopted broker-routed wait, and an adapter
+    /// that wraps one must delegate to it.
     ///
     /// # Errors
     ///
@@ -539,14 +541,21 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
     /// coordinator then fails the run closed.
     async fn admit_subscription_results(
         &self,
-        _lease: &AiRunLease,
-    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
-        Ok(Vec::new())
-    }
+        lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError>;
 }
 
 #[async_trait]
 impl AiAgentSupervisedCheckpointControl for OrmAiCoordinatorCheckpointService {
+    /// The canonical adapter resumes no durable waits, so it withholds no
+    /// subscription result.
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        Ok(Vec::new())
+    }
+
     async fn adopt_classified(
         &self,
         lease: &AiRunLease,
@@ -2911,6 +2920,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentSupervisedCheckpointControl for TestCheckpointControl {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt(
             &self,
             lease: &AiRunLease,
@@ -2951,6 +2967,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentSupervisedCheckpointControl for TestSubscriptionCheckpointControl {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt(
             &self,
             _lease: &AiRunLease,
@@ -3120,6 +3143,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentSupervisedCheckpointControl for TestAutomaticCheckpointControl {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt(
             &self,
             _lease: &AiRunLease,
@@ -4521,6 +4551,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentSupervisedCheckpointControl for RefusingSubscriptionCheckpointControl {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt(
             &self,
             _lease: &AiRunLease,

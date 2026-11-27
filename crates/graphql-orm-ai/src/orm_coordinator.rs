@@ -1240,8 +1240,10 @@ pub trait AiAgentCheckpointAdopter: Send + Sync {
     /// hand-off to the provider executor. A returned result that the turn
     /// would deliver now fails the run with the result's code; one in
     /// stateless replay history is replaced with a fixed withheld marker.
-    /// The default withholds nothing; the durable-wait adapters re-admit
-    /// every adopted broker-routed wait.
+    /// It is required so every adapter decides it explicitly: an adapter
+    /// that resumes no durable waits returns no results; the durable-wait
+    /// adapters re-admit every adopted broker-routed wait, and an adapter
+    /// that wraps one must delegate to it.
     ///
     /// # Errors
     ///
@@ -1249,10 +1251,8 @@ pub trait AiAgentCheckpointAdopter: Send + Sync {
     /// coordinator then fails the run closed.
     async fn admit_subscription_results(
         &self,
-        _lease: &AiRunLease,
-    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
-        Ok(Vec::new())
-    }
+        lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError>;
 }
 
 #[async_trait]
@@ -2726,7 +2726,7 @@ pub(crate) fn apply_subscription_admission(
     provider_plan: &mut AiProviderCallPlan,
     guard: &mut AiAgentLoopGuard,
 ) -> Result<(), &'static str> {
-    const FAILED: &str = "subscription_result_admission_failed";
+    const FAILED: &str = crate::AiSubscriptionAdmissionFailure::Unapplied.code();
     let withheld = admission.map_err(|_| FAILED)?;
     let before = provider_plan.continuation_chain_reference();
     match provider_plan.withhold_subscription_results(&withheld) {
@@ -2737,7 +2737,7 @@ pub(crate) fn apply_subscription_admission(
                 provider_plan.continuation_chain_reference(),
             )
             .map_err(|_| FAILED),
-        Err(refusal) => Err(refusal.code()),
+        Err(failure) => Err(failure.code()),
     }
 }
 
@@ -3423,6 +3423,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentCheckpointAdopter for TestCheckpointAdopter {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt_tool_batch(
             &self,
             lease: &AiRunLease,
@@ -3672,6 +3679,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentCheckpointAdopter for TestCheckpointWriter {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt_tool_batch(
             &self,
             _lease: &AiRunLease,
@@ -5794,8 +5808,10 @@ mod tests {
         assert_eq!(
             output,
             &crate::provider_calls::withheld_subscription_output(
-                crate::AiSubscriptionResultRefusal::AuthorityRevoked
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+                json!({"event": {"secret": "payload"}}).to_string().len(),
             )
+            .expect("a marker no longer than the output fits")
         );
         assert!(!output.to_string().contains("payload"));
         let after = plan
@@ -5847,6 +5863,13 @@ mod tests {
 
     #[async_trait]
     impl AiAgentCheckpointAdopter for RefusingCheckpointAdopter {
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            Ok(Vec::new())
+        }
+
         async fn adopt_tool_batch(
             &self,
             _lease: &AiRunLease,

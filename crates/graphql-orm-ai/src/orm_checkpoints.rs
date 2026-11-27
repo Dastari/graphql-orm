@@ -2489,6 +2489,15 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
 
 #[async_trait]
 impl AiAgentCheckpointAdopter for OrmAiCoordinatorCheckpointService {
+    /// The canonical adapter resumes no durable waits, so it withholds no
+    /// subscription result.
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        Ok(Vec::new())
+    }
+
     async fn adopt_tool_batch(
         &self,
         lease: &AiRunLease,

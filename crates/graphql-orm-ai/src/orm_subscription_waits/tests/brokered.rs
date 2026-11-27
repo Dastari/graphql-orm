@@ -79,7 +79,16 @@ impl crate::AiCurrentCapabilityIndex for WaitCurrentIndex {
 }
 
 /// Host capability policy that admits every entry while `allowed` holds.
-pub(super) struct WaitBrokerAuthority(pub(super) Arc<AtomicBool>);
+///
+/// When `revoke_after_next` is set, the next decision is still the current
+/// one, and then the host revokes, bumping the revocation version as its
+/// contract requires: a revocation that lands right after one wait was
+/// admitted, while the next is being checked.
+pub(super) struct WaitBrokerAuthority {
+    pub(super) allowed: Arc<AtomicBool>,
+    pub(super) revoke_after_next: Arc<AtomicBool>,
+    pub(super) version: Arc<std::sync::atomic::AtomicU64>,
+}
 
 #[async_trait]
 impl crate::AiCapabilityAuthorityPolicy for WaitBrokerAuthority {
@@ -90,10 +99,25 @@ impl crate::AiCapabilityAuthorityPolicy for WaitBrokerAuthority {
         _entry: &crate::AiCapabilityIndexEntry,
         _run: &AiCapabilityRunBinding,
     ) -> Result<crate::AiCapabilityAuthorityDecision, AiError> {
+        let allowed = self.allowed.load(Ordering::SeqCst);
+        if self.revoke_after_next.swap(false, Ordering::SeqCst) {
+            self.version.fetch_add(1, Ordering::SeqCst);
+            self.allowed.store(false, Ordering::SeqCst);
+        }
         Ok(crate::AiCapabilityAuthorityDecision {
-            allowed: self.0.load(Ordering::SeqCst),
+            allowed,
             policy_fingerprint: "wait-broker-policy-v1".to_owned(),
         })
+    }
+}
+
+/// The host's revocation version: a counter the tests bump with every
+/// revocation.
+pub(super) struct WaitRevocationVersion(pub(super) Arc<std::sync::atomic::AtomicU64>);
+
+impl crate::AiCapabilityRevocationVersion for WaitRevocationVersion {
+    fn current_version(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -1624,4 +1648,272 @@ async fn sqlite_final_admission_withholds_delivered_brokered_results_after_a_cha
             crate::AiSubscriptionResultRefusal::CapabilityStale,
         )]
     );
+}
+
+impl WaitFixture {
+    /// Registers, delivers and consumes one brokered wait per provider turn
+    /// in one run, and returns the resumed lease after the last consumption.
+    async fn deliver_in_one_run(&self, call_ids: &[&str]) -> AiRunLease {
+        let delivery = self.brokered_delivery(true);
+        let control = AiSupervisedSubscriptionCheckpointControl::new(
+            self.service.clone(),
+            Arc::new(EmptySupervisedCheckpointControl),
+        );
+        let mut lease = self.start_lease().await;
+        for (turn, call_id) in call_ids.iter().enumerate() {
+            let loaded = self.load_subscription(&delivery, &lease).await;
+            let result = self.broker_execute_result(&delivery, &lease, &[call_id], &loaded);
+            self.register_result(
+                &self.service,
+                &self.rules,
+                &lease,
+                result,
+                Some(delivery.clone()),
+                test_rule_usage(),
+            )
+            .await
+            .expect("brokered wait registers");
+            self.source
+                .push(self.event(i64::try_from(turn).expect("turn") + 1, "wanted"));
+            assert!(matches!(
+                self.service.process_next("one-run-worker").await,
+                Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+            ));
+            let resumed = self.resume().await;
+            let Some(crate::AiAdoptedClassifiedMutationBatch::Subscription(adopted)) =
+                crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &resumed)
+                    .await
+                    .expect("adoption validates")
+            else {
+                panic!("subscription checkpoint classifies");
+            };
+            lease = crate::AiAgentSupervisedCheckpointControl::consume_subscription(
+                &control, &resumed, &adopted,
+            )
+            .await
+            .expect("the result is consumed");
+        }
+        lease
+    }
+}
+
+/// A fallback adapter whose own admission applies `change` once while it
+/// runs: a host change that lands after every wait was checked.
+struct ChangingFallback {
+    change: Box<dyn Fn() + Send + Sync>,
+    remaining: AtomicUsize,
+}
+
+#[async_trait]
+impl crate::AiAgentSupervisedCheckpointControl for ChangingFallback {
+    async fn adopt(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Option<crate::AiAdoptedSupervisedToolBatch>, AiError> {
+        Ok(None)
+    }
+
+    async fn consume(
+        &self,
+        _lease: &AiRunLease,
+        _adopted: &crate::AiAdoptedSupervisedToolBatch,
+    ) -> Result<AiRunLease, AiError> {
+        Err(AiError::Conflict)
+    }
+
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        if self
+            .remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            (self.change)();
+        }
+        tokio::task::yield_now().await;
+        Ok(Vec::new())
+    }
+}
+
+fn withheld_ids(
+    withheld: &[crate::AiWithheldSubscriptionResult],
+    refusal: crate::AiSubscriptionResultRefusal,
+) -> BTreeSet<String> {
+    assert!(
+        withheld.iter().all(|result| result.refusal() == refusal),
+        "{withheld:?}"
+    );
+    withheld
+        .iter()
+        .map(|result| result.provider_call_id().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn sqlite_a_revocation_while_a_later_wait_is_checked_withholds_every_wait() {
+    let fixture = wait_fixture().await;
+    let lease = fixture
+        .deliver_in_one_run(&["first-wait-call", "second-wait-call"])
+        .await;
+    let both = BTreeSet::from(["first-wait-call".to_owned(), "second-wait-call".to_owned()]);
+    assert!(
+        fixture
+            .service
+            .admit_subscription_results(&lease)
+            .await
+            .expect("admission decides")
+            .is_empty(),
+        "both admitted while current"
+    );
+    // The first wait checked is admitted, and the host revokes before the
+    // second is checked. Without the version bracket the first would pass.
+    fixture
+        .broker_revoke_after_next
+        .store(true, Ordering::SeqCst);
+    let withheld = fixture
+        .service
+        .admit_subscription_results(&lease)
+        .await
+        .expect("admission decides");
+    assert_eq!(
+        withheld_ids(
+            &withheld,
+            crate::AiSubscriptionResultRefusal::AuthorityRevoked
+        ),
+        both
+    );
+}
+
+#[tokio::test]
+async fn sqlite_a_change_during_the_fallback_admission_withholds_every_wait() {
+    // Revoked policy (with a version bump), and a replaced index (without
+    // one: the index fingerprint comparison catches it).
+    for revoke_policy in [true, false] {
+        let fixture = wait_fixture().await;
+        let lease = fixture
+            .deliver_in_one_run(&["first-wait-call", "second-wait-call"])
+            .await;
+        let change: Box<dyn Fn() + Send + Sync> = if revoke_policy {
+            let allowed = fixture.broker_allowed.clone();
+            let version = fixture.broker_version.clone();
+            Box::new(move || {
+                version.fetch_add(1, Ordering::SeqCst);
+                allowed.store(false, Ordering::SeqCst);
+            })
+        } else {
+            let index = fixture.broker_index.clone();
+            let without = Arc::new(WaitCurrentIndex::index(
+                &fixture.target_id,
+                &fixture.semantics,
+                &fixture.capability_catalog,
+                false,
+            ));
+            Box::new(move || {
+                *index.0.write().expect("index lock") = Arc::clone(&without);
+            })
+        };
+        let control = AiSupervisedSubscriptionCheckpointControl::new(
+            fixture.service.clone(),
+            Arc::new(ChangingFallback {
+                change,
+                remaining: AtomicUsize::new(1),
+            }),
+        );
+        let withheld =
+            crate::AiAgentSupervisedCheckpointControl::admit_subscription_results(&control, &lease)
+                .await
+                .expect("admission decides");
+        let refusal = if revoke_policy {
+            crate::AiSubscriptionResultRefusal::AuthorityRevoked
+        } else {
+            crate::AiSubscriptionResultRefusal::CapabilityStale
+        };
+        assert_eq!(
+            withheld_ids(&withheld, refusal),
+            BTreeSet::from(["first-wait-call".to_owned(), "second-wait-call".to_owned()]),
+            "revoke policy {revoke_policy}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sqlite_admission_that_never_settles_fails_closed() {
+    let fixture = wait_fixture().await;
+    let lease = fixture.deliver_in_one_run(&["unsettled-wait-call"]).await;
+    let version = fixture.broker_version.clone();
+    let control = AiSupervisedSubscriptionCheckpointControl::new(
+        fixture.service.clone(),
+        Arc::new(ChangingFallback {
+            change: Box::new(move || {
+                version.fetch_add(1, Ordering::SeqCst);
+            }),
+            remaining: AtomicUsize::new(usize::MAX),
+        }),
+    );
+    assert!(matches!(
+        crate::AiAgentSupervisedCheckpointControl::admit_subscription_results(&control, &lease)
+            .await,
+        Err(AiError::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_a_broker_without_a_revocation_version_cannot_broker_waits() {
+    let fixture = wait_fixture().await;
+    let unversioned = Arc::new(
+        crate::AiCapabilityDiscoveryBroker::new(
+            Arc::new(TestPrincipalResolver {
+                principal: fixture.principal.clone(),
+                active: fixture.principal_active.clone(),
+                clock: fixture.clock.clone(),
+            }),
+            fixture.broker_index.clone(),
+            Arc::new(WaitBrokerAuthority {
+                allowed: fixture.broker_allowed.clone(),
+                revoke_after_next: Arc::new(AtomicBool::new(false)),
+                version: fixture.broker_version.clone(),
+            }),
+            fixture.clock.clone(),
+            Duration::seconds(30),
+        )
+        .expect("broker"),
+    );
+    let runtime = subscription_runtime(
+        &fixture.database,
+        &fixture.principal,
+        &fixture.principal_active,
+        &fixture.access_allowed,
+        &fixture.clock,
+        &fixture.target_id,
+        &fixture.capability_catalog,
+        Some(&fixture.capability_catalog),
+    )
+    .await;
+    let service = OrmAiSubscriptionWaitService::new(
+        fixture.run_service.clone(),
+        Arc::new(runtime),
+        fixture.sources.clone(),
+        Arc::new(TestRules(fixture.rules.clone())),
+        Arc::new(TestEgressAudit),
+        fixture.clock.clone(),
+        AiSubscriptionWaitLimits::default(),
+    )
+    .with_capability_broker(unversioned);
+    assert!(matches!(
+        fixture
+            .register_brokered(&service, &fixture.rules, "unversioned-call")
+            .await,
+        Err(AiError::Forbidden)
+    ));
+    // A run that already holds a delivered brokered wait cannot be admitted
+    // through it either.
+    let lease = fixture.deliver_in_one_run(&["versioned-call"]).await;
+    assert!(matches!(
+        service.admit_subscription_results(&lease).await,
+        Err(AiError::Forbidden)
+    ));
 }

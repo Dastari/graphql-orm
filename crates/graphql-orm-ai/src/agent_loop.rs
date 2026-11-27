@@ -811,7 +811,7 @@ impl AiAgentLoopGuard {
     ///
     /// Returns [`AiError::Conflict`] unless the guard expected exactly
     /// `before`.
-    pub(crate) fn rebind_withheld_history(
+    pub fn rebind_withheld_history(
         &mut self,
         before: Option<&str>,
         after: Option<String>,

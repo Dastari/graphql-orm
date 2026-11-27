@@ -1086,6 +1086,22 @@ pub trait AiCurrentCapabilityIndex: Send + Sync {
     ) -> Result<Arc<AiCapabilityIndex>, AiError>;
 }
 
+/// A host-owned, monotonically increasing version of everything that can
+/// revoke a brokered capability: host capability policy and the broker's
+/// current index.
+///
+/// The host must increase it, before the change takes effect, whenever host
+/// capability policy may stop admitting a brokered entry or the current
+/// index is replaced. It is read synchronously and must be cheap, for
+/// example an atomic counter. It is not authority: admission still decides
+/// every entry against current policy and index. The durable-wait admission
+/// of brokered subscriptions compares it before and after its checks
+/// ([`crate::OrmAiSubscriptionWaitService::admit_subscription_results`]).
+pub trait AiCapabilityRevocationVersion: Send + Sync {
+    /// The current version.
+    fn current_version(&self) -> u64;
+}
+
 /// Supplies the current canonical set of independently compiled indexes.
 ///
 /// Implementations may cache immutable catalogue data but must never cache an
@@ -1226,6 +1242,7 @@ pub struct AiCapabilityDiscoveryBroker {
     loaded_ttl: Duration,
     discovery_cache: Option<CapabilityDiscoveryCache>,
     maximum_discovery_authorizations: Option<usize>,
+    revocation_version: Option<Arc<dyn AiCapabilityRevocationVersion>>,
 }
 
 impl AiCapabilityDiscoveryBroker {
@@ -1257,7 +1274,43 @@ impl AiCapabilityDiscoveryBroker {
             loaded_ttl,
             discovery_cache: None,
             maximum_discovery_authorizations: None,
+            revocation_version: None,
         })
+    }
+
+    /// Supplies the host's revocation version of this broker's policy and
+    /// index ([`AiCapabilityRevocationVersion`]).
+    ///
+    /// Required for brokered subscriptions: the durable-wait service refuses
+    /// to register a broker-routed wait through a broker without it, and its
+    /// final admission fails closed. Other broker operations do not use it.
+    #[must_use]
+    pub fn with_revocation_version(
+        mut self,
+        version: Arc<dyn AiCapabilityRevocationVersion>,
+    ) -> Self {
+        self.revocation_version = Some(version);
+        self
+    }
+
+    /// The host's current revocation version, when one is configured.
+    pub(crate) fn revocation_version(&self) -> Option<u64> {
+        self.revocation_version
+            .as_ref()
+            .map(|version| version.current_version())
+    }
+
+    /// The fingerprint of the current index set for `run`, read
+    /// synchronously.
+    pub(crate) fn current_index_set_fingerprint(
+        &self,
+        run: &AiCapabilityRunBinding,
+    ) -> Result<String, AiError> {
+        Ok(self
+            .current_indexes
+            .current_index_set(run)?
+            .fingerprint()
+            .to_owned())
     }
 
     /// Enables bounded process-local retention of discovery results beyond a
@@ -1865,6 +1918,31 @@ impl AiCapabilityDiscoveryBroker {
         loaded: &AiLoadedCapabilityBinding,
         operation: Option<&str>,
     ) -> Result<LoadedTarget, AiError> {
+        self.verify_loaded_fence(principal_reference, run, loaded)?;
+        // Whether the session still reaches the entry is decided from the
+        // current index before the principal is resolved and before the
+        // operation is selected, so a held reference it no longer reaches
+        // answers as an unknown one, without a principal-resolution or
+        // operation outcome of its own. A host index source that fails here
+        // answers the same way. (Consulting the index at all is work an
+        // unknown reference does not cause; that timing difference reveals
+        // only that this session holds a loaded reference.)
+        let indexes = self
+            .current_indexes
+            .current_index_set(run)
+            .map_err(|_| stale_selection())?;
+        let (index, entry) = indexes
+            .entry(&loaded.capability_id)
+            .ok_or_else(stale_capability)?;
+        if entry.kind != loaded.capability_kind {
+            return Err(AiError::Forbidden);
+        }
+        // An entry this session no longer reaches (its bound rules refuse a
+        // mutation, or the index lost its in-process proof) is the same
+        // stale selection as an unknown reference.
+        if !session.brokers_entry(index, entry) {
+            return Err(stale_selection());
+        }
         let selected = if loaded.capability_kind == AiCapabilityKind::GeneratedEntity {
             let selected = match operation {
                 Some(name) => loaded
@@ -1878,24 +1956,6 @@ impl AiCapabilityDiscoveryBroker {
         } else {
             None
         };
-        self.verify_loaded_fence(principal_reference, run, loaded)?;
-        // Whether the session still reaches the entry is decided from the
-        // current index before the principal is resolved, so a held
-        // reference it no longer reaches answers as an unknown one, without
-        // a principal-resolution outcome of its own.
-        let indexes = self.current_indexes.current_index_set(run)?;
-        let (index, entry) = indexes
-            .entry(&loaded.capability_id)
-            .ok_or_else(stale_capability)?;
-        if entry.kind != loaded.capability_kind {
-            return Err(AiError::Forbidden);
-        }
-        // An entry this session no longer reaches (its bound rules refuse a
-        // mutation, or the index lost its in-process proof) is the same
-        // stale selection as an unknown reference.
-        if !session.brokers_entry(index, entry) {
-            return Err(stale_selection());
-        }
         let principal = self.rehydrate(principal_reference).await?;
         let mut current = self
             .load_entry(&principal, run, &indexes, index, entry)
@@ -1983,7 +2043,7 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         capability_id: &AiToolId,
         capability_fingerprint: &str,
-    ) -> Result<(), AiError> {
+    ) -> Result<String, AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
         let (index, entry) =
@@ -2011,7 +2071,9 @@ impl AiCapabilityDiscoveryBroker {
         // or replaced while policy was decided is stale.
         let indexes = self.current_indexes.current_index_set(run)?;
         current_subscription_entry(&indexes, capability_id, capability_fingerprint)?;
-        Ok(())
+        // The index set this admission was finally decided against, so a
+        // caller can prove later that it is still current.
+        Ok(indexes.fingerprint().to_owned())
     }
 }
 
