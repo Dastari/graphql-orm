@@ -3735,11 +3735,13 @@ fn generate_graphql_operations_unfiltered(
             }
 
             if upsert_config.is_some() {
-                let upsert_update_candidate =
-                    !meta.is_primary_key && !upsert_target_db_columns.contains(&db_col);
+                let upsert_conflict_column = upsert_target_db_columns.contains(&db_col);
+                let upsert_update_candidate = !meta.is_primary_key && !upsert_conflict_column;
 
                 {
-                    let graphql_check = if is_option_type(field_type) {
+                    // On a lookup miss the insert must use the conflict key
+                    // that was looked up. A denied key write cannot be omitted.
+                    let graphql_check = if is_option_type(field_type) && !upsert_conflict_column {
                         if upsert_update_candidate {
                             quote! {
                                 let __gom_field_write_allowed = if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {

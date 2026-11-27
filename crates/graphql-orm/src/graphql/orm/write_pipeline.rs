@@ -614,6 +614,11 @@ impl GeneratedWriteAuthority {
                                 (super::SqlValue::Float(actual), super::SqlValue::Float(bound)) => {
                                     actual.to_bits() == bound.to_bits()
                                 }
+                                (super::SqlValue::Json(actual), super::SqlValue::Json(bound)) => {
+                                    // SQLite and SQL Server bind the serialized text.
+                                    // JSON equality can hide differences such as -0.0.
+                                    actual.to_string() == bound.to_string()
+                                }
                                 (actual, bound) => actual == bound,
                             })
                             && values.next().is_none()

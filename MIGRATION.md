@@ -15,8 +15,7 @@ supersedes: []
 **No action** for supported callers: hosts that use the derives, the
 repository API, `Database::transaction` and
 `MutationContext::run_mutation_hook`. Upgrade ORM and macros together. The
-checks of a generated GraphQL write, their order, the refusals, the SDL and
-the catalogues are unchanged (#921).
+SDL and catalogues are unchanged (#921).
 
 The hidden write pipeline now reads a generated write's backend,
 authentication mode, scope declarations and assurance coordinate from the
@@ -26,9 +25,10 @@ admission for updates, deletes, upserts and bulk writes. The pipeline runs
 target admission once per request admission. It binds the authority to one
 request and invocation, one operation, one `Database` handle, one transaction and the
 rows that were admitted. In an upsert's create branch, both hook events must
-carry the same conflict-key columns and values used in the locked lookup.
+carry each conflict-key column once with the exact bind value used in the
+locked lookup, including the serialized representation of JSON.
 
-Two details of generated mutations change in narrow cases:
+Generated mutations change in a few narrow cases:
 
 - **Assurance coordinate.** A generated write always enforces the assurance
   requirement of its own root field. Before, a generated resolver enforced
@@ -42,6 +42,10 @@ Two details of generated mutations change in narrow cases:
   matches keys that are spelled differently, for example under a
   case-insensitive collation. **No action** unless a hook compares that id
   with the request's own spelling.
+- **Field denial on an inserting upsert.** A denied write to a conflict field
+  returns `FORBIDDEN` even if the optional field would otherwise be omitted
+  under `ignore_denied_field_write`. The insert uses the key from the locked
+  lookup. **No action.**
 
 **Action needed** for host code that calls the hidden, macro-internal
 pipeline functions directly, against their documentation. Their signatures

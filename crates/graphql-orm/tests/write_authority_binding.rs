@@ -74,17 +74,36 @@ struct BindDevice {
     #[sortable]
     id: String,
     #[filterable(type = "string")]
-    mac: String,
+    mac: Option<String>,
     name: String,
+    label: Option<String>,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "bind_json_keys",
+    plural = "BindJsonKeys",
+    auth = "optional",
+    upsert = "key"
+)]
+struct BindJsonKey {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    #[unique]
+    #[graphql_orm(json)]
+    key: serde_json::Value,
     label: String,
 }
 
 fn device(id: &str, mac: &str) -> CreateBindDeviceInput {
     CreateBindDeviceInput {
         id: id.to_owned(),
-        mac: mac.to_owned(),
+        mac: Some(mac.to_owned()),
         name: "probe".to_owned(),
-        label: "Example".to_owned(),
+        label: Some("Example".to_owned()),
     }
 }
 
@@ -204,7 +223,7 @@ async fn dispatch(
     action: ChangeAction,
     id: &str,
 ) -> String {
-    dispatch_changes(tx, entity, ctx, authority, phase, action, id, &[]).await
+    dispatch_changes(tx, entity, ctx, authority, phase, action, id, Vec::new()).await
 }
 
 /// [`dispatch`] of an event whose changes give these columns these values.
@@ -217,7 +236,7 @@ async fn dispatch_changes(
     phase: MutationPhase,
     action: ChangeAction,
     id: &str,
-    changes: &[(&str, &str)],
+    changes: Vec<MutationFieldValue>,
 ) -> String {
     outcome(
         tx.__run_generated_write_hook(
@@ -226,13 +245,7 @@ async fn dispatch_changes(
             phase,
             action,
             id.to_owned(),
-            changes
-                .iter()
-                .map(|(field, value)| MutationFieldValue {
-                    field: (*field).to_owned(),
-                    value: SqlValue::String((*value).to_owned()),
-                })
-                .collect(),
+            changes,
             None,
             None,
         )
@@ -450,8 +463,15 @@ impl HostMutation {
                 out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
                 let looked_up = [("mac", "m9"), ("name", "probe")];
                 let other = [("mac", "m9"), ("name", "other")];
-                let duplicate = [("mac", "m9"), ("mac", "m7"), ("name", "probe")];
+                let duplicate = [("mac", "m9"), ("mac", "m9"), ("name", "probe")];
                 let mut created = async |phase, changes: &[(&str, &str)]| {
+                    let changes = changes
+                        .iter()
+                        .map(|(field, value)| MutationFieldValue {
+                            field: (*field).to_owned(),
+                            value: SqlValue::String((*value).to_owned()),
+                        })
+                        .collect();
                     dispatch_changes(
                         &mut tx, devices, ctx, authority, phase, Created, "d9", changes,
                     )
@@ -463,8 +483,66 @@ impl HostMutation {
                 out.push(created(Before, &other).await);
                 out.push(created(Before, &duplicate).await);
                 out.push(created(Before, &looked_up).await);
+                out.push(created(After, &looked_up[..1]).await);
                 out.push(created(After, &other).await);
+                out.push(created(After, &duplicate).await);
                 out.push(created(After, &looked_up).await);
+                rollback(tx).await?;
+            }
+            "upsert_json_key" => {
+                let entity = GeneratedWriteEntity::of::<BindJsonKey>();
+                let negative = serde_json::json!({"nested": [{"value": -0.0}]});
+                let positive = serde_json::json!({"nested": [{"value": 0.0}]});
+                assert_eq!(negative, positive);
+                let mut input = CreateBindJsonKeyInput {
+                    id: "new".to_owned(),
+                    key: positive.clone(),
+                    label: "New".to_owned(),
+                };
+                let admission = admit::<BindJsonKey>(ctx, Upsert)?
+                    .__admit_entity(ctx)
+                    .await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                let found = admission
+                    .__lookup_upsert_target::<BindJsonKey>(ctx, &mut tx, &input)
+                    .await?;
+                assert_eq!(found.map(|row| row.id).as_deref(), Some("existing"));
+                rollback(tx).await?;
+
+                // SQLite compares the serialized JSON text, so the other
+                // sign of zero in the nested key selects no row.
+                input.key = negative.clone();
+                let admission = admit::<BindJsonKey>(ctx, Upsert)?
+                    .__admit_entity(ctx)
+                    .await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                assert!(
+                    admission
+                        .__lookup_upsert_target::<BindJsonKey>(ctx, &mut tx, &input)
+                        .await?
+                        .is_none()
+                );
+                admission.__admit_upsert_target::<BindJsonKey>(ctx).await?;
+                for phase in [Before, After] {
+                    for key in [&positive, &negative] {
+                        out.push(
+                            dispatch_changes(
+                                &mut tx,
+                                entity,
+                                ctx,
+                                admission.authority(),
+                                phase.clone(),
+                                Created,
+                                &input.id,
+                                vec![MutationFieldValue {
+                                    field: "key".to_owned(),
+                                    value: SqlValue::Json(key.clone()),
+                                }],
+                            )
+                            .await,
+                        );
+                    }
+                }
                 rollback(tx).await?;
             }
             // Two callers share an admission: one target admission wins,
@@ -890,7 +968,7 @@ impl HostMutation {
     }
 }
 
-schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [BindOrder, BindLine, BindDevice], extra_mutation_types: [HostMutation] }
+schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [BindOrder, BindLine, BindDevice, BindJsonKey], extra_mutation_types: [HostMutation] }
 
 /// Records each hook invocation with the subject of the originating request
 /// its transaction presents.
@@ -971,7 +1049,9 @@ async fn fixture() -> Fixture {
     for sql in [
         "CREATE TABLE bind_orders (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE bind_lines (id TEXT PRIMARY KEY, order_id TEXT NOT NULL)",
-        "CREATE TABLE bind_devices (id TEXT PRIMARY KEY, mac TEXT NOT NULL, name TEXT NOT NULL, label TEXT NOT NULL, UNIQUE (mac, name))",
+        "CREATE TABLE bind_devices (id TEXT PRIMARY KEY, mac TEXT, name TEXT NOT NULL, label TEXT, UNIQUE (mac, name))",
+        "CREATE TABLE bind_json_keys (id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, label TEXT NOT NULL)",
+        r#"INSERT INTO bind_json_keys VALUES ('existing', '{"nested":[{"value":0.0}]}', 'Existing')"#,
         "INSERT INTO bind_devices VALUES ('d1', 'm1', 'probe', 'First'), ('d2', 'm2', 'probe', 'Second')",
         "INSERT INTO bind_orders VALUES ('o1', 'first'), ('o2', 'second')",
         "INSERT INTO bind_lines VALUES ('l1', 'o1'), ('l2', 'o1'), ('l3', 'o3')",
@@ -1191,11 +1271,19 @@ async fn an_upsert_authority_is_the_branch_its_target_admission_decided() {
             // `Before`: partial key; different key; duplicate key column;
             // then the complete key used by the lookup.
             "refused", "refused", "refused", "ok",
-            // `After`: with another device's key; with the looked-up key.
-            "refused", "ok",
+            // `After`: partial key; different key; duplicate key column;
+            // then the complete key used by the lookup.
+            "refused", "refused", "refused", "ok",
         ],
         3,
     );
+}
+
+#[tokio::test]
+async fn upsert_create_dispatch_requires_the_same_sqlite_json_bind_in_each_phase() {
+    let fixture = fixture().await;
+    let steps = fixture.probe("upsert_json_key").await;
+    assert_hooks(&fixture, &steps, &["refused", "ok", "refused", "ok"], 2);
 }
 
 #[tokio::test]
@@ -1412,4 +1500,96 @@ async fn generated_mutations_present_their_own_authority() {
             assert_eq!(presented, "  presents operator", "{query}: {recorded:?}");
         }
     }
+}
+
+struct IgnoreDeniedDeviceField;
+
+impl FieldPolicy for IgnoreDeniedDeviceField {
+    fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
+        entity == "BindDevice" && matches!(field, "mac" | "label")
+    }
+
+    fn can_read_field<'a>(
+        &'a self,
+        _: &'a Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_field<'a>(
+        &'a self,
+        ctx: &'a Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        field: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(ctx.data::<&'static str>()? != &field) })
+    }
+}
+
+#[tokio::test]
+async fn generated_upsert_refuses_denied_optional_conflict_write_in_ignore_mode() {
+    let mut fixture = fixture().await;
+    fixture.db.set_field_policy(IgnoreDeniedDeviceField);
+    let schema = fixture.schema();
+    let query = r#"mutation {
+        upsertBindDevice(input: { id: "d3", mac: "m3", name: "probe", label: "Third" }) { success }
+    }"#;
+    let attempt = |denied: &'static str| {
+        schema.execute(
+            async_graphql::Request::new(query)
+                .data(operator(&ALL_SCOPES))
+                .data(denied),
+        )
+    };
+    let response = attempt("mac").await;
+    let [error] = response.errors.as_slice() else {
+        panic!("expected a field denial, got {:?}", response.errors);
+    };
+    assert_eq!(error.message, "write denied for field mac");
+    let extensions = error.extensions.as_ref().unwrap();
+    assert_eq!(extensions.get("code"), Some(&Value::from("FORBIDDEN")));
+    assert_eq!(
+        extensions.get("deniedWriteField"),
+        Some(&Value::from("mac"))
+    );
+    assert!(fixture.hooks().is_empty());
+
+    let stored = || {
+        graphql_orm::sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT mac, label FROM bind_devices WHERE id = 'd3'",
+        )
+        .fetch_optional(fixture.db.pool())
+    };
+    assert_eq!(stored().await.unwrap(), None);
+
+    let response = attempt("label").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap(),
+        serde_json::json!({"upsertBindDevice": {"success": true}}),
+    );
+    assert_eq!(stored().await.unwrap(), Some(("m3".to_owned(), None)));
+    assert_eq!(fixture.hooks().len(), 4);
+
+    // On a hit the conflict field selects the row and is outside the update.
+    let response = attempt("mac").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap(),
+        serde_json::json!({"upsertBindDevice": {"success": true}}),
+    );
+    assert_eq!(
+        stored().await.unwrap(),
+        Some(("m3".to_owned(), Some("Third".to_owned())))
+    );
+    assert_eq!(fixture.hooks().len(), 4);
 }

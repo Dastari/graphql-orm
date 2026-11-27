@@ -239,6 +239,9 @@ and names the public field on both surfaces: the message is
 an omission. On an upsert that resolves to an existing row the omission is
 real: the denied column is left out of the conflict update, so its stored
 value is kept.
+On an upsert that inserts, a denied conflict field fails with `FORBIDDEN`
+even when the policy opts into omission. The insert must use the conflict key
+from its locked lookup.
 
 **What the repository callbacks receive.** Generated repository reads and
 writes call `can_read_repository_field` and `can_write_repository_field` with
@@ -396,11 +399,12 @@ one.
   - one transaction: the one target admission ran in, or for a create the one
     that carries its invocation;
   - the admitted rows: the row a single-row target admission locked, the
-    branch an upsert's lookup decided (a new row whose hook events carry the
-    conflict key that was looked up, with one entry per key column, or the
-    row it found), or the
-    rows a bulk target admission selected. Each row dispatches one `Before`
-    and one `After`, so each nested child row needs its own admission.
+    branch an upsert's lookup decided, or the rows a bulk target admission
+    selected. On an upsert lookup miss, both hook phases must carry exactly
+    one change per conflict column, matching the lookup's bind values,
+    including the serialized representation of JSON values. On a hit, the
+    authority binds to the row the lookup found. Each row dispatches one
+    `Before` and one `After`, so each nested child row needs its own admission.
 - **A mismatch is refused.** Entity admission, target admission, the bulk
   entry points and hook dispatch fail when they are given a request,
   admission or authority that does not match the call, before any hook runs.
@@ -905,7 +909,8 @@ to restore legacy input omission. An omitted field is never written: a create
 or an inserting upsert stores the column's default, and an update or an upsert
 onto an existing row keeps the stored value (the column is left out of the
 statement, and out of the changes mutation hooks see). Required create/upsert
-inputs still fail on denial. Errors from a policy and missing policy providers are never ignored.
+inputs and inserting upserts' conflict fields still fail on denial. Errors
+from a policy and missing policy providers are never ignored.
 Repository field checks retain their existing fail-closed contract. See the
 [migration guide](../../../MIGRATION.md#0911-to-0920-rejected-field-writes-fail-the-mutation).
 

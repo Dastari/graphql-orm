@@ -235,6 +235,8 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
                 #principal_key_preimage_check
                 // The row write decision on the row the key found, if any.
                 __gom_write.__admit_upsert_target::<#struct_name>(ctx).await?;
+                // The conflict key is fixed after the lookup. On the insert
+                // branch a denied conflict-column write fails field admission.
                 // Update candidates whose write the policy denied and the host
                 // chose to ignore: they stay out of the conflict update.
                 #[allow(unused_mut)]
