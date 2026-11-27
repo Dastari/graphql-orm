@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.241.0 adds `#[graphql_orm(time_offset_datetime)]` for persisted
+`time::OffsetDateTime` and `Option<time::OffsetDateTime>` fields when the ORM
+`time` feature is enabled. See the
+[host timestamp example](../graphql-orm/README.md#host-timestamps-with-time).
+
 Version 0.240.0 emits one set of field descriptors for generated GraphQL
 upsert and create on upsert-enabled entities.
 [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).

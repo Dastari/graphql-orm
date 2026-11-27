@@ -871,13 +871,14 @@ impl RecordMutations {
                             .filter(|(column, _)| !__gom_denied_upsert_columns.contains(column))
                             .map(|(_, rendered)| *rendered)
                             .collect();
-                    ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
+                    ::graphql_orm::graphql::orm::render_upsert_sql_with_clock(
+                        ::graphql_orm::graphql::orm::DatabaseBackend::Sqlite,
                         "records",
                         &["id", "title"],
                         &["?", "?"],
                         &["id"],
                         &__gom_update_columns,
-                        false,
+                        ::std::option::Option::None,
                         ::std::option::Option::None,
                     )
                 },
