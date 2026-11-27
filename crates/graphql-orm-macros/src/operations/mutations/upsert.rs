@@ -132,12 +132,7 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
     };
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        "Upsert",
-        upsert_scope_arguments,
-    );
+    let admit = admit_request(struct_name, "Upsert", upsert_scope_arguments);
     let before_hook = Hook {
         request: &request,
         phase: "Before",
@@ -162,8 +157,14 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
         return (quote! {}, quote! {});
     }
     let lookup = quote! {
-        impl ::graphql_orm::graphql::orm::GeneratedUpsertLookup<#backend_marker> for #struct_name {
+        impl ::graphql_orm::graphql::orm::GeneratedUpsertLookup for #struct_name {
             type Input = #create_input;
+
+            fn __gom_upsert_key(
+                input: &Self::Input,
+            ) -> ::graphql_orm::Result<::std::vec::Vec<(&'static str, ::graphql_orm::graphql::orm::SqlValue)>> {
+                Self::__gom_upsert_key_of(input)
+            }
 
             fn __gom_upsert_lookup<'a, 'tx: 'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'tx, #backend_marker>,

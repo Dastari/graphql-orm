@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.236.0
+## Unreleased - ORM/macros 0.237.0
 
 - **Security hardening (#921).** The authority that lets a generated GraphQL
   mutation's hook present its originating request is now derived from the
@@ -26,7 +26,7 @@ for historical context.
   field, and the `Before` hook event of a single-row update names the stored
   key. **No action** unless a custom resolver calls a generated mutation
   resolver method, or host code calls the hidden pipeline functions.
-  [Migration](MIGRATION.md#02350-to-02360-bound-generated-write-authority)
+  [Migration](MIGRATION.md#02360-to-02370-bound-generated-write-authority)
 
 ## Unreleased - ORM/macros 0.235.0
 

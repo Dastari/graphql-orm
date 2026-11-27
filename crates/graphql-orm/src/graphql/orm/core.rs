@@ -3299,6 +3299,7 @@ where
                 &event.phase,
                 event.action,
                 &event.id,
+                &event.changes,
             )?;
         }
         let ctx = request.map(|(ctx, _)| ctx);

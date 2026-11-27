@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.235.0 to 0.236.0: Bound generated write authority
+## 0.237.0 to 0.237.0: Bound generated write authority
 
 **No action** for supported callers: hosts that use the derives, the
 repository API, `Database::transaction` and
@@ -47,9 +47,9 @@ pipeline functions directly, against their documentation. Their signatures
 changed, so that code no longer compiles:
 
 - `__admit_generated_write_request` takes a `GeneratedWriteKind` and the
-  scope template argument values. It no longer takes an authentication mode,
-  a scope closure or an assurance coordinate, and the request it returns is
-  typed by its backend.
+  scope template argument values. It no longer takes a backend, an
+  authentication mode, a scope closure or an assurance coordinate. The
+  request it returns is typed by the entity's own backend.
 - `GeneratedWriteEntity::new` is replaced by `GeneratedWriteEntity::of::<T>()`.
 - `__admit_entity` and `__admit_entity_bulk` take no entity and no backend,
   and `__admit_entity_on` is removed. A nested child is admitted through its

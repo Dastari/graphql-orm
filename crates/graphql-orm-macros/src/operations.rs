@@ -3119,54 +3119,6 @@ fn generate_graphql_operations_unfiltered(
     let (update_many_scopes, update_many_scope_arguments) = write_scopes("update_many")?;
     let (delete_scopes, delete_scope_arguments) = write_scopes("delete")?;
     let (delete_many_scopes, delete_many_scope_arguments) = write_scopes("delete_many")?;
-    // The entity's generated write configuration: what request admission
-    // reads instead of taking it from each resolver.
-    let generated_write_config = {
-        let operation = |kind: &str, field_name: &str, scopes: &proc_macro2::TokenStream| {
-            let kind = quote::format_ident!("{}", kind);
-            quote! {
-                ::graphql_orm::graphql::orm::GeneratedWriteKind::#kind => {
-                    ::graphql_orm::graphql::orm::GeneratedWriteOperation::__new(
-                        #field_name,
-                        #resolver_auth_mode,
-                        #scopes,
-                    )
-                }
-            }
-        };
-        let operations = [
-            operation("Create", &create_mutation_name, &create_scopes),
-            operation("Upsert", &upsert_mutation_name, &upsert_scopes),
-            operation("Update", &update_mutation_name, &update_scopes),
-            operation(
-                "UpdateMany",
-                &update_many_mutation_name,
-                &update_many_scopes,
-            ),
-            operation("Delete", &delete_mutation_name, &delete_scopes),
-            operation(
-                "DeleteMany",
-                &delete_many_mutation_name,
-                &delete_many_scopes,
-            ),
-        ];
-        quote! {
-            impl ::graphql_orm::graphql::orm::GeneratedWriteConfig for #struct_name {
-                fn __gom_write_operation(
-                    kind: ::graphql_orm::graphql::orm::GeneratedWriteKind,
-                ) -> ::graphql_orm::graphql::orm::GeneratedWriteOperation {
-                    match kind {
-                        #(#operations)*
-                    }
-                }
-
-                fn __gom_write_key(&self) -> ::std::string::String {
-                    let entity = self;
-                    #pk_id_for_entity
-                }
-            }
-        }
-    };
     let reject_unplanned_delete_effects = if entity_meta.dependent_deletes {
         quote! {}
     } else {
@@ -5596,6 +5548,16 @@ fn generate_graphql_operations_unfiltered(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let upsert_key_columns: Vec<String> = upsert_config
+        .as_ref()
+        .map(|config| {
+            config
+                .fields
+                .iter()
+                .map(|field| field.db_column.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     let upsert_fetch_bind_tokens = upsert_config
         .as_ref()
         .map(|config| {
@@ -5675,6 +5637,22 @@ fn generate_graphql_operations_unfiltered(
     };
     let upsert_helper_methods = if upsert_config.is_some() {
         quote! {
+            /// The conflict key of `input`: each key column and the value the
+            /// lookup binds for it.
+            #[doc(hidden)]
+            pub(crate) fn __gom_upsert_key_of(
+                input: &#create_input,
+            ) -> ::graphql_orm::Result<::std::vec::Vec<(&'static str, ::graphql_orm::graphql::orm::SqlValue)>> {
+                let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
+                #(#upsert_fetch_bind_tokens)*
+                ::std::result::Result::Ok(
+                    ::std::iter::Iterator::collect(::std::iter::Iterator::zip(
+                        ::std::iter::IntoIterator::into_iter([#(#upsert_key_columns),*]),
+                        bind_values,
+                    )),
+                )
+            }
+
             #[doc(hidden)]
             pub(crate) async fn __gom_fetch_by_upsert_on(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
@@ -6004,6 +5982,68 @@ fn generate_graphql_operations_unfiltered(
             transient_store: &transient_store,
             acknowledge: entity_meta.upsert_acknowledge.is_some(),
         });
+    // The entity's generated write configuration: what request admission
+    // reads instead of taking it from each resolver.
+    let generated_write_config = {
+        let operation = |kind: &str, field_name: &str, scopes: &proc_macro2::TokenStream| {
+            let kind = quote::format_ident!("{}", kind);
+            quote! {
+                ::graphql_orm::graphql::orm::GeneratedWriteKind::#kind => {
+                    ::std::option::Option::Some(
+                        ::graphql_orm::graphql::orm::GeneratedWriteOperation::__new(
+                            #field_name,
+                            #resolver_auth_mode,
+                            #scopes,
+                        ),
+                    )
+                }
+            }
+        };
+        let operations = [
+            operation("Create", &create_mutation_name, &create_scopes),
+            // An entity admits an upsert only where it generates the root,
+            // and with it the lookup target admission runs.
+            if upsert_lookup_impl.is_empty() {
+                quote! {
+                    ::graphql_orm::graphql::orm::GeneratedWriteKind::Upsert => {
+                        ::std::option::Option::None
+                    }
+                }
+            } else {
+                operation("Upsert", &upsert_mutation_name, &upsert_scopes)
+            },
+            operation("Update", &update_mutation_name, &update_scopes),
+            operation(
+                "UpdateMany",
+                &update_many_mutation_name,
+                &update_many_scopes,
+            ),
+            operation("Delete", &delete_mutation_name, &delete_scopes),
+            operation(
+                "DeleteMany",
+                &delete_many_mutation_name,
+                &delete_many_scopes,
+            ),
+        ];
+        quote! {
+            impl ::graphql_orm::graphql::orm::GeneratedWriteConfig for #struct_name {
+                type Backend = #backend_marker;
+
+                fn __gom_write_operation(
+                    kind: ::graphql_orm::graphql::orm::GeneratedWriteKind,
+                ) -> ::std::option::Option<::graphql_orm::graphql::orm::GeneratedWriteOperation> {
+                    match kind {
+                        #(#operations)*
+                    }
+                }
+
+                fn __gom_write_key(&self) -> ::std::string::String {
+                    let entity = self;
+                    #pk_id_for_entity
+                }
+            }
+        }
+    };
 
     let upsert_repository_method = if upsert_config.is_some() {
         quote! {

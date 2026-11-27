@@ -52,12 +52,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
     } = input;
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        "Delete",
-        delete_scope_arguments,
-    );
+    let admit = admit_request(struct_name, "Delete", delete_scope_arguments);
     let hook = |phase, before_state| {
         Hook {
             request: &request,
@@ -209,12 +204,7 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
     } = input;
     let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        "DeleteMany",
-        delete_many_scope_arguments,
-    );
+    let admit = admit_request(struct_name, "DeleteMany", delete_many_scope_arguments);
     quote! {
             #[doc = #delete_many_operation_description]
             #[graphql(name = #delete_many_mutation_name, #delete_many_requires_scopes #authenticated_directive)]

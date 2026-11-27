@@ -183,13 +183,16 @@ fn admit<T>(
     kind: GeneratedWriteKind,
 ) -> graphql_orm::async_graphql::Result<GeneratedWriteRequest<Sqlite>>
 where
-    T: DatabaseRls + Entity + graphql_orm::graphql::orm::GeneratedWriteConfig + 'static,
+    T: DatabaseRls
+        + Entity
+        + graphql_orm::graphql::orm::GeneratedWriteConfig<Backend = Sqlite>
+        + 'static,
 {
-    __admit_generated_write_request::<T, Sqlite>(ctx, kind, &[])
+    __admit_generated_write_request::<T>(ctx, kind, &[])
 }
 
 /// One `Before` or `After` dispatch of the row `id` of `entity`, presenting
-/// `authority`.
+/// `authority`, with no changes.
 async fn dispatch(
     tx: &mut MutationContext<'_>,
     entity: GeneratedWriteEntity,
@@ -199,6 +202,21 @@ async fn dispatch(
     action: ChangeAction,
     id: &str,
 ) -> String {
+    dispatch_changes(tx, entity, ctx, authority, phase, action, id, &[]).await
+}
+
+/// [`dispatch`] of an event whose changes give these columns these values.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_changes(
+    tx: &mut MutationContext<'_>,
+    entity: GeneratedWriteEntity,
+    ctx: &Context<'_>,
+    authority: &GeneratedWriteAuthority,
+    phase: MutationPhase,
+    action: ChangeAction,
+    id: &str,
+    changes: &[(&str, &str)],
+) -> String {
     outcome(
         tx.__run_generated_write_hook(
             &entity,
@@ -206,7 +224,13 @@ async fn dispatch(
             phase,
             action,
             id.to_owned(),
-            Vec::new(),
+            changes
+                .iter()
+                .map(|(field, value)| MutationFieldValue {
+                    field: (*field).to_owned(),
+                    value: SqlValue::String((*value).to_owned()),
+                })
+                .collect(),
             None,
             None,
         )
@@ -277,16 +301,17 @@ impl HostMutation {
             "config" => {
                 out.push(outcome(admit::<BindOrder>(ctx, Delete)));
                 for id in ["o1", "o2"] {
-                    out.push(outcome(
-                        __admit_generated_write_request::<BindOrder, Sqlite>(
-                            ctx,
-                            Update,
-                            &[("id", id)],
-                        ),
-                    ));
+                    out.push(outcome(__admit_generated_write_request::<BindOrder>(
+                        ctx,
+                        Update,
+                        &[("id", id)],
+                    )));
                 }
                 out.push(outcome(admit::<BindOrder>(ctx, Create)));
                 out.push(outcome(admit::<BindLine>(ctx, Create)));
+                // Lines generate no upsert root: there is none to admit, and
+                // so no lookup a caller could supply for one.
+                out.push(outcome(admit::<BindLine>(ctx, Upsert)));
             }
             // The assurance coordinate is the operation's, not this field's.
             "assurance" => {
@@ -421,9 +446,21 @@ impl HostMutation {
                     admission.__admit_upsert_target::<Devices>(ctx).await,
                 ));
                 out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Created, "d9").await);
-                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
+                let (looked_up, other) = ([("mac", "m9")], [("mac", "m7"), ("name", "m9")]);
+                let mut created = async |phase, changes: &[(&str, &str)]| {
+                    dispatch_changes(
+                        &mut tx, devices, ctx, authority, phase, Created, "d9", changes,
+                    )
+                    .await
+                };
+                out.push(created(After, &looked_up).await);
+                // The created row must carry the conflict key that was
+                // looked up: not none, and not another device's.
+                out.push(created(Before, &[]).await);
+                out.push(created(Before, &other).await);
+                out.push(created(Before, &looked_up).await);
+                out.push(created(After, &other).await);
+                out.push(created(After, &looked_up).await);
                 rollback(tx).await?;
             }
             // Two callers share an admission: one target admission wins,
@@ -747,7 +784,7 @@ impl HostMutation {
                     __nested_create_field(ctx, name, "input", Value::Object(Default::default()))
                 };
                 let nested = |child: &Context<'_>, parent| {
-                    __admit_generated_nested_create_request::<BindLine, Sqlite>(child, parent)
+                    __admit_generated_nested_create_request::<BindLine>(child, parent)
                 };
                 let parent = admit::<BindOrder>(ctx, Create)?.__admit_entity(ctx).await?;
                 let field = child_field("createBindLine");
@@ -1026,11 +1063,18 @@ async fn admission_inputs_come_from_the_entity_configuration() {
     // scopes declared), create line (`auth = "optional"`).
     assert_eq!(
         run(Some(operator(&ALL_SCOPES))).await,
-        ["ok", "ok", "error: forbidden", "ok", "ok"]
+        ["ok", "ok", "error: forbidden", "ok", "ok", "refused"]
     );
     assert_eq!(
         run(Some(operator(&["orders.o2.update"]))).await,
-        ["error: forbidden", "error: forbidden", "ok", "ok", "ok"]
+        [
+            "error: forbidden",
+            "error: forbidden",
+            "ok",
+            "ok",
+            "ok",
+            "refused"
+        ]
     );
     // `auth = "required"` is the order entity's own declaration.
     let anonymous = run(None).await;
@@ -1040,7 +1084,7 @@ async fn admission_inputs_come_from_the_entity_configuration() {
             .all(|step| step.starts_with("error: ")),
         "{anonymous:?}"
     );
-    assert_eq!(anonymous[4], "ok");
+    assert_eq!(anonymous[4..], ["ok", "refused"]);
     assert!(fixture.hooks().is_empty());
 }
 
@@ -1138,8 +1182,13 @@ async fn an_upsert_authority_is_the_branch_its_target_admission_decided() {
             // update; decided once.
             "refused", "refused", "ok", "refused",
             // No row: the decision; not an update; no `After` before
-            // `Before`; the create's two phases.
-            "ok", "refused", "refused", "ok", "ok",
+            // `Before`.
+            "ok", "refused", "refused",
+            // `Before`: without the conflict key; with another device's;
+            // with the key that was looked up.
+            "refused", "refused", "ok",
+            // `After`: with another device's key; with the looked-up key.
+            "refused", "ok",
         ],
         3,
     );
