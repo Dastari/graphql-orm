@@ -459,8 +459,14 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 5 |
   | Terms of a generated `orderBy` list (`MAX_ORDER_BY_TERMS`), refused as `INVALID_INPUT` | one request | all | 16 |
 
-  Composition budgets count every occurrence in the original rendering,
-  including both TRUE and FALSE tests at each evaluation site. A generated statement
+  Composition budgets count every occurrence in the SQL a predicate renders.
+  The original closure rendering holds both TRUE and FALSE tests at each
+  evaluation site; a closure around another closure holds its target once.
+  Rendered size is no longer what limits nesting: a nested closure adds
+  about 1.5 KB at three hops. `READ_PREDICATE_CLOSURE_MAX_NESTING` stays at
+  2 because the work multiplies per level. With the limit lifted, three
+  levels over a non-unique key at three hops took 105 s on 85 rows in
+  SQLite, against 0.8 s for two levels. A generated statement
   holds at most its entity's own policy plus its relation filters and count
   orderings: 2 MiB of policy SQL, and 192 weighted relations on SQLite and
   PostgreSQL or 14 on SQL Server.

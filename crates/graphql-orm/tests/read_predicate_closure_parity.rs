@@ -1002,8 +1002,12 @@ async fn every_backend_admits_the_reference_sets() {
         refused_originals.len()
     );
     assert_eq!(
-        refused_originals.is_empty(),
-        B::DIALECT != DatabaseBackend::Mssql,
+        refused_originals.len(),
+        if B::DIALECT == DatabaseBackend::Mssql {
+            40
+        } else {
+            0
+        },
         "{refused_originals:?}"
     );
     // The cases are not vacuous: they admit and refuse rows in both forms.

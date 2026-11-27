@@ -1735,7 +1735,11 @@ pub const READ_PREDICATE_MAX_RENDERED_BYTES: usize = 1 << 20;
 /// relations, negations, `and` and `or`, on any backend: a closure whose
 /// target holds a closure is allowed, a third level is refused with
 /// `AUTHORIZATION_MISCONFIGURED`. Each level evaluates the inner walk for
-/// every row the outer walk reaches, so the cost multiplies per level.
+/// every row the outer walk reaches, so the cost multiplies per level. The
+/// limit bounds that work, not the SQL: a nested closure adds one closure's
+/// SQL per level (about 1.5 KB at three hops). With the limit lifted, three
+/// levels over a non-unique key at three hops took 105 s on 85 rows in
+/// SQLite, against 0.8 s for two levels.
 pub const READ_PREDICATE_CLOSURE_MAX_NESTING: u32 = 2;
 
 /// The deepest subquery nesting one [`ReadPredicate`] may render on SQL
@@ -6242,6 +6246,26 @@ mod predicate_tests {
             )
             .closures,
             2
+        );
+        // A relation's truth for a closure counts like its `EXISTS`: one
+        // relation, nested as deep.
+        let truth = cost_of(
+            "COALESCE((SELECT MAX(__gom_visibility_2.__gom_truth) FROM (SELECT COALESCE((SELECT \
+             MAX(__gom_visibility_1.__gom_truth) FROM (SELECT 2 AS __gom_truth FROM t AS \
+             __gom_row_1 WHERE __gom_row_1.k = __gom_row_2.k) AS __gom_visibility_1), 0) AS \
+             __gom_truth FROM t AS __gom_row_2 WHERE __gom_row_2.k = s.k) AS __gom_visibility_2), \
+             CASE WHEN s.k IS NOT NULL THEN 0 ELSE 1 END) + (SELECT MAX(x.y) FROM x)",
+        );
+        assert_eq!((truth.relations, truth.exists, truth.nesting), (2, 2, 4));
+        let exists = cost_of(
+            "EXISTS (SELECT 1 FROM (SELECT * FROM t AS __gom_row_2 WHERE EXISTS (SELECT 1 FROM \
+             (SELECT * FROM t AS __gom_row_1 WHERE 1 = 1) AS __gom_visibility_1 WHERE \
+             __gom_visibility_1.k = __gom_row_2.k)) AS __gom_visibility_2 WHERE \
+             __gom_visibility_2.k = s.k)",
+        );
+        assert_eq!(
+            (truth.relations, truth.exists, truth.nesting),
+            (exists.relations, exists.exists, exists.nesting)
         );
         // Closure instances: one per CTE opening or SQL Server walk alias,
         // not per reference.
