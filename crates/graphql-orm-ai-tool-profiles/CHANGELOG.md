@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.38.0
+
+- Reuse validated semantic catalogues when compiling capability plans and
+  avoid repeated type-name lookups when rendering signatures (#551).
+  [Migration](MIGRATION.md#0380-capability-plan-compilation)
+
 ## Unreleased - 0.37.0
 
 - Added `AiCapabilityRankedMatch::iter_grouped_roots` to visit the

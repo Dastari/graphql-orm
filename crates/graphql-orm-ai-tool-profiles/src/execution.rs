@@ -11,6 +11,7 @@ use graphql_orm_operation_catalog::{
     GraphqlSemanticCatalog, GraphqlSemanticOperationDescriptor,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Stable deployment-owned logical GraphQL execution target identifier.
@@ -270,6 +271,27 @@ impl GraphqlGeneratedOperationBinding {
     }
 }
 
+/// Immutable snapshot whose canonical ordering and fingerprints have been checked.
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedSemanticCatalog(Arc<GraphqlSemanticCatalog>);
+
+impl ValidatedSemanticCatalog {
+    pub(crate) fn new(catalog: &GraphqlSemanticCatalog) -> Result<Self, ToolExecutionError> {
+        catalog
+            .validate()
+            .map_err(|_| ToolExecutionError::StaleContract)?;
+        Ok(Self(Arc::new(catalog.clone())))
+    }
+}
+
+impl std::ops::Deref for ValidatedSemanticCatalog {
+    type Target = GraphqlSemanticCatalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Exact static operation binding carried to local or remote executors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphqlOperationContract {
@@ -291,6 +313,12 @@ pub struct GraphqlOperationContract {
     /// Optional exact binding to the canonical finished-schema semantic root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_operation: Option<GraphqlSemanticOperationBinding>,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RAW_SEMANTIC_BINDINGS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 impl GraphqlOperationContract {
@@ -382,6 +410,8 @@ impl GraphqlOperationContract {
         if self.document_hash != stable_graphql_document_hash(document) {
             return Err(ToolExecutionError::StaleContract);
         }
+        #[cfg(test)]
+        RAW_SEMANTIC_BINDINGS.with(|count| count.set(count.get() + 1));
         catalog
             .validate()
             .map_err(|_| ToolExecutionError::StaleContract)?;
@@ -393,10 +423,51 @@ impl GraphqlOperationContract {
         if matches.next().is_some() {
             return Err(ToolExecutionError::StaleContract);
         }
-        let binding = GraphqlSemanticOperationBinding::new(catalog, operation)?;
-        binding.resolve(catalog, &self.operation_name, document)?;
-        self.semantic_operation = Some(binding);
+        self.bind_semantic_operation(catalog, operation, document)?;
         Ok(self)
+    }
+
+    pub(crate) fn with_validated_semantic_operation(
+        mut self,
+        catalog: &ValidatedSemanticCatalog,
+        kind: GraphqlOperationKind,
+        field_name: &str,
+        document: &str,
+    ) -> Result<Self, ToolExecutionError> {
+        if self.document_hash != stable_graphql_document_hash(document) {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        // Validation established canonical order and uniqueness of root
+        // coordinates. Resolve this exact root from the same snapshot.
+        let index = catalog
+            .operations
+            .binary_search_by(|operation| {
+                (operation.kind, operation.field_name.as_str()).cmp(&(kind, field_name))
+            })
+            .map_err(|_| ToolExecutionError::StaleContract)?;
+        self.bind_semantic_operation(catalog, &catalog.operations[index], document)?;
+        Ok(self)
+    }
+
+    fn bind_semantic_operation(
+        &mut self,
+        catalog: &GraphqlSemanticCatalog,
+        operation: &GraphqlSemanticOperationDescriptor,
+        document: &str,
+    ) -> Result<(), ToolExecutionError> {
+        let binding = GraphqlSemanticOperationBinding::new(catalog, operation)?;
+        if !binding.has_valid_shape()
+            || !document_selects_exact_generated_root(
+                document,
+                &self.operation_name,
+                operation.kind,
+                &operation.field_name,
+            )
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        self.semantic_operation = Some(binding);
+        Ok(())
     }
 
     /// Binds this contract to one exact semantic-catalogue query root.

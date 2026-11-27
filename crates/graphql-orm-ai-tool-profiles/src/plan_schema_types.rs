@@ -95,15 +95,20 @@ impl AiSharedTypePlanSchema {
         let (root, description) = arena.intern(schema, 0)?;
         let named = if share_named {
             (0..arena.nodes.len())
-                .filter(|id| {
-                    arena.nodes[*id].shareable && arena.suggested_name(*id, type_names).is_some()
-                })
+                .filter(|id| arena.nodes[*id].shareable)
+                .filter_map(|id| arena.suggested_name(id, type_names).map(|name| (id, name)))
                 .collect()
         } else {
-            BTreeSet::new()
+            BTreeMap::new()
         };
         let hoisted = arena.hoisted(root, &named);
-        let names = arena.names(&hoisted, type_names);
+        let names = Arena::names(&hoisted, |id| {
+            if share_named {
+                named.get(&id).copied()
+            } else {
+                arena.suggested_name(id, type_names)
+            }
+        });
         let mut types = BTreeMap::new();
         for (id, name) in &names {
             types.insert(name.clone(), arena.emit(*id, &names));
@@ -375,7 +380,7 @@ impl<'a> Arena<'a> {
     /// rendering would otherwise emit it at least twice and it is large
     /// enough to be worth a reference. Sharing a node stops its children from
     /// being counted once per use of that node.
-    fn hoisted(&self, root: usize, named: &BTreeSet<usize>) -> BTreeSet<usize> {
+    fn hoisted(&self, root: usize, named: &BTreeMap<usize, &str>) -> BTreeSet<usize> {
         let mut order = (0..self.nodes.len()).collect::<Vec<_>>();
         order.sort_by(|left, right| {
             self.nodes[*right]
@@ -390,7 +395,7 @@ impl<'a> Arena<'a> {
             let node = &self.nodes[id];
             let shared = id != root
                 && node.shareable
-                && (named.contains(&id)
+                && (named.contains_key(&id)
                     || (uses[id] >= 2 && node.raw_bytes >= MINIMUM_SHARED_TYPE_BYTES));
             if shared {
                 hoisted.insert(id);
@@ -403,10 +408,9 @@ impl<'a> Arena<'a> {
         hoisted
     }
 
-    fn names(
-        &self,
+    fn names<'b>(
         hoisted: &BTreeSet<usize>,
-        type_names: &BTreeMap<String, String>,
+        suggested_name: impl Fn(usize) -> Option<&'b str>,
     ) -> BTreeMap<usize, String> {
         let mut names = BTreeMap::new();
         let mut used = BTreeSet::new();
@@ -414,10 +418,13 @@ impl<'a> Arena<'a> {
         // Node identifiers are assigned children-first in document order, so
         // this order is deterministic for one schema.
         for id in hoisted {
-            let base = self.suggested_name(*id, type_names).unwrap_or_else(|| {
-                positional += 1;
-                format!("Type{positional}")
-            });
+            let base = suggested_name(*id).map_or_else(
+                || {
+                    positional += 1;
+                    format!("Type{positional}")
+                },
+                str::to_owned,
+            );
             let mut name = base.clone();
             let mut suffix = 1_usize;
             while !used.insert(name.clone()) {
@@ -429,11 +436,18 @@ impl<'a> Arena<'a> {
         names
     }
 
-    fn suggested_name(&self, id: usize, type_names: &BTreeMap<String, String>) -> Option<String> {
+    fn suggested_name<'b>(
+        &self,
+        id: usize,
+        type_names: &'b BTreeMap<String, String>,
+    ) -> Option<&'b str> {
+        if type_names.is_empty() {
+            return None;
+        }
         type_names
             .get(&AiSharedTypePlanSchema::type_name_key(self.nodes[id].raw))
             .filter(|name| valid_type_name(name))
-            .cloned()
+            .map(String::as_str)
     }
 
     fn emit(&self, id: usize, names: &BTreeMap<usize, String>) -> Value {

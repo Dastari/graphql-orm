@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.38.0 capability plan compilation
+
+**No action.** Plan compilation reuses the semantic catalogue validated at
+catalogue construction. The compiler still validates each supplied plan and
+binds the exact GraphQL document. Broker signatures retain the same bytes.
+No fingerprint, schema, or data migration is needed.
+
 ## 0.37.0 grouped-root iteration
 
 **No action.** Hosts can use `AiCapabilityRankedMatch::iter_grouped_roots`
