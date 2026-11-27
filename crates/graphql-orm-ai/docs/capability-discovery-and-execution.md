@@ -805,6 +805,13 @@ for broker calls.
 operations: a count question's top candidate offers the `aggregate`
 operation, and its result is the aggregate, not the rows.
 
+For an ungrouped count on that operation, send the `COUNT` metrics as
+dotted paths such as `metrics.0.operator`, omit grouping and selections,
+and set the required `maximumItems`. Use the exact metric names in the
+operation's signature. `AiToolCatalog::compile_query_capability` supplies
+the empty grouping list using the target's argument name and passes the
+fixed-result plan to the same closed-plan compiler.
+
 ### Generated mutations through the fixed broker
 
 A session can also let its fixed broker reach generated mutations:

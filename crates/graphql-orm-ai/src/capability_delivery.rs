@@ -3884,7 +3884,7 @@ fn capability_effect(entry: &AiCapabilityIndexEntry) -> Option<&'static str> {
 }
 
 /// Model-facing usage note of every broker version 3 description.
-const DESCRIBE_USAGE: &str = "Each operation has a typed signature. Expand a named type from inputTypes, select or select.<path> with graphql_capabilities_describe_type (loadedReference, operation, type). Execute with loadedReference, operation, arguments as dotted leaf paths (for example where.status.eq) and selections as dotted scalar paths. An operation marked continuation returns a continuation handle while more rows exist; execute again with loadedReference, operation and continuation only to read the next page.";
+const DESCRIBE_USAGE: &str = "Each operation has a typed signature. Expand a named type from inputTypes, select or select.<path> with graphql_capabilities_describe_type (loadedReference, operation, type). Execute with loadedReference, operation, arguments as dotted leaf paths (for example where.status.eq) and selections as dotted scalar paths. For an ungrouped COUNT on an aggregate operation, omit the grouping argument and use no selections. An operation marked continuation returns a continuation handle while more rows exist; execute again with loadedReference, operation and continuation only to read the next page.";
 
 fn planning_contract(
     entry: &AiCapabilityIndexEntry,

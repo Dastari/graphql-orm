@@ -12,6 +12,14 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Ungrouped counts through the capability broker (#551)
+
+**No action.** For an ungrouped count, send the `COUNT` metrics as dotted
+argument paths and omit grouping and selections. Supply the operation's
+required `maximumItems`. Hosts driving the broker can pass the authorized
+plan to `AiToolCatalog::compile_query_capability`, which supplies the empty
+grouping list before closed-plan validation. No data migration is needed.
+
 ### Capability acceptance benchmark (#551)
 
 **No action.** This benchmark-only addition requires no data migration.

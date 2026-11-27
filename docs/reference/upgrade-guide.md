@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI 0.173.0 (#551). Generated aggregate roots accept ungrouped counts through the capability broker. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#ungrouped-counts-through-the-capability-broker-551)
+
 - **No action** — AI 0.172.0 (#551). The capability context benchmark adds deterministic question-to-execute measurements at 400 and 40,000 entries. [Benchmark](../../crates/graphql-orm-ai/docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark)
 
 - **Action needed** — AI 0.171.0 and AI tool profiles 0.36.0 (#551). Fixed-broker sessions can opt in to generated subscriptions as durable waits (`with_brokered_subscriptions`, routed to `register_wait` with `with_capability_delivery` on a wait service built `with_capability_broker`, which re-admits the wait at every claim, delivery and resumption). Configure a broker revocation version and implement final admission on checkpoint adapters. Host-driven turns must apply final admission before dispatch. The discover and execute broker fingerprints change, rule allowlists admit subscriptions by capability fingerprint, a removed or replaced subscription or broker entry closes its wait as `capability_stale` (also recorded by the coordinators at resumption), and an unreachable loaded reference is `selection_stale`. This completes the #551 broker scope. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)

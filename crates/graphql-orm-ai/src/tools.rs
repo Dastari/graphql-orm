@@ -10,6 +10,7 @@ use graphql_orm::graphql::orm::{
     AiMutationExecutionPolicy, GraphqlOperationCatalog, GraphqlOperationKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::control_plane::{
@@ -832,6 +833,10 @@ impl AiToolCatalog {
     /// Compiles one provider-authored typed plan against the exact registered
     /// semantic capability.
     ///
+    /// A broker call for an ungrouped count omits the grouping argument. The
+    /// catalog translates that call to the aggregate's closed plan before
+    /// compilation.
+    ///
     /// Compilation does not authorize or execute the query.
     ///
     /// # Errors
@@ -841,11 +846,14 @@ impl AiToolCatalog {
         &self,
         id: &AiToolId,
         expected_capability_fingerprint: &str,
-        plan: serde_json::Value,
+        mut plan: serde_json::Value,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
         let capability = self.query_capabilities.get(id).ok_or(AiError::Forbidden)?;
         if capability.fingerprint() != expected_capability_fingerprint {
             return Err(AiError::Forbidden);
+        }
+        if capability.is_aggregate() {
+            normalize_broker_ungrouped_count(&mut plan, capability.compact_argument_schema());
         }
         capability.compile_compact(plan)
     }
@@ -1257,6 +1265,76 @@ impl AiToolCatalog {
         }
         Ok(())
     }
+}
+
+/// Bridges the scalar-path broker wrapper to a fixed-result aggregate plan.
+/// Preserve explicit grouping and any nonempty or malformed wrapper fields
+/// for the strict compiler to validate.
+fn normalize_broker_ungrouped_count(plan: &mut Value, schema: &Value) {
+    let Some(plan) = plan.as_object_mut() else {
+        return;
+    };
+    // Only the fixed broker's query wrapper is eligible for translation.
+    if plan.keys().any(|name| {
+        !matches!(
+            name.as_str(),
+            "arguments" | "selections" | "relationshipArguments" | "relationshipMaximumItems" | "maximumItems"
+        )
+    }) || !matches!(plan.get("selections"), Some(Value::Array(items)) if items.is_empty())
+        || !["relationshipArguments", "relationshipMaximumItems"].iter().all(|name| {
+            matches!(plan.get(*name), Some(Value::Object(options)) if options.is_empty())
+        })
+    {
+        return;
+    }
+    let Some(arguments) = plan.get_mut("arguments").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(metrics) = arguments
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("metrics"))
+        .and_then(|(_, value)| value.as_array())
+    else {
+        return;
+    };
+    if metrics.is_empty()
+        || !metrics.iter().all(|metric| {
+            metric.as_object().is_some_and(|metric| {
+                metric.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("operator") && value.as_str() == Some("COUNT")
+                })
+            })
+        })
+    {
+        return;
+    }
+    // The target can use a different argument naming convention from the host.
+    // Read the exact grouping name from its registered closed schema.
+    let is_group_by =
+        |name: &str| name.eq_ignore_ascii_case("groupBy") || name.eq_ignore_ascii_case("group_by");
+    let Some(required) = schema
+        .pointer("/properties/arguments/required")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let mut grouping_names = required
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| is_group_by(name));
+    let Some(group_by) = grouping_names.next() else {
+        return;
+    };
+    if grouping_names.next().is_some()
+        || schema["properties"]["arguments"]["properties"][group_by]["type"] != "array"
+        || arguments.keys().any(|name| is_group_by(name))
+    {
+        return;
+    }
+    arguments.insert(group_by.to_owned(), Value::Array(Vec::new()));
+    plan.remove("selections");
+    plan.remove("relationshipArguments");
+    plan.remove("relationshipMaximumItems");
 }
 
 impl AiGraphqlToolManifestCatalog for AiToolCatalog {
