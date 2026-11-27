@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.235.0 to 0.236.0: ORM integration test harnesses
+
+**No action.** Upgrade ORM and macros together. For workspace test commands
+that target a moved test binary, use its new harness and filter by the original
+module name. See the [integration test harnesses](docs/development/testing.md#orm-integration-test-harnesses).
+
 ## 0.234.0 to 0.235.0: Optional relation loaders
 
 **No action.** Upgrade ORM and macros together. Generated relation

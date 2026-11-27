@@ -311,7 +311,7 @@ Identity: the member is omitted from serialization when absent, and the field's 
 line gains `|auto_timestamp=on_create` or `|auto_timestamp=on_create_and_update` only when
 present. Schemas without it keep their exact serialized documents, `canonical_bytes()`,
 `fingerprint()` and `structural_fingerprint()`. The goldens in
-`tests/runtime_compat_goldens.rs` pin this. The flag describes write semantics, so it is
+`tests/runtime_format_contracts/runtime_compat_goldens.rs` pin this. The flag describes write semantics, so it is
 part of both the ID-bearing and the structural forms; `format_fingerprint()` is
 unaffected. Readers older than 0.75.0 reject documents that declare it
 (`deny_unknown_fields`); the format version stays 1. Static conversion leaves it absent:
@@ -371,7 +371,7 @@ in the write grant it returns from `authorize_intent`. Field names are the host'
 Identity: the member is omitted from serialization when absent, and the field's canonical
 line gains `|auto_actor=on_create` after any `auto_timestamp` only when present. Schemas
 without it keep their exact serialized documents, `canonical_bytes()`, `fingerprint()` and
-`structural_fingerprint()` (pinned by `tests/runtime_identity_goldens.rs`). It describes
+`structural_fingerprint()` (pinned by `tests/runtime_schema_contracts/runtime_identity_goldens.rs`). It describes
 write semantics, so it is part of both the ID-bearing and the structural forms;
 `format_fingerprint()` is unaffected. Readers older than 0.81.0 reject documents that
 declare it (`deny_unknown_fields`); the format version stays 1. Static conversion leaves

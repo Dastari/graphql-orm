@@ -227,6 +227,11 @@ def check_orm_split(old, new):
     expected[expected.index(old_case)] = (
         "GRAPHQL_ORM_FIELD_CASE=PascalCase GRAPHQL_ORM_ARGUMENT_CASE=snake_case "
         "cargo test -p graphql-orm --no-default-features --features sqlite --test federation_entity_keys_case_features --locked")
+    # The shared fixture harness only enables its cross-crate relations
+    # module in this PostgreSQL lane. Record and query IR tests run together.
+    expected = [line.replace("--test cross_crate_relations_fixture", "--test cross_crate_fixtures")
+                .replace("--test runtime_records --test query_ir", "--test runtime_record_contracts")
+                if line.startswith("cargo test -p graphql-orm ") else line for line in expected]
     require(sorted(split) == sorted(expected), "ORM lane commands changed by the split")
     for line in [line for name in ORM_JOBS for line in new[name].splitlines()
                  if FIXTURE_MANIFEST in line and line.strip().startswith("cargo ")]:

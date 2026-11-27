@@ -189,10 +189,9 @@ class SupplyChainTests(unittest.TestCase):
                 selected.update(value for option, value in zip(arguments, arguments[1:]) if option == "--test")
         for target in (
             "postgres_owned_contracts", "bounded_mutation_sentinels",
-            "bulk_refusals", "delete_propagation", "denied_relations",
+            "row_count_refusals", "delete_propagation", "denied_relations",
             "host_integer_key", "host_primary_keys",
             "postgres_runtime_repository",
-            "single_row_refusals",
         ):
             with self.subTest(target=target):
                 self.assertIn(target, selected)

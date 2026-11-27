@@ -167,7 +167,7 @@ Four record `chrono-tz` and `humantime`: the root lock, `crates/graphql-orm-rout
 - `crates/graphql-orm/src/graphql/orm/spatial.rs:491-509`: the hidden public
   functions `date_filter_matches_at` and `date_filter_truth_at` take
   `today: chrono::NaiveDate`. They are used by generated SQLite fallback
-  code and by `crates/graphql-orm/tests/date_filters.rs`.
+  code and by `crates/graphql-orm/tests/sqlite_query_inputs/date_filters.rs`.
 - `RuntimeDateTime` (`crates/graphql-orm/src/graphql/orm/runtime_record.rs:275`)
   is a `String` newtype. Its public methods take and return strings. Its
   chrono constructor `from_utc` (`:366`) is `pub(crate)`.
@@ -212,7 +212,7 @@ Four record `chrono-tz` and `humantime`: the root lock, `crates/graphql-orm-rout
 
 **Tests and fixtures**
 
-- `crates/graphql-orm/tests/date_filters.rs`,
+- `crates/graphql-orm/tests/sqlite_query_inputs/date_filters.rs`,
   `temporal_bind_compatibility.rs` (uses `graphql_orm::chrono`),
   `implicit_timestamp_defaults.rs` and
   `mssql_owned_queries/mssql_correctness.rs` use chrono directly.
