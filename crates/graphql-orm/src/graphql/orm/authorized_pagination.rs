@@ -2074,7 +2074,13 @@ fn closure_columns(dialect: DatabaseBackend, truth: &RowBoundSql) -> Option<Vec<
             return None;
         }
         let name = text(column);
-        let column = dialect.delimited_column_identifier(name);
+        let column = if dialect == DatabaseBackend::Postgres && column.kind == SqlTokenKind::Word {
+            // After a qualifier, even a keyword can be a bare column
+            // name. PostgreSQL folds it before looking up the column.
+            dialect.delimited_column_identifier(&name.to_ascii_lowercase())
+        } else {
+            dialect.delimited_column_identifier(name)
+        };
         if dialect == DatabaseBackend::Mssql && !column.is_ascii() {
             return None;
         }
