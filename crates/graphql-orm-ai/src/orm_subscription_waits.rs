@@ -236,6 +236,59 @@ impl AiRegisteredSubscriptionWait {
     }
 }
 
+/// Why a provider turn must not carry one durable-wait result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiSubscriptionResultRefusal {
+    /// The subscription, or its broker entry, was removed or replaced.
+    CapabilityStale,
+    /// Current authority, broker host policy included, no longer admits it.
+    AuthorityRevoked,
+}
+
+impl AiSubscriptionResultRefusal {
+    /// The durable code a refused delivery records: `capability_stale` or
+    /// `subscription_authority_revoked`.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::CapabilityStale => "capability_stale",
+            Self::AuthorityRevoked => "subscription_authority_revoked",
+        }
+    }
+}
+
+/// One durable-wait result a provider turn must not carry, by the provider
+/// call ID it answers.
+///
+/// A coordinator refuses a turn that would deliver it now, and replaces it
+/// with a fixed withheld marker in stateless replay history. The payload is
+/// never sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiWithheldSubscriptionResult {
+    provider_call_id: String,
+    refusal: AiSubscriptionResultRefusal,
+}
+
+impl AiWithheldSubscriptionResult {
+    /// Creates one withheld result.
+    pub fn new(provider_call_id: impl Into<String>, refusal: AiSubscriptionResultRefusal) -> Self {
+        Self {
+            provider_call_id: provider_call_id.into(),
+            refusal,
+        }
+    }
+
+    /// Provider call ID the result answers.
+    pub fn provider_call_id(&self) -> &str {
+        &self.provider_call_id
+    }
+
+    /// Why it is withheld.
+    pub const fn refusal(&self) -> AiSubscriptionResultRefusal {
+        self.refusal
+    }
+}
+
 /// Fenced claim held by one bounded subscription-source worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiSubscriptionWaitClaim {
@@ -1309,12 +1362,7 @@ impl OrmAiSubscriptionWaitService {
             Err(error) => return Err(error),
         };
         if opened.waiter.expires_at <= self.clock.now().unix_timestamp() {
-            self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
-                .await?;
-            return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
-                waiter_id: claim.waiter_id,
-                run_id: claim.run_id,
-            });
+            return self.queue_timeout(&claim, &opened).await;
         }
         let principal = self
             .runtime
@@ -1408,12 +1456,7 @@ impl OrmAiSubscriptionWaitService {
         if item_seconds <= 0 {
             drop(stream);
             if waiter_remaining <= 0 {
-                self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
-                    .await?;
-                return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
-                    waiter_id: claim.waiter_id,
-                    run_id: claim.run_id,
-                });
+                return self.queue_timeout(&claim, &opened).await;
             }
             self.release_claim(&claim).await?;
             return Ok(AiSubscriptionWaitWorkerOutcome::Waiting {
@@ -1431,12 +1474,7 @@ impl OrmAiSubscriptionWaitService {
             Err(_) => {
                 drop(stream);
                 if self.clock.now().unix_timestamp() >= opened.waiter.expires_at {
-                    self.queue_limit_outcome(&claim, &opened, "timeout", None, None)
-                        .await?;
-                    return Ok(AiSubscriptionWaitWorkerOutcome::Queued {
-                        waiter_id: claim.waiter_id,
-                        run_id: claim.run_id,
-                    });
+                    return self.queue_timeout(&claim, &opened).await;
                 }
                 self.release_claim(&claim).await?;
                 return Ok(AiSubscriptionWaitWorkerOutcome::Waiting {
@@ -1646,6 +1684,52 @@ impl OrmAiSubscriptionWaitService {
                 })
             }
         }
+    }
+
+    /// Queues the timeout outcome of one opened wait. A refusal from the
+    /// delivery checks (a stale or replaced capability, or revoked authority,
+    /// broker policy included) closes the wait with its documented code
+    /// instead of leaving the claim held until it expires.
+    async fn queue_timeout(
+        &self,
+        claim: &AiSubscriptionWaitClaim,
+        opened: &OpenedWait,
+    ) -> Result<AiSubscriptionWaitWorkerOutcome, AiError> {
+        match self
+            .queue_limit_outcome(claim, opened, "timeout", None, None)
+            .await
+        {
+            Ok(()) => Ok(AiSubscriptionWaitWorkerOutcome::Queued {
+                waiter_id: claim.waiter_id,
+                run_id: claim.run_id,
+            }),
+            Err(error) => self.close_refused(claim, error).await,
+        }
+    }
+
+    /// Closes a claimed wait for a delivery refusal: `capability_stale` for a
+    /// removed or replaced capability, `subscription_authority_revoked` for
+    /// revoked authority. Any other error is returned unchanged.
+    async fn close_refused(
+        &self,
+        claim: &AiSubscriptionWaitClaim,
+        error: AiError,
+    ) -> Result<AiSubscriptionWaitWorkerOutcome, AiError> {
+        let reason = if capability_is_stale(&error) {
+            "capability_stale"
+        } else if matches!(
+            error,
+            AiError::Forbidden | AiError::NotFound | AiError::ReauthorizationFailed
+        ) {
+            "subscription_authority_revoked"
+        } else {
+            return Err(error);
+        };
+        self.close_claim(claim, AiRunState::Failed, reason).await?;
+        Ok(AiSubscriptionWaitWorkerOutcome::Closed {
+            waiter_id: claim.waiter_id,
+            run_id: claim.run_id,
+        })
     }
 
     async fn release_claim(&self, claim: &AiSubscriptionWaitClaim) -> Result<(), AiError> {
@@ -2762,6 +2846,129 @@ impl OrmAiSubscriptionWaitService {
         .await
     }
 
+    /// Final admission of every broker-routed wait result this run has
+    /// adopted, for a coordinator to apply immediately before it hands a
+    /// provider turn to the provider executor.
+    ///
+    /// Each adopted broker-routed wait of the run is re-checked: its
+    /// subscription must still be the registered capability, and the
+    /// service's broker must still hold and admit the exact entry for the
+    /// registering run. The returned results are refused: a coordinator
+    /// fails a turn that would deliver one now, and withholds one in
+    /// stateless replay history. Direct waits are not broker-routed and are
+    /// never returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for more than 64 adopted waits in one run, an
+    /// unresolvable principal, unavailable protection, or a malformed wait.
+    pub async fn admit_subscription_results(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
+        const MAXIMUM_ADOPTED_WAITS: usize = 64;
+        let waiters = AiSubscriptionWaiterRecord::query(self.custody_database().pool())
+            .filter(AiSubscriptionWaiterRecordWhereInput {
+                run_id: Some(UuidFilter {
+                    eq: Some(lease.run_id().0),
+                    ..Default::default()
+                }),
+                state: Some(StringFilter {
+                    eq: Some("adopted".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(65)
+            .fetch_all()
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?;
+        if waiters.len() > MAXIMUM_ADOPTED_WAITS {
+            return Err(AiError::Conflict);
+        }
+        let mut brokered = Vec::new();
+        for waiter in waiters {
+            let call = AiToolCallRecord::find_by_id(self.custody_database(), &waiter.tool_call_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+            if waiter.session_id != lease.session_id().0 || call.run_id != waiter.run_id {
+                return Err(AiError::Conflict);
+            }
+            if call.provider_tool_id.is_some() {
+                brokered.push((waiter, call));
+            }
+        }
+        if brokered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session = AiSessionRecord::find_by_id(self.custody_database(), &lease.session_id().0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        let principal_reference = lease.principal_reference();
+        let principal = self
+            .runtime
+            .resolve_current_principal(principal_reference)
+            .await?;
+        self.ensure_fresh(&principal, principal_reference)?;
+        let scope = record_scope(&session);
+        let policy = self.current_protection_policy(&principal, &scope).await?;
+        let mut withheld = Vec::new();
+        for (waiter, call) in brokered {
+            let request_value = self
+                .open(
+                    &policy,
+                    content_context(
+                        "graphql_orm_ai_subscription_waiters",
+                        waiter.id,
+                        "protected_request",
+                        &scope,
+                    ),
+                    waiter
+                        .protected_request
+                        .as_ref()
+                        .ok_or(AiError::PersistenceFailed)?,
+                )
+                .await?;
+            let payload: ProtectedWaitRequest =
+                serde_json::from_value(request_value).map_err(|_| AiError::PersistenceFailed)?;
+            let resolved = payload.resolved_call.as_ref().ok_or(AiError::Conflict)?;
+            if resolved.tool_id != call.tool_id
+                || resolved.tool_fingerprint != call.tool_fingerprint
+            {
+                return Err(AiError::Conflict);
+            }
+            let admitted = match self.current_subscription_capability(
+                &AiToolId::parse(resolved.tool_id.clone())?,
+                &resolved.tool_fingerprint,
+            ) {
+                Ok(()) => {
+                    self.readmit_stored_broker_call(Some(resolved), principal_reference, &waiter)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match admitted {
+                Ok(()) => {}
+                Err(error) if capability_is_stale(&error) => {
+                    withheld.push(AiWithheldSubscriptionResult::new(
+                        call.provider_call_id,
+                        AiSubscriptionResultRefusal::CapabilityStale,
+                    ))
+                }
+                Err(AiError::Forbidden | AiError::NotFound | AiError::ReauthorizationFailed) => {
+                    withheld.push(AiWithheldSubscriptionResult::new(
+                        call.provider_call_id,
+                        AiSubscriptionResultRefusal::AuthorityRevoked,
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(withheld)
+    }
+
     async fn consume_wait_adoption(
         &self,
         lease: &AiRunLease,
@@ -3871,6 +4078,15 @@ struct PreparedWaitRegistration {
 
 #[async_trait]
 impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
+    async fn admit_subscription_results(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
+        let mut withheld = self.waits.admit_subscription_results(lease).await?;
+        withheld.extend(self.fallback.admit_subscription_results(lease).await?);
+        Ok(withheld)
+    }
+
     async fn adopt_tool_batch(
         &self,
         lease: &AiRunLease,
@@ -3906,6 +4122,15 @@ impl crate::AiAgentCheckpointAdopter for AiSubscriptionCheckpointAdopter {
 
 #[async_trait]
 impl crate::AiAgentSupervisedCheckpointControl for AiSupervisedSubscriptionCheckpointControl {
+    async fn admit_subscription_results(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Vec<AiWithheldSubscriptionResult>, AiError> {
+        let mut withheld = self.waits.admit_subscription_results(lease).await?;
+        withheld.extend(self.fallback.admit_subscription_results(lease).await?);
+        Ok(withheld)
+    }
+
     async fn adopt(
         &self,
         lease: &AiRunLease,

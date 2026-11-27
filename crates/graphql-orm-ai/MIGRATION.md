@@ -63,15 +63,28 @@ subscription fingerprints. This completes the #551 broker scope.
    host capability policy decide brokered capabilities). Every service
    instance that claims or resumes waits needs it. A broker-routed wait is
    re-admitted by that broker for its registering run at registration and
-   again at every claim, delivery and resumption. At delivery the last
-   re-admission runs immediately before the durable write, after egress
-   auditing and content protection; at resumption it runs again when the
-   adoption is consumed, immediately before the result is handed to the
-   provider. The check cannot be atomic with provider transport; a change
-   committed before that last check always wins. An entry removed from the
+   again at every claim, delivery and resumption. The authoritative final
+   check is made by the coordinator itself: before every provider turn,
+   after cancellation, rule resolution and (supervised) provider-session
+   reclaim, with nothing awaited between its answer and the call into the
+   provider executor, both coordinators call
+   `admit_subscription_results` on their checkpoint adapter. The durable-wait
+   adapters re-admit every adopted broker-routed wait of the run there. A
+   refused result that turn would deliver fails the run (`Failed`,
+   `capability_stale` or `subscription_authority_revoked`); a refused result
+   already in stateless replay history is replaced with a fixed withheld
+   marker (`historicalToolContentWithheld`) and its payload is never resent.
+   The broker reads its current index again after host policy has been
+   awaited. What is guaranteed is ordering: a revocation or catalogue change
+   committed before that final check wins. Nothing is promised once the
+   provider executor has been called (its own pre-transport steps and
+   transport), and a provider that already received a result keeps it. Host
+   checkpoint adapters that do not implement `admit_subscription_results`
+   withhold nothing. An entry removed from the
    current index, replaced, or without the in-process proof closes the wait
    as `capability_stale`, and a host policy denial closes it as
-   `subscription_authority_revoked` (resumption refuses with
+   `subscription_authority_revoked`, including a refusal found while a
+   timeout is delivered (resumption refuses with
    `AI_CAPABILITY_STALE` or `Forbidden`). Without the broker, broker-routed
    registration is refused and an existing broker-routed wait closes at its
    next claim. Revoking broker access for a principal, run or provider
@@ -111,7 +124,12 @@ subscription fingerprints. This completes the #551 broker scope.
      in-process proof.
 
    The rule decision is made from the loaded binding before any principal
-   or index resolution, so it does not depend on catalogue state.
+   or index resolution, so it does not depend on catalogue state. The
+   current-index reachability decision is made before the principal is
+   resolved, and call shape (continuation plan fields, observation, operation
+   name) is validated only after reachability, so a held reference the
+   session no longer reaches never answers with its own reauthorization or
+   malformed-arguments outcome.
    `describe_type` applies the same check and answers the same way. A
    continuation of a capability that is never continued (a mutation,
    subscription or static tool) is first checked against the current index

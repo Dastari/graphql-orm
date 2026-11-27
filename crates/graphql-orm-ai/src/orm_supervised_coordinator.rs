@@ -520,6 +520,29 @@ pub trait AiAgentSupervisedCheckpointControl: Send + Sync {
     ) -> Result<AiRunLease, AiError> {
         Err(AiError::Conflict)
     }
+
+    /// Final admission of the durable-wait results a provider turn delivers
+    /// or replays.
+    ///
+    /// The coordinator calls this before every provider turn, after
+    /// cancellation, rule resolution and (for the supervised coordinator)
+    /// provider-session reclaim, with no await between its answer and the
+    /// hand-off to the provider executor. A returned result that the turn
+    /// would deliver now fails the run with the result's code; one in
+    /// stateless replay history is replaced with a fixed withheld marker.
+    /// The default withholds nothing; the durable-wait adapters re-admit
+    /// every adopted broker-routed wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error when admission cannot be decided; the
+    /// coordinator then fails the run closed.
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
@@ -1154,7 +1177,7 @@ impl AiSupervisedAgentCoordinator {
         }
         let native_mode = plan.native;
         let (
-            provider_plan,
+            mut provider_plan,
             provider_session,
             scope,
             correlation_id,
@@ -1382,6 +1405,25 @@ impl AiSupervisedAgentCoordinator {
         } else {
             None
         };
+        // The authoritative final admission of every durable-wait result
+        // this turn delivers or replays: after rule resolution, consumption
+        // and provider-session reclaim, and with nothing awaited between its
+        // answer and the provider executor below.
+        if let Err(code) = crate::orm_coordinator::apply_subscription_admission(
+            self.checkpoint_control
+                .admit_subscription_results(&lease)
+                .await,
+            &mut provider_plan,
+            &mut guard,
+        ) {
+            if let Some((service, claim)) = &reclaimed {
+                let _ = service
+                    .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
+                    .await;
+            }
+            return (self.finish_failed(&lease, &guard, code).await)
+                .map(SupervisedTurnStep::Finished);
+        }
         let native_execution = if native_mode {
             let services = self
                 .native_services
@@ -4272,6 +4314,203 @@ mod tests {
             )]
         );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    /// Subscription checkpoint control whose final durable-wait admission
+    /// refuses `test-call` once `refuse` is set.
+    struct GatedSubscriptionCheckpointControl {
+        inner: TestSubscriptionCheckpointControl,
+        refuse: Arc<AtomicBool>,
+        refuse_on_consume: bool,
+        admissions: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentSupervisedCheckpointControl for GatedSubscriptionCheckpointControl {
+        async fn adopt(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedSupervisedToolBatch>, AiError> {
+            self.inner.adopt(lease).await
+        }
+
+        async fn consume(
+            &self,
+            lease: &AiRunLease,
+            adopted: &AiAdoptedSupervisedToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            self.inner.consume(lease, adopted).await
+        }
+
+        async fn adopt_subscription(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<crate::AiAdoptedReadOnlyToolBatch>, AiError> {
+            self.inner.adopt_subscription(lease).await
+        }
+
+        async fn consume_subscription(
+            &self,
+            lease: &AiRunLease,
+            adopted: &crate::AiAdoptedReadOnlyToolBatch,
+        ) -> Result<AiRunLease, AiError> {
+            let consumed = self.inner.consume_subscription(lease, adopted).await;
+            if self.refuse_on_consume {
+                self.refuse.store(true, Ordering::SeqCst);
+            }
+            consumed
+        }
+
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            self.admissions.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.refuse.load(Ordering::SeqCst) {
+                vec![crate::AiWithheldSubscriptionResult::new(
+                    "test-call",
+                    crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+                )]
+            } else {
+                Vec::new()
+            })
+        }
+    }
+
+    /// The final durable-wait admission runs after consumption, the
+    /// post-consumption rule resolution and the provider-session reclaim,
+    /// immediately before provider dispatch. A change committed during
+    /// consumption, or during the reclaim of a retained session (which is
+    /// then cleaned up), refuses the resumed delivery and nothing reaches the
+    /// provider.
+    #[tokio::test]
+    async fn a_change_after_consumption_or_reclaim_refuses_the_resumed_subscription() {
+        for retained in [false, true] {
+            let base = AiRunLease::test_running(principal_reference());
+            let checkpoint_id = Uuid::new_v4();
+            let claimed = base.test_with_checkpoint(checkpoint_id);
+            let run = Arc::new(TestRunControl::new());
+            let reclaimed = Arc::new(AtomicBool::new(false));
+            let refuse = if retained {
+                reclaimed.clone()
+            } else {
+                Arc::new(AtomicBool::new(false))
+            };
+            let control = Arc::new(GatedSubscriptionCheckpointControl {
+                inner: TestSubscriptionCheckpointControl {
+                    adopted: Mutex::new(Some(adopted_subscription_checkpoint(
+                        &base,
+                        checkpoint_id,
+                    ))),
+                    consumed: AtomicBool::new(false),
+                },
+                refuse,
+                refuse_on_consume: !retained,
+                admissions: AtomicUsize::new(0),
+            });
+            let stager = Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            });
+            let checkpoints = Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            });
+            let (coordinator, provider_calls, sessions) = if retained {
+                let descriptor = retained_descriptor();
+                let claim = retained_claim(&claimed, descriptor.clone());
+                let provider = Arc::new(RetainedSupervisedProviderExecutor {
+                    result: Mutex::new(None),
+                    claim: claim.clone(),
+                    reclaimed: reclaimed.clone(),
+                    calls: AtomicUsize::new(0),
+                });
+                let sessions = Arc::new(RetainedSupervisedSessionService {
+                    claim: Mutex::new(Some(claim)),
+                    run: run.clone(),
+                    reclaimed: reclaimed.clone(),
+                    commits: AtomicUsize::new(0),
+                    cleanups: AtomicUsize::new(0),
+                });
+                let coordinator = AiSupervisedAgentCoordinator::new(
+                    run.clone(),
+                    provider.clone(),
+                    Arc::new(TestOutputWriter),
+                    checkpoints,
+                    control.clone(),
+                    stager,
+                    unused_automatic(),
+                    unused_resume(),
+                    Arc::new(TestRuleResolver),
+                    Arc::new(RetainedSupervisedPlanner {
+                        scope: test_scope(),
+                        route: test_route(),
+                        provider_session: crate::AiProviderSessionTurnPlan::new(
+                            descriptor,
+                            "c".repeat(64),
+                        )
+                        .expect("retained plan should validate"),
+                        continuation_count: AtomicUsize::new(0),
+                    }),
+                    Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+                    limits(),
+                )
+                .with_provider_session_service(sessions.clone());
+                let calls: Box<dyn Fn() -> usize> =
+                    Box::new(move || provider.calls.load(Ordering::SeqCst));
+                (coordinator, calls, Some(sessions))
+            } else {
+                let provider = Arc::new(TestProviderExecutor {
+                    responses: Mutex::new(VecDeque::new()),
+                    require_checkpoint_cleared: true,
+                    calls: AtomicUsize::new(0),
+                    closed: Mutex::new(Vec::new()),
+                });
+                let coordinator = AiSupervisedAgentCoordinator::new(
+                    run.clone(),
+                    provider.clone(),
+                    Arc::new(TestOutputWriter),
+                    checkpoints,
+                    control.clone(),
+                    stager,
+                    unused_automatic(),
+                    unused_resume(),
+                    Arc::new(TestRuleResolver),
+                    Arc::new(TestPlanner {
+                        scope: test_scope(),
+                        route: test_route(),
+                        continuation_count: AtomicUsize::new(0),
+                    }),
+                    Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+                    limits(),
+                );
+                let calls: Box<dyn Fn() -> usize> =
+                    Box::new(move || provider.calls.load(Ordering::SeqCst));
+                (coordinator, calls, None)
+            };
+            let outcome = coordinator
+                .execute_claimed(&claimed)
+                .await
+                .expect("a refused delivery closes the run");
+            assert!(
+                matches!(outcome, AiSupervisedAgentRunOutcome::Failed { .. }),
+                "retained {retained}: {outcome:?}"
+            );
+            assert!(control.inner.consumed.load(Ordering::SeqCst));
+            assert_eq!(control.admissions.load(Ordering::SeqCst), 1);
+            assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+            assert_eq!(
+                run.final_codes(),
+                vec![(
+                    "subscription_authority_revoked".to_owned(),
+                    Some("subscription_authority_revoked".to_owned())
+                )]
+            );
+            assert_eq!(provider_calls(), 0, "nothing reached the provider");
+            if let Some(sessions) = sessions {
+                assert!(sessions.reclaimed.load(Ordering::SeqCst));
+                assert_eq!(sessions.cleanups.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 
     /// Checkpoint control whose subscription adoption fails with one fixed

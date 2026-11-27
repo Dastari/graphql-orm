@@ -387,7 +387,76 @@ mod frozen_tool_surface_budget_tests {
     }
 }
 
+/// Fixed model-facing replacement of one durable-wait result withheld from
+/// stateless replay history. It carries no part of the payload.
+pub(crate) fn withheld_subscription_output(
+    refusal: crate::AiSubscriptionResultRefusal,
+) -> serde_json::Value {
+    serde_json::json!({
+        "historicalToolContentWithheld": true,
+        "executionRepeated": false,
+        "reason": refusal.code(),
+    })
+}
+
 impl AiProviderCallPlan {
+    /// Applies a coordinator's final durable-wait admission to this turn.
+    ///
+    /// A withheld result this turn would deliver now (a tool result in the
+    /// request input) refuses the turn with its refusal. A withheld result in
+    /// stateless replay history is replaced with
+    /// [`withheld_subscription_output`]. Returns whether history changed, so
+    /// the caller rebinds its expected continuation chain.
+    pub(crate) fn withhold_subscription_results(
+        &mut self,
+        withheld: &[crate::AiWithheldSubscriptionResult],
+    ) -> Result<bool, crate::AiSubscriptionResultRefusal> {
+        if withheld.is_empty() {
+            return Ok(false);
+        }
+        let refusal_of = |call_id: &str| {
+            withheld
+                .iter()
+                .find(|result| result.provider_call_id() == call_id)
+                .map(crate::AiWithheldSubscriptionResult::refusal)
+        };
+        for input in &self.request.input {
+            if let ModelInputBlock::ToolResult { call_id, .. } = input
+                && let Some(refusal) = refusal_of(call_id)
+            {
+                return Err(refusal);
+            }
+        }
+        let mut changed = false;
+        if let Some(ModelContinuation::StatelessConversation { messages, .. }) =
+            &mut self.request.continuation
+        {
+            for message in messages {
+                if let ModelConversationMessage::Tool {
+                    call_id, output, ..
+                } = message
+                    && let Some(refusal) = refusal_of(call_id)
+                {
+                    let marker = withheld_subscription_output(refusal);
+                    if *output != marker {
+                        *output = marker;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// The chain reference of this plan's continuation and input, as the
+    /// provider executor records it.
+    pub(crate) fn continuation_chain_reference(&self) -> Option<String> {
+        self.request
+            .continuation
+            .as_ref()
+            .and_then(|continuation| continuation.chain_reference(&self.request.input))
+    }
+
     /// Creates and statically binds a provider call to its budget and egress
     /// manifests.
     ///
@@ -1819,6 +1888,20 @@ impl AiProviderCallPlan {
 
     pub(crate) fn is_continuation(&self) -> bool {
         self.request.continuation.is_some()
+    }
+
+    /// Replaces the planned continuation of a test plan.
+    #[cfg(test)]
+    pub(crate) fn test_with_continuation(mut self, continuation: ModelContinuation) -> Self {
+        self.request.continuation = Some(continuation);
+        self.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        self
+    }
+
+    /// The planned continuation of a test plan.
+    #[cfg(test)]
+    pub(crate) fn test_continuation(&self) -> Option<&ModelContinuation> {
+        self.request.continuation.as_ref()
     }
 
     #[cfg(test)]

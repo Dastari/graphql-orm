@@ -1474,3 +1474,154 @@ async fn sqlite_a_broker_change_between_adoption_and_consumption_delivers_nothin
         assert!(adoptions[0].consumed_at.is_none());
     }
 }
+
+#[tokio::test]
+async fn sqlite_a_late_timeout_refusal_closes_the_wait_with_its_code() {
+    for revoke_policy in [true, false] {
+        let fixture = wait_fixture().await;
+        let audit: Arc<dyn AiEgressDecisionAudit> = if revoke_policy {
+            let allowed = fixture.broker_allowed.clone();
+            Arc::new(RevokingEgressAudit {
+                revoke: Box::new(move || allowed.store(false, Ordering::SeqCst)),
+            })
+        } else {
+            let index = fixture.broker_index.clone();
+            let without = Arc::new(WaitCurrentIndex::index(
+                &fixture.target_id,
+                &fixture.semantics,
+                &fixture.capability_catalog,
+                false,
+            ));
+            Arc::new(RevokingEgressAudit {
+                revoke: Box::new(move || {
+                    *index.0.write().expect("index lock") = Arc::clone(&without);
+                }),
+            })
+        };
+        let late = fixture
+            .service_with_audit(
+                Some(&fixture.capability_catalog),
+                fixture.rules.clone(),
+                audit,
+            )
+            .await;
+        let registered = fixture
+            .register_brokered(&fixture.service, &fixture.rules, "timeout-refused-call")
+            .await
+            .expect("brokered wait registers");
+        // The wait times out; the change lands while the timeout's egress
+        // decision is audited.
+        fixture.clock.advance_seconds(61);
+        assert!(matches!(
+            late.process_next("timeout-refused-worker").await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Closed { waiter_id, .. })
+                if waiter_id == registered.waiter_id()
+        ));
+        let expected = if revoke_policy {
+            "subscription_authority_revoked"
+        } else {
+            "capability_stale"
+        };
+        assert_eq!(
+            closed_codes(&fixture, &registered).await,
+            (
+                AiRunState::Failed.as_str().to_owned(),
+                Some(expected.to_owned()),
+                Some(expected.to_owned()),
+            )
+        );
+        let waiter =
+            AiSubscriptionWaiterRecord::find_by_id(&fixture.database, &registered.waiter_id().0)
+                .await
+                .expect("waiter loads")
+                .expect("waiter exists");
+        assert!(waiter.claim_owner.is_none(), "the claim is not left held");
+        assert_eq!(adoption_count(&fixture).await, 0);
+    }
+}
+
+#[tokio::test]
+async fn sqlite_final_admission_withholds_delivered_brokered_results_after_a_change() {
+    let fixture = wait_fixture().await;
+    let registered = fixture
+        .register_brokered(&fixture.service, &fixture.rules, "admitted-result-call")
+        .await
+        .expect("brokered wait registers");
+    let lease = fixture.start_lease().await;
+    let direct = fixture.direct_result(&lease, &["direct-result-call"]);
+    fixture
+        .register_result(
+            &fixture.service,
+            &fixture.rules,
+            &lease,
+            direct,
+            None,
+            test_rule_usage(),
+        )
+        .await
+        .expect("direct wait registers");
+    fixture.source.push(fixture.event(1, "wanted"));
+    fixture.source.push(fixture.event(2, "wanted"));
+    for worker in ["admission-worker-a", "admission-worker-b"] {
+        assert!(matches!(
+            fixture.service.process_next(worker).await,
+            Ok(AiSubscriptionWaitWorkerOutcome::Queued { .. })
+        ));
+    }
+    // Resume the brokered run and deliver its result.
+    let mut brokered_lease = None;
+    for _ in 0..2 {
+        let lease = fixture.resume().await;
+        if lease.run_id() == registered.run_id() {
+            brokered_lease = Some(lease);
+        }
+    }
+    let lease = brokered_lease.expect("the brokered run resumes");
+    let control = AiSupervisedSubscriptionCheckpointControl::new(
+        fixture.service.clone(),
+        Arc::new(EmptySupervisedCheckpointControl),
+    );
+    let Some(crate::AiAdoptedClassifiedMutationBatch::Subscription(adopted)) =
+        crate::AiAgentSupervisedCheckpointControl::adopt_classified(&control, &lease)
+            .await
+            .expect("adoption validates")
+    else {
+        panic!("subscription checkpoint classifies");
+    };
+    let lease =
+        crate::AiAgentSupervisedCheckpointControl::consume_subscription(&control, &lease, &adopted)
+            .await
+            .expect("the result is consumed");
+    let admit = |lease: AiRunLease| {
+        let control = &control;
+        async move {
+            crate::AiAgentSupervisedCheckpointControl::admit_subscription_results(control, &lease)
+                .await
+                .expect("admission decides")
+        }
+    };
+    assert_eq!(
+        admit(lease.clone()).await,
+        Vec::new(),
+        "admitted while current"
+    );
+    // Revoked after consumption (for example while its transaction
+    // retried, or between provider turns): the result is withheld.
+    fixture.broker_allowed.store(false, Ordering::SeqCst);
+    assert_eq!(
+        admit(lease.clone()).await,
+        vec![crate::AiWithheldSubscriptionResult::new(
+            "admitted-result-call",
+            crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+        )]
+    );
+    fixture.broker_allowed.store(true, Ordering::SeqCst);
+    fixture.broker_index.remove_subscriptions(&fixture);
+    assert_eq!(
+        admit(lease).await,
+        vec![crate::AiWithheldSubscriptionResult::new(
+            "admitted-result-call",
+            crate::AiSubscriptionResultRefusal::CapabilityStale,
+        )]
+    );
+}

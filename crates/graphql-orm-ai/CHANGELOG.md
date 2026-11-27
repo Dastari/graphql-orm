@@ -47,10 +47,19 @@ supersedes: []
   and at every claim, delivery and resumption: an entry removed from the
   broker's current index or replaced closes it as `capability_stale`, and a
   host capability policy denial as `subscription_authority_revoked`, so
-  revoking broker access stops waits already parked. The last re-admission
-  of a delivery runs immediately before its durable write, and resumption
-  re-admits again when the adoption is consumed, immediately before the
-  result reaches the provider. Per-turn, per-run and
+  revoking broker access stops waits already parked. Delivery re-admits again
+  before its durable write and consumption before it commits, but the
+  authoritative check is the coordinators': before every provider turn,
+  after cancellation, rule resolution and session reclaim and with no await
+  before the provider executor is called, they call the new
+  `admit_subscription_results` checkpoint-adapter method. A refused result
+  the turn would deliver fails the run with `capability_stale` or
+  `subscription_authority_revoked`; one in stateless replay history is
+  replaced with a fixed withheld marker and never resent. Re-admission reads
+  the broker index again after host policy awaited. The guarantee is
+  ordering: a change committed before that check wins; nothing is promised
+  about provider transport. A late refusal while a timeout is delivered
+  closes the wait with its code instead of leaving the claim held. Per-turn, per-run and
   rule-usage limits are those of a direct wait. No schema module change. The discover
   and execute broker definitions change in the same release as broker
   version 3. [Migration](MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
@@ -73,9 +82,12 @@ supersedes: []
   entry the current index no longer lets it reach. A clone sharing loaded
   state, or a run whose rules refuse the mutation, therefore cannot tell a
   hidden capability from an unknown one. `describe_type` answers the same
-  way, decided before any principal or index resolution, and a
-  continuation of a capability that is never continued is checked against
-  the current index first. Host policy denial and substitution stay
+  way. Current-index reachability is decided before the principal is
+  resolved, and call shape (continuation plan fields, observation,
+  operation name) is validated only after reachability, so neither a
+  principal-resolution outcome nor a shape error distinguishes a held
+  reference from an unknown one. A continuation of a capability that is
+  never continued is checked against the current index first. Host policy denial and substitution stay
   `Forbidden`.
 - **Fixed (#551).** The wait service checked hierarchical rules against the
   per-plan compiled descriptor fingerprint instead of the subscription's
@@ -84,6 +96,10 @@ supersedes: []
   capability fingerprint, the fingerprint of its offered definition, for
   direct and brokered waits alike.
 - New API: `AiCapabilityBrokerSession::with_brokered_subscriptions`,
+  `AiAgentCheckpointAdopter::admit_subscription_results` and
+  `AiAgentSupervisedCheckpointControl::admit_subscription_results` (default:
+  withhold nothing), `OrmAiSubscriptionWaitService::admit_subscription_results`,
+  `AiWithheldSubscriptionResult`, `AiSubscriptionResultRefusal`,
   `brokers_subscriptions` and `holds_loaded_subscription`,
   `AiCapabilityExecution::is_subscription_wait`,
   `AI_CAPABILITY_SUBSCRIPTION_UNROUTED`,

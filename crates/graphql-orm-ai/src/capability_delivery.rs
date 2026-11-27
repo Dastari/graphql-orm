@@ -1879,7 +1879,10 @@ impl AiCapabilityDiscoveryBroker {
             None
         };
         self.verify_loaded_fence(principal_reference, run, loaded)?;
-        let principal = self.rehydrate(principal_reference).await?;
+        // Whether the session still reaches the entry is decided from the
+        // current index before the principal is resolved, so a held
+        // reference it no longer reaches answers as an unknown one, without
+        // a principal-resolution outcome of its own.
         let indexes = self.current_indexes.current_index_set(run)?;
         let (index, entry) = indexes
             .entry(&loaded.capability_id)
@@ -1893,6 +1896,7 @@ impl AiCapabilityDiscoveryBroker {
         if !session.brokers_entry(index, entry) {
             return Err(stale_selection());
         }
+        let principal = self.rehydrate(principal_reference).await?;
         let mut current = self
             .load_entry(&principal, run, &indexes, index, entry)
             .await?;
@@ -1982,13 +1986,8 @@ impl AiCapabilityDiscoveryBroker {
     ) -> Result<(), AiError> {
         let principal = self.rehydrate(principal_reference).await?;
         let indexes = self.current_indexes.current_index_set(run)?;
-        let (index, entry) = indexes.entry(capability_id).ok_or_else(stale_capability)?;
-        if entry.kind != AiCapabilityKind::GeneratedSubscription
-            || entry.capability_fingerprint != capability_fingerprint
-            || !index.subscriptions_checked_against_finished_schema()
-        {
-            return Err(stale_capability());
-        }
+        let (index, entry) =
+            current_subscription_entry(&indexes, capability_id, capability_fingerprint)?;
         let decision = self
             .authority
             .authorize(&principal, index, entry, run)
@@ -2007,8 +2006,31 @@ impl AiCapabilityDiscoveryBroker {
                 return Err(AiError::Forbidden);
             }
         }
+        // Host policy awaited: the entry it admitted must still be current.
+        // The index is read again after the last await, so an entry removed
+        // or replaced while policy was decided is stale.
+        let indexes = self.current_indexes.current_index_set(run)?;
+        current_subscription_entry(&indexes, capability_id, capability_fingerprint)?;
         Ok(())
     }
+}
+
+/// The current index entry of one brokered generated subscription: present,
+/// still a subscription with exactly `capability_fingerprint`, and from an
+/// index compiled in process from a typed subscription catalogue.
+fn current_subscription_entry<'a>(
+    indexes: &'a AiCapabilityIndexSet,
+    capability_id: &AiToolId,
+    capability_fingerprint: &str,
+) -> Result<(&'a AiCapabilityIndex, &'a AiCapabilityIndexEntry), AiError> {
+    let (index, entry) = indexes.entry(capability_id).ok_or_else(stale_capability)?;
+    if entry.kind != AiCapabilityKind::GeneratedSubscription
+        || entry.capability_fingerprint != capability_fingerprint
+        || !index.subscriptions_checked_against_finished_schema()
+    {
+        return Err(stale_capability());
+    }
+    Ok((index, entry))
 }
 
 fn verify_search_binding(
@@ -4744,20 +4766,6 @@ impl AiCapabilityDiscoveryBroker {
             AiCapabilityKind::GeneratedSubscription if session.brokers_subscriptions() => false,
             _ => return Err(AiError::Forbidden),
         };
-        // Only a subscription takes an observation, and it always does.
-        let subscription = loaded.capability_kind == AiCapabilityKind::GeneratedSubscription;
-        if subscription != parsed.observation.is_some()
-            || (subscription && parsed.maximum_items.is_some())
-        {
-            return Err(malformed_broker_arguments());
-        }
-        if parsed
-            .operation
-            .as_ref()
-            .is_some_and(|operation| !valid_graphql_name(operation))
-        {
-            return Err(malformed_broker_arguments());
-        }
         let target = self
             .authorize_loaded_operation(
                 principal_reference,
@@ -4767,6 +4775,20 @@ impl AiCapabilityDiscoveryBroker {
                 parsed.operation.as_deref(),
             )
             .await?;
+        // Call shape is validated only once the session is proven to still
+        // reach the capability, so a held reference it no longer reaches
+        // answers as an unknown one whatever the call carries.
+        // Only a subscription takes an observation, and it always does.
+        let subscription = loaded.capability_kind == AiCapabilityKind::GeneratedSubscription;
+        if subscription != parsed.observation.is_some()
+            || (subscription && parsed.maximum_items.is_some())
+            || parsed
+                .operation
+                .as_ref()
+                .is_some_and(|operation| !valid_graphql_name(operation))
+        {
+            return Err(malformed_broker_arguments());
+        }
         if parsed.arguments.len() > 64
             || parsed.selections.len() > 256
             || parsed
@@ -4913,20 +4935,22 @@ impl AiCapabilityDiscoveryBroker {
         parsed: BrokerExecuteArguments,
         handle: &str,
     ) -> Result<AiCapabilityExecution, AiError> {
-        // The retained query is the whole plan: nothing else may vary.
-        if !parsed.arguments.is_empty()
-            || parsed.observation.is_some()
-            || !parsed.selections.is_empty()
-            || !parsed.relationship_arguments.is_empty()
-            || !parsed.relationship_maximum_items.is_empty()
-            || parsed.maximum_items.is_some()
-            || parsed
-                .operation
-                .as_ref()
-                .is_some_and(|operation| !valid_graphql_name(operation))
-        {
-            return Err(malformed_broker_arguments());
-        }
+        // The retained query is the whole plan: nothing else may vary. The
+        // shape is enforced only after the session is proven to still reach
+        // the capability, so a held reference it no longer reaches answers
+        // as an unknown one whatever the call carries.
+        let operation_valid = parsed
+            .operation
+            .as_ref()
+            .is_none_or(|operation| valid_graphql_name(operation));
+        let shape_valid = parsed.arguments.is_empty()
+            && parsed.observation.is_none()
+            && parsed.selections.is_empty()
+            && parsed.relationship_arguments.is_empty()
+            && parsed.relationship_maximum_items.is_empty()
+            && parsed.maximum_items.is_none()
+            && operation_valid;
+        let requested_operation = parsed.operation.as_deref().filter(|_| operation_valid);
         if !matches!(
             loaded.capability_kind,
             AiCapabilityKind::GeneratedQuery | AiCapabilityKind::GeneratedEntity
@@ -4941,7 +4965,7 @@ impl AiCapabilityDiscoveryBroker {
                 run,
                 session,
                 loaded,
-                parsed.operation.as_deref(),
+                requested_operation,
             ))
             .await?;
             return Err(AiError::Forbidden);
@@ -4955,13 +4979,6 @@ impl AiCapabilityDiscoveryBroker {
             .ok_or_else(stale_selection)?;
         if self.clock.now() >= continuation.expires_at {
             return Err(stale_selection());
-        }
-        if parsed
-            .operation
-            .as_ref()
-            .is_some_and(|operation| operation != &continuation.operation_name)
-        {
-            return Err(invalid_operation());
         }
         // Reserve the execution first, so concurrent redemptions of one
         // chain cannot overspend it, and return it on any refusal below.
@@ -4988,6 +5005,15 @@ impl AiCapabilityDiscoveryBroker {
             // and unexpired now.
             if !self.continuation_retained(session, handle, continuation.expires_at) {
                 return Err(stale_selection());
+            }
+            // Reached: now the call itself must be a bare continuation of
+            // this handle's operation.
+            if !shape_valid {
+                return Err(malformed_broker_arguments());
+            }
+            if requested_operation.is_some_and(|operation| operation != continuation.operation_name)
+            {
+                return Err(invalid_operation());
             }
             Ok(target)
         }
@@ -9189,6 +9215,93 @@ mod tests {
             "subscription whose index lost its proof",
         )
         .await;
+        // Shape is validated only after reachability: a continuation that
+        // also carries plan fields answers as an unknown reference.
+        let malformed = |reference: &str| {
+            json!({
+                "loadedReference": reference,
+                "continuation": "a".repeat(64),
+                "arguments": [{"name": "id", "value": "wanted"}],
+                "selections": ["id"],
+                "observation": observation,
+            })
+        };
+        let held = broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &malformed(&loaded_reference),
+            )
+            .await;
+        let unknown = broker
+            .authorize_broker_execution(
+                &principal_reference,
+                &run,
+                &session,
+                &malformed(&"f".repeat(64)),
+            )
+            .await;
+        assert!(
+            matches!(&held, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+            "{held:?}"
+        );
+        assert_eq!(format!("{:?}", held.err()), format!("{:?}", unknown.err()));
+        // Reachability is decided before the principal is resolved: with a
+        // principal that no longer resolves, the held reference still
+        // answers exactly as an unknown one, never with its own
+        // reauthorization outcome.
+        let unresolvable = AiCapabilityDiscoveryBroker::new(
+            Arc::new(UnresolvablePrincipal),
+            current.clone(),
+            authority.clone(),
+            Arc::new(FixedClock::new(OffsetDateTime::UNIX_EPOCH)),
+            Duration::seconds(30),
+        )
+        .expect("broker");
+        for call in [
+            execute.clone(),
+            json!({"loadedReference": loaded_reference, "continuation": "a".repeat(64)}),
+        ] {
+            let unknown_call = {
+                let mut call = call.clone();
+                call["loadedReference"] = json!("f".repeat(64));
+                call
+            };
+            let held = unresolvable
+                .authorize_broker_execution(&principal_reference, &run, &session, &call)
+                .await;
+            let unknown = unresolvable
+                .authorize_broker_execution(&principal_reference, &run, &session, &unknown_call)
+                .await;
+            assert!(
+                matches!(&held, Err(AiError::InvalidInput(message)) if message == AI_CAPABILITY_SELECTION_STALE),
+                "{held:?}"
+            );
+            assert_eq!(format!("{:?}", held.err()), format!("{:?}", unknown.err()));
+        }
+        describe_type_matches_unknown(
+            &unresolvable,
+            &principal_reference,
+            &run,
+            &session,
+            &loaded_reference,
+            "unresolvable principal",
+        )
+        .await;
+    }
+
+    /// A principal resolver that no longer resolves anyone.
+    struct UnresolvablePrincipal;
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for UnresolvablePrincipal {
+        async fn resolve(
+            &self,
+            _reference: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            Err(agql_auth::AuthError::Forbidden)
+        }
     }
 
     #[test]

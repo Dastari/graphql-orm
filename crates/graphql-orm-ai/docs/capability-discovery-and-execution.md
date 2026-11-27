@@ -961,6 +961,19 @@ run or provider, therefore stops a wait that is already parked. A service
 without the broker refuses broker-routed registration and closes an existing
 broker-routed wait at its next claim.
 
+**The coordinators make the final check.** Before every provider turn,
+after cancellation, rule resolution and (supervised) provider-session
+reclaim, with nothing awaited between the answer and the call into the
+provider executor, both coordinators call `admit_subscription_results` on
+their checkpoint adapter; the durable-wait adapters re-admit every adopted
+broker-routed wait of the run. A refused result the turn would deliver fails
+the run with `capability_stale` or `subscription_authority_revoked`. A
+refused result in stateless replay history is replaced with a fixed
+withheld marker and never resent. The broker reads its current index again
+after host policy awaited. The guarantee is ordering: a change committed
+before that final check wins; nothing is promised once the provider executor
+has been called.
+
 **Unreachable references are stale.** Session clones share loaded state. A
 reference a session does not reach (a subscription or mutation family it
 does not broker, or a static tool outside its list) is `selection_stale` at

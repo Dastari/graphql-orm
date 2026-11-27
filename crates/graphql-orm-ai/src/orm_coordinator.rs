@@ -1230,6 +1230,29 @@ pub trait AiAgentCheckpointAdopter: Send + Sync {
         lease: &AiRunLease,
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError>;
+
+    /// Final admission of the durable-wait results a provider turn delivers
+    /// or replays.
+    ///
+    /// The coordinator calls this before every provider turn, after
+    /// cancellation, rule resolution and (for the supervised coordinator)
+    /// provider-session reclaim, with no await between its answer and the
+    /// hand-off to the provider executor. A returned result that the turn
+    /// would deliver now fails the run with the result's code; one in
+    /// stateless replay history is replaced with a fixed withheld marker.
+    /// The default withholds nothing; the durable-wait adapters re-admit
+    /// every adopted broker-routed wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error when admission cannot be decided; the
+    /// coordinator then fails the run closed.
+    async fn admit_subscription_results(
+        &self,
+        _lease: &AiRunLease,
+    ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
@@ -1641,7 +1664,7 @@ impl AiReadOnlyAgentCoordinator {
                     .await;
             }
             let (
-                provider_plan,
+                mut provider_plan,
                 scope,
                 correlation_id,
                 mode,
@@ -1725,6 +1748,19 @@ impl AiReadOnlyAgentCoordinator {
                 AiReadOnlyAgentTurnMode::ChatOnly
                 | AiReadOnlyAgentTurnMode::ApplicationTools(_) => None,
             };
+            // The authoritative final admission of every durable-wait result
+            // this turn delivers or replays: after cancellation, rule
+            // resolution and usage projection, and with nothing awaited
+            // between its answer and the provider executor below.
+            if let Err(code) = apply_subscription_admission(
+                self.checkpoint_adopter
+                    .admit_subscription_results(&lease)
+                    .await,
+                &mut provider_plan,
+                &mut guard,
+            ) {
+                return self.finish_failed(&lease, &guard, code).await;
+            }
             let provider_result = if let Some(session_plan) = provider_session_plan {
                 let Some(session_service) = &self.provider_session_service else {
                     return self
@@ -2678,6 +2714,33 @@ impl AiReadOnlyAgentCoordinator {
     }
 }
 
+/// Applies a final durable-wait admission to the planned provider turn.
+///
+/// A refused result the turn would deliver now fails it with the refusal's
+/// code (`capability_stale` or `subscription_authority_revoked`). A refused
+/// result in stateless replay history is replaced with the fixed withheld
+/// marker, and the loop guard is rebound to the changed history. A failed
+/// admission fails the turn closed.
+pub(crate) fn apply_subscription_admission(
+    admission: Result<Vec<crate::AiWithheldSubscriptionResult>, AiError>,
+    provider_plan: &mut AiProviderCallPlan,
+    guard: &mut AiAgentLoopGuard,
+) -> Result<(), &'static str> {
+    const FAILED: &str = "subscription_result_admission_failed";
+    let withheld = admission.map_err(|_| FAILED)?;
+    let before = provider_plan.continuation_chain_reference();
+    match provider_plan.withhold_subscription_results(&withheld) {
+        Ok(false) => Ok(()),
+        Ok(true) => guard
+            .rebind_withheld_history(
+                before.as_deref(),
+                provider_plan.continuation_chain_reference(),
+            )
+            .map_err(|_| FAILED),
+        Err(refusal) => Err(refusal.code()),
+    }
+}
+
 /// Durable recovery code of a failed checkpoint adoption.
 ///
 /// An adoption the adopter refused because the capability it resumes was
@@ -2753,6 +2816,7 @@ mod tests {
     use crate::{
         AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest,
         AiRunCancellation, AiSourceTrust, DataClassification, ModelContinuation,
+        ModelConversationMessage, ModelConversationToolCall, ModelInputBlock,
     };
 
     mod heartbeat_writer_tests {
@@ -5523,6 +5587,257 @@ mod tests {
         assert!(adopter.consumed.load(Ordering::SeqCst));
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    /// An adopter whose final durable-wait admission refuses `test-call`
+    /// once `refuse` is set, by the change a post-consumption await made.
+    struct GatedCheckpointAdopter {
+        inner: TestCheckpointAdopter,
+        refuse: Arc<AtomicBool>,
+        refuse_on_consume: bool,
+        refusal: crate::AiSubscriptionResultRefusal,
+        admissions: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointAdopter for GatedCheckpointAdopter {
+        async fn adopt_tool_batch(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
+            self.inner.adopt_tool_batch(lease).await
+        }
+
+        async fn consume_before_provider(
+            &self,
+            lease: &AiRunLease,
+            checkpoint_id: Uuid,
+        ) -> Result<AiRunLease, AiError> {
+            let consumed = self
+                .inner
+                .consume_before_provider(lease, checkpoint_id)
+                .await;
+            if self.refuse_on_consume {
+                self.refuse.store(true, Ordering::SeqCst);
+            }
+            consumed
+        }
+
+        async fn admit_subscription_results(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Vec<crate::AiWithheldSubscriptionResult>, AiError> {
+            self.admissions.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.refuse.load(Ordering::SeqCst) {
+                vec![crate::AiWithheldSubscriptionResult::new(
+                    "test-call",
+                    self.refusal,
+                )]
+            } else {
+                Vec::new()
+            })
+        }
+    }
+
+    /// Rules that resolve as the test rules and set `refuse` while they
+    /// resolve: a change committed during the post-consumption rule await.
+    struct RefusingRuleResolver(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl AiAgentRuleResolver for RefusingRuleResolver {
+        async fn resolve_rules(
+            &self,
+            lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            self.0.store(true, Ordering::SeqCst);
+            TestRuleResolver.resolve_rules(lease, scope).await
+        }
+    }
+
+    /// The final durable-wait admission runs after consumption and the
+    /// post-consumption awaits, immediately before provider dispatch: a
+    /// change committed during consumption or rule resolution refuses the
+    /// delivery with its code and nothing reaches the provider.
+    #[tokio::test]
+    async fn a_change_after_consumption_refuses_the_resumed_delivery() {
+        for (during_consumption, refusal) in [
+            (true, crate::AiSubscriptionResultRefusal::AuthorityRevoked),
+            (false, crate::AiSubscriptionResultRefusal::CapabilityStale),
+        ] {
+            let base_lease = AiRunLease::test_running(principal_reference());
+            let checkpoint_id = Uuid::new_v4();
+            let claimed = base_lease.test_with_checkpoint(checkpoint_id);
+            let refuse = Arc::new(AtomicBool::new(false));
+            let adopter = Arc::new(GatedCheckpointAdopter {
+                inner: TestCheckpointAdopter {
+                    adopted: Mutex::new(Some(adopted_read_only_checkpoint(
+                        &base_lease,
+                        checkpoint_id,
+                    ))),
+                    consumed: AtomicBool::new(false),
+                },
+                refuse: refuse.clone(),
+                refuse_on_consume: during_consumption,
+                refusal,
+                admissions: AtomicUsize::new(0),
+            });
+            let rules: Arc<dyn AiAgentRuleResolver> = if during_consumption {
+                Arc::new(TestRuleResolver)
+            } else {
+                Arc::new(RefusingRuleResolver(refuse.clone()))
+            };
+            let run = Arc::new(TestRunControl::new());
+            let provider = Arc::new(CheckpointClearedProvider {
+                response: Mutex::new(Some(AiProviderCallResult::test_result(
+                    &claimed,
+                    Some("adopted-response".to_owned()),
+                    "must-not-run",
+                    Vec::new(),
+                ))),
+            });
+            let coordinator = AiReadOnlyAgentCoordinator::new(
+                run.clone(),
+                provider.clone(),
+                Arc::new(TestToolExecutor {
+                    expose_result: true,
+                }),
+                Arc::new(TestOutputWriter),
+                Arc::new(TestCheckpointWriter),
+                adopter.clone(),
+                rules,
+                Arc::new(AdoptionOnlyPlanner {
+                    scope: test_scope(),
+                    route: test_route(),
+                    continuation_count: AtomicUsize::new(0),
+                }),
+                limits(50),
+            );
+            let outcome = coordinator
+                .execute_claimed(&claimed)
+                .await
+                .expect("a refused delivery closes the run");
+            assert!(matches!(outcome, Failed { .. }), "{outcome:?}");
+            assert!(adopter.inner.consumed.load(Ordering::SeqCst));
+            assert_eq!(adopter.admissions.load(Ordering::SeqCst), 1);
+            assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+            assert_eq!(run.final_codes(), vec![refusal.code().to_owned()]);
+            assert!(
+                provider.response.lock().expect("provider lock").is_some(),
+                "nothing reached the provider"
+            );
+        }
+    }
+
+    /// A withheld result in stateless replay history is replaced with the
+    /// fixed marker, never sent, and the loop guard follows the changed
+    /// history; one the turn would deliver now refuses the turn.
+    #[test]
+    fn stateless_replay_withholds_refused_subscription_results() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let history = ModelContinuation::StatelessConversation {
+            instructions: vec!["Test instructions.".to_owned()],
+            messages: vec![
+                ModelConversationMessage::User {
+                    content: vec![ModelInputBlock::Text {
+                        text: "wait for the record".to_owned(),
+                    }],
+                },
+                ModelConversationMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![ModelConversationToolCall {
+                        call_id: "replayed-call".to_owned(),
+                        tool_id: "graphql.capabilities.execute".to_owned(),
+                        provider_name: "graphql_capabilities_execute".to_owned(),
+                        tool_fingerprint: "a".repeat(64),
+                        arguments: json!({"loadedReference": "b".repeat(64)}),
+                    }],
+                },
+                ModelConversationMessage::Tool {
+                    call_id: "replayed-call".to_owned(),
+                    tool_id: "graphql.capabilities.execute".to_owned(),
+                    provider_name: "graphql_capabilities_execute".to_owned(),
+                    output: json!({"event": {"secret": "payload"}}),
+                },
+            ],
+        };
+        let mut plan = AiProviderCallPlan::test_plan(&lease, test_scope(), true)
+            .test_with_continuation(history);
+        let before = plan
+            .continuation_chain_reference()
+            .expect("planned chain reference");
+        let mut guard = AiAgentLoopGuard::resume_after_tool_batch(
+            &lease,
+            AiAgentLoopLimits::new(4, 8).unwrap(),
+            1,
+            1,
+            &before,
+        )
+        .expect("guard");
+        apply_subscription_admission(
+            Ok(vec![crate::AiWithheldSubscriptionResult::new(
+                "replayed-call",
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+            )]),
+            &mut plan,
+            &mut guard,
+        )
+        .expect("history is withheld, not refused");
+        let Some(ModelContinuation::StatelessConversation { messages, .. }) =
+            plan.test_continuation()
+        else {
+            panic!("stateless history stays");
+        };
+        let ModelConversationMessage::Tool { output, .. } = &messages[2] else {
+            panic!("tool message stays");
+        };
+        assert_eq!(
+            output,
+            &crate::provider_calls::withheld_subscription_output(
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked
+            )
+        );
+        assert!(!output.to_string().contains("payload"));
+        let after = plan
+            .continuation_chain_reference()
+            .expect("rebound reference");
+        assert_ne!(after, before);
+        // The guard now expects the changed history and refuses the old one.
+        assert!(
+            guard
+                .rebind_withheld_history(Some(&before), Some(after.clone()))
+                .is_err()
+        );
+        assert!(
+            guard
+                .rebind_withheld_history(Some(&after), Some(after.clone()))
+                .is_ok()
+        );
+        // Withholding again is idempotent.
+        assert_eq!(
+            plan.withhold_subscription_results(&[crate::AiWithheldSubscriptionResult::new(
+                "replayed-call",
+                crate::AiSubscriptionResultRefusal::AuthorityRevoked,
+            )]),
+            Ok(false)
+        );
+        // The result the turn delivers now (`test-call`) refuses the turn.
+        assert_eq!(
+            apply_subscription_admission(
+                Ok(vec![crate::AiWithheldSubscriptionResult::new(
+                    "test-call",
+                    crate::AiSubscriptionResultRefusal::CapabilityStale,
+                )]),
+                &mut plan,
+                &mut guard,
+            ),
+            Err("capability_stale")
+        );
+        // A failed admission fails closed.
+        assert_eq!(
+            apply_subscription_admission(Err(AiError::PersistenceFailed), &mut plan, &mut guard),
+            Err("subscription_result_admission_failed")
+        );
     }
 
     /// An adopter whose every adoption fails with one fixed error.
