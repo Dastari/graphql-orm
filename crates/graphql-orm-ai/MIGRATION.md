@@ -12,6 +12,10 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Capability acceptance benchmark (#551)
+
+**No action.** This benchmark-only addition requires no data migration.
+
 ### Generated subscriptions through the capability broker (#551)
 
 **Action needed** for fixed-broker hosts, and for hosts whose rules list

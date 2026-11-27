@@ -33,6 +33,11 @@
 //! Run `--contract 2` on both revisions and compare stdout with `cmp` to
 //! check catalogue, definition and describe output bytes. The snapshot
 //! replaces the per-session loaded reference with a fixed value.
+//! Use `--acceptance 400` or `--acceptance 40000` for the fixed questions
+//! and a per-call trace through the first successful execute and beyond.
+
+#[path = "capability_context/acceptance.rs"]
+mod acceptance;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -484,6 +489,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     match arguments.as_slice() {
+        [flag, entries] if flag == "--acceptance" => {
+            let point = runtime.block_on(acceptance::measure(entries.parse()?))?;
+            println!("{}", serde_json::to_string_pretty(&point)?);
+            return Ok(());
+        }
         [flag, targets] if matches!(flag.as_str(), "--point" | "--compile-federated") => {
             let point = runtime.block_on(measure_federated(
                 targets.parse()?,
@@ -634,11 +644,18 @@ fn rename(text: &str, name: &str, description: Option<&str>) -> String {
 }
 
 async fn template() -> Result<Template, Box<dyn std::error::Error>> {
-    use async_graphql_parser::types::{TypeKind, TypeSystemDefinition};
-
     let database = graphql_orm::prelude::Database::connect_sqlite("sqlite::memory:").await?;
     let sdl = template::schema_builder(database).finish().sdl();
-    let document = async_graphql_parser::parse_schema(&sdl)?;
+    split_template(&sdl, template::graphql_orm_semantic_catalog())
+}
+
+fn split_template(
+    sdl: &str,
+    semantics: &'static GraphqlSemanticCatalog,
+) -> Result<Template, Box<dyn std::error::Error>> {
+    use async_graphql_parser::types::{TypeKind, TypeSystemDefinition};
+
+    let document = async_graphql_parser::parse_schema(sdl)?;
     let lines = sdl.lines().collect::<Vec<_>>();
     let start_line = |description: Option<usize>, definition: usize| {
         description.map_or(definition, |line| line.min(definition))
@@ -696,7 +713,7 @@ async fn template() -> Result<Template, Box<dyn std::error::Error>> {
         shared: Vec::new(),
         family: Vec::new(),
         roots: Vec::new(),
-        semantics: template::graphql_orm_semantic_catalog(),
+        semantics,
     };
     for (position, (start, fields)) in starts.iter().enumerate() {
         let end = starts
@@ -837,19 +854,28 @@ fn compile_target(
     index_limits: AiCapabilityIndexLimits,
 ) -> Result<CompiledTarget, Box<dyn std::error::Error>> {
     let (sdl, semantics) = template.target(families, revised)?;
+    compile_target_sdl(target, &sdl, &semantics, index_limits)
+}
+
+fn compile_target_sdl(
+    target: usize,
+    sdl: &str,
+    semantics: &GraphqlSemanticCatalog,
+    index_limits: AiCapabilityIndexLimits,
+) -> Result<CompiledTarget, Box<dyn std::error::Error>> {
     let target_id = GraphqlExecutionTargetId::parse(format!("target-{target:04}"))?;
     let catalogue = AiGraphqlQueryCapabilityCatalog::compile(
         &format!("target{target:04}"),
         target_id.clone(),
-        &sdl,
-        &semantics,
+        sdl,
+        semantics,
         AiGraphqlQueryCapabilityLimits::default(),
     )?;
     let compile = |limits| {
         AiCapabilityIndex::compile(
             target_id.clone(),
             catalogue.finished_schema_fingerprint().to_owned(),
-            &semantics,
+            semantics,
             Some(&catalogue),
             None,
             None,

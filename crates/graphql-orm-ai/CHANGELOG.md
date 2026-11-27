@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.171.0 (breaking release)
+## Unreleased - 0.172.0 (breaking release)
+
+- The capability context benchmark now measures deterministic
+  question-to-execute outcomes at 400 and 40,000 index entries (#551).
 
 - **Breaking (#551).** Generated subscriptions can join the fixed capability
   broker as durable waits. This completes the #551 broker scope: generated
