@@ -91,10 +91,12 @@ subscription fingerprints. This completes the #551 broker scope.
    work. Refused current results fail the turn with `capability_stale` or
    `subscription_authority_revoked`. Refused stateless history is replaced
    with a fixed marker. Replay egress manifests account for the marker and
-   checkpoint adoption preserves it on restart.
+   checkpoint adoption preserves it on restart. Egress policies that
+   allowlist source kinds can admit the public, runtime-authored
+   `withheld_subscription_result` source for a marker.
 
-   An entry removed from the
-   current index, replaced, or without the in-process proof closes the wait
+   A removed or replaced index entry, or one without the in-process proof,
+   closes the wait
    as `capability_stale`, and a host policy denial closes it as
    `subscription_authority_revoked`, including a refusal found while a
    timeout is delivered (resumption refuses with
