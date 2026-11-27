@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.17.0 adds opt-in [receiver binding](#bind-a-resolver-catalogue-at-the-receiver)
+for a reviewed resolver catalogue v1 export.
+
 Version 0.16.0 adds optional replay-window facts to client metadata for
 opted-in generated Changed streams.
 [Changed replay reference](../../docs/reference/graphql-orm/macros-and-attributes.md#bounded-replay)
@@ -305,6 +308,29 @@ every key and authorization reference must name something the catalogue
 publishes, and the entries must agree on which served type each catalogue
 entity is. It cannot check that no served relationship is missing, because
 the semantic catalogue does not record which of its fields a schema serves.
+
+### Bind a resolver catalogue at the receiver
+
+Create a `GraphqlResolverCatalogBindingV1` with the expected resolver
+fingerprint from reviewed deployment configuration. Use
+`decode_export_json` for a standalone export or, with `router-protocol`,
+`decode_extensions` for the extension list of a validated subgraph
+descriptor. Both take the corresponding semantic catalogue and verify it
+against the resolver document.
+
+```rust,ignore
+let binding = GraphqlResolverCatalogBindingV1::new(reviewed_resolver_fingerprint)?;
+let resolvers = binding.decode_export_json(&export, &semantic)?;
+```
+
+The descriptor path requires exactly one `graphql-orm.resolver-catalog`
+extension at version 1 with an intact carrier fingerprint. Both paths
+require a valid v1 document whose fingerprint matches the pin. Treat an
+error as unavailable resolver metadata. A successful match establishes
+catalogue identity and consistency with the semantic catalogue. Resolver
+authorization still belongs to the serving schema.
+
+### Resolver authorization references
 
 An authorization requirement is never spelled out. `GraphqlResolverAuthorization`
 is one of:

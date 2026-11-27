@@ -17,6 +17,47 @@ supersedes: []
 to panic while generating bulk mutation result types now produces a
 compile error at the string literal.
 
+## 0.237.0 to 0.238.0: Nested closure targets
+
+**No action.** Upgrade ORM and macros together. A read-predicate closure
+whose target holds another closure can share the target's SQL when the
+target is built from stable column tests, generated filters, relations and
+their `and`, `or` and `not` combinations. The closure computes one
+three-valued verdict per row. A relation contributes the greatest truth
+among its related rows, FALSE when there is none and UNKNOWN when a key
+column is NULL.
+
+- **Handwritten SQL.** Nested closures keep the existing TRUE and FALSE
+  evaluation sites by default, including fragments inside relations or
+  generated relation filters. A host may implement
+  `ReadVisibilityFilter::is_stable_for_closure` to enable sharing when
+  repeated evaluations for the same row and binds always give the same
+  verdict and have no side effects. On PostgreSQL, a standalone closure
+  over a native Boolean target retains one evaluation at the anchor and
+  one at the recursive step per reached row.
+- **Eligibility.** Sharing also requires a target with supported negation,
+  without the deny fallback `1 = 0`, whose row columns can be projected.
+  Generated calendar-relative date filters keep the original sites because
+  they depend on the database clock. On SQL Server, names outside ASCII or
+  names that differ only by case prevent sharing. SQL Server tests each
+  scalar condition for TRUE and FALSE when it encodes the target verdict.
+- **Limits.** `READ_PREDICATE_CLOSURE_MAX_NESTING` (2),
+  `READ_PREDICATE_MAX_RENDERED_BYTES` (1 MiB) and
+  `READ_PREDICATE_MSSQL_MAX_NESTING` (75) are unchanged: they bound execution
+  cost and a server limit, which the smaller SQL does not change. The
+  composition budgets are measured on the SQL that is rendered, so a nested
+  composition previously refused with `AUTHORIZATION_MISCONFIGURED` for its
+  size, its `CASE` nesting or its relation total can now build. A closure
+  that built before still builds: it keeps the original rendering when the
+  shared one does not fit a limit.
+
+## 0.16.0 to 0.17.0: Resolver catalogue receiver binding
+
+**No action.** Existing resolver exports and fingerprints carry through the
+upgrade. Receivers can opt in to `GraphqlResolverCatalogBindingV1` using a
+reviewed resolver catalogue fingerprint and the corresponding semantic
+catalogue. See the [receiver binding reference](crates/graphql-orm-operation-catalog/README.md#bind-a-resolver-catalogue-at-the-receiver).
+
 ## 0.236.0 to 0.237.0: Bound generated write authority
 
 **No action** for supported callers: hosts that use the derives, the

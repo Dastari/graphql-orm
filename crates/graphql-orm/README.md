@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.238.0 shares the SQL of nested closure read predicates over stable
+filters and relations. Handwritten SQL shares evaluation sites only with an
+explicit host guarantee.
+[Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.237.0 derives the authority of a generated GraphQL write from the
 entity's configuration, issues it only after target admission and binds it to
 one request, operation and `Database`. Generated mutations are unchanged.

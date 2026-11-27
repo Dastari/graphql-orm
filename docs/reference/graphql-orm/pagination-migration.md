@@ -377,16 +377,26 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   negate it.
 - **Rendering.** A correlated scalar subquery, applied wherever the policy
   clause is applied: reads, counts, aggregates, keyset and connection pages,
-  search and subscription delivery re-reads. Nested closures over built-in
-  column comparisons and NULL tests can share one target expression across
-  the governed and reached rows, including under negation and boolean
-  composition. SQLite and PostgreSQL carry the target's truth in the
-  recursive tuple. This keeps collation-equal pointers with different
-  truths distinct even when the pointer and key use different collations
-  (#876). Standalone closures and targets with hand-written SQL, generated
-  filters or relations retain their existing evaluation sites. Nested
-  closures get distinct names. The database evaluates the closure per row.
-  Unsupported backends are refused with
+  search and subscription delivery re-reads. A closure whose target holds
+  another closure can share stable target SQL (#785). It computes one
+  three-valued verdict per row from a projection of the columns the target
+  reads. This covers column comparisons and NULL tests, stable filters,
+  relations and their `and`, `or` and `not` combinations. A relation's
+  verdict is the greatest truth among its related rows. In nested
+  compositions, a handwritten fragment keeps the existing TRUE and FALSE
+  evaluation sites by default, including inside a generated relation
+  filter. A host can opt in through
+  `ReadVisibilityFilter::is_stable_for_closure` when the SQL is stable and
+  side-effect-free. PostgreSQL standalone closures evaluate a native
+  Boolean target once in the anchor and once per reached row in the
+  recursive step. Nested targets with a deny fallback or unsupported
+  negation keep the original rendering. SQL Server tests scalar
+  conditions for TRUE and FALSE and requires projected column names to be
+  ASCII and distinct without regard to case. SQLite and PostgreSQL carry
+  the target's truth in the recursive tuple, keeping collation-equal
+  pointers with distinct truths separate (#876). Nested closures get
+  distinct names. The database evaluates each closure per row. Unsupported
+  backends are refused with
   `AUTHORIZATION_MISCONFIGURED`.
 - **SQLite and PostgreSQL** render `WITH RECURSIVE`.
 - **SQL Server** does not allow a common table expression inside a subquery,
@@ -450,8 +460,14 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
   | Relations that all generated relation filters and relation-count orderings add, each count ordering at least one (`READ_PREDICATE_MAX_STATEMENT_RELATIONS`, `READ_PREDICATE_MSSQL_MAX_STATEMENT_RELATIONS`) | one statement | SQLite, PostgreSQL / SQL Server | 64 / 5 |
   | Terms of a generated `orderBy` list (`MAX_ORDER_BY_TERMS`), refused as `INVALID_INPUT` | one request | all | 16 |
 
-  Composition budgets count every occurrence in the original rendering,
-  including both TRUE and FALSE tests at each evaluation site. A generated statement
+  Composition budgets count every occurrence in the SQL a predicate renders.
+  The original closure rendering holds both TRUE and FALSE tests at each
+  evaluation site; a closure around another closure holds its target once.
+  Rendered size is no longer what limits nesting: a nested closure adds
+  about 1.5 KB at three hops. `READ_PREDICATE_CLOSURE_MAX_NESTING` stays at
+  2 because the work multiplies per level. With the limit lifted, three
+  levels over a non-unique key at three hops took 105 s on 85 rows in
+  SQLite, against 0.8 s for two levels. A generated statement
   holds at most its entity's own policy plus its relation filters and count
   orderings: 2 MiB of policy SQL, and 192 weighted relations on SQLite and
   PostgreSQL or 14 on SQL Server.
@@ -536,10 +552,10 @@ ReadPredicate::related_closure_within::<Backend, Entity>(
     closure adds two subquery levels and one relation. At the default bound,
     the standalone projection uses 66 subquery levels. The original
     composition rendering uses 67 levels for one closure and leaves room for
-    four relations around it. A directly nested closure over column tests
-    counts as two relations with shared rendering, one for each walk. Putting a
-    relation between two closures uses 73 levels and exhausts the
-    nine-relation budget. A relation chain alone may be nine deep, and a
+    four relations around it. A nested closure counts as two relations with
+    shared rendering, one for each walk, plus each relation in its target
+    once. Putting a relation between two closures uses 71 levels and leaves
+    room for two relations around it. A relation chain alone may be nine deep, and a
     relation filter or count ordering may add five relations to a statement.
     On SQLite and PostgreSQL, a closure counts as 16 relations, plus its
     three `EXISTS` subqueries, and a relation chain may be 32 deep.

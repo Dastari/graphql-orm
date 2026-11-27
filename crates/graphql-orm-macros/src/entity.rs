@@ -5067,6 +5067,7 @@ fn generate_entity_tokens(
     let mut related_render = Vec::new();
     let mut related_validate = Vec::new();
     let mut related_present = Vec::new();
+    let mut closure_stability_checks = Vec::new();
     let mut filter_contains_spatial_checks = Vec::new();
     let mut filter_validation_checks = Vec::new();
     let mut filter_referenced_field_checks = Vec::new();
@@ -5613,6 +5614,13 @@ fn generate_entity_tokens(
                     filter_is_empty_checks
                         .push(quote! { if self.#field_name.is_some() { return false; } });
                     related_present.push(quote! { self.#field_name.is_some() });
+                    closure_stability_checks.push(quote! {
+                        (self.#field_name.is_none()
+                            || self.__gom_related.get(#graphql_name).is_some_and(|(clauses, _)| {
+                                !clauses.is_empty()
+                                    && clauses.iter().all(|clause| clause.is_stable_relation_clause())
+                            }))
+                    });
                     related_validate.push(quote! {
                         if self.#field_name.is_some() && !self.__gom_related.contains_key(#graphql_name) {
                             return Err(::graphql_orm::sqlx::Error::Protocol("relation filter requires request authorization".into()));
@@ -6675,6 +6683,11 @@ fn generate_entity_tokens(
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
+                if filter_type == "date" {
+                    closure_stability_checks.push(quote! {
+                        self.#filter_field_name.as_ref().is_none_or(|filter| !filter.has_calendar_predicate())
+                    });
+                }
                 // Each of these filters bounds its own operands (#455).
                 if matches!(
                     filter_type.as_str(),
@@ -7724,6 +7737,11 @@ fn generate_entity_tokens(
         impl ::graphql_orm::graphql::orm::ReadVisibilityFilter for #where_input_name {
             fn entity_type_id() -> ::std::any::TypeId { ::std::any::TypeId::of::<#struct_name>() }
             fn backend() -> ::graphql_orm::graphql::orm::DatabaseBackend { <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT }
+            fn is_stable_for_closure(&self) -> bool {
+                true #(&& #closure_stability_checks)*
+                    && [&self.and, &self.or].into_iter().flatten().flatten().all(Self::is_stable_for_closure)
+                    && self.not.as_deref().is_none_or(Self::is_stable_for_closure)
+            }
             fn __gom_row_bound_filter(&self) -> Option<::graphql_orm::graphql::orm::RowBoundFilter> {
                 // The filter renders its own conditions for the row it is
                 // given: no row name is substituted into its SQL (#796).

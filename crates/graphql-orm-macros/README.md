@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.238.0 aligns with the ORM's
+[nested closure target update](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.237.0 generates each entity's write configuration, which the ORM's
 write pipeline reads to admit a generated write and to
 [bind its authority](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority).

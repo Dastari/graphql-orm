@@ -20,6 +20,23 @@ for historical context.
   overrides at the attribute value when they prevent generation of bulk
   mutation result types.
 
+## Unreleased - ORM/macros 0.238.0
+
+- **No action** (closes #785). Nested read-predicate closures share the
+  inner target's SQL for stable column tests, generated filters, and
+  relations. In nested closures, handwritten fragments keep their existing
+  evaluation sites unless the host supplies a stability guarantee. The
+  composition limits are measured on the rendered SQL, so some nested
+  compositions previously refused with `AUTHORIZATION_MISCONFIGURED` now build.
+  [Migration](MIGRATION.md#02370-to-02380-nested-closure-targets)
+
+## Unreleased - operation catalogue 0.17.0
+
+- **No action** (refs #934, item 3). Add an opt-in receiver pin for resolver
+  catalogue v1 exports and descriptor extensions. The pin rejects missing,
+  unsupported, stale or mismatched catalogues.
+  [Migration](MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
+
 ## Unreleased - ORM/macros 0.237.0
 
 - **Security hardening (#921).** The authority that lets a generated GraphQL
