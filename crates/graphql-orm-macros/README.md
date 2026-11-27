@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.240.0 emits one set of field descriptors for generated GraphQL
+upsert and create on upsert-enabled entities.
+[Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).
+
 Version 0.238.0 aligns with the ORM's
 [nested closure target update](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
 

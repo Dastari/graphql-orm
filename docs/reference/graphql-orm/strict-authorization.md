@@ -323,12 +323,12 @@ ORM source), which fixes the order of the checks in one place:
    [request authority](#hook-writes-on-the-originating-requests-authority) and
    the change journal record.
 
-These are four kinds of step, not one linear sequence. The input transform,
-the field write decisions, value binding, the SQL statement and the
-written-row check stay in generated code, because they are typed per entity
-field. Each write shape runs them in its own order, unchanged from before the
-pipeline existed. In every shape the `Before` hook runs before the SQL
-statement and the `After` hook after it, inside the transaction.
+The order depends on the write shape. The generated resolver places the input
+transform, field write decisions, value binding, SQL statement and written-row
+check. For upsert-enabled entities, generated GraphQL create and upsert use one
+runtime field-policy walk in declaration order. In every shape the `Before`
+hook runs before the SQL statement and the `After` hook after it, inside the
+transaction.
 
 | Write | Order |
 | --- | --- |

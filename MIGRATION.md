@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.240.0: Shared create and upsert field policies
+
+**No action.** Upgrade ORM and macros together. The generated GraphQL
+upsert and create for an upsert-enabled entity share the field-policy walk.
+Policy callbacks still run in field declaration order with the same request,
+proposed value, and existing row when the upsert finds one.
+
 ## 0.237.0 to 0.238.0: Nested closure targets
 
 **No action.** Upgrade ORM and macros together. A read-predicate closure

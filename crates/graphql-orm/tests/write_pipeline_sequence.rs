@@ -18,6 +18,21 @@ use graphql_orm::prelude::*;
 use std::any::Any;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Default)]
+struct PendingUpsertField {
+    entered: tokio::sync::Notify,
+    dropped: tokio::sync::Notify,
+}
+
+struct NotifyOnDrop<'a>(&'a tokio::sync::Notify);
+
+impl Drop for NotifyOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
 
 #[derive(
     GraphQLEntity,
@@ -401,7 +416,7 @@ impl FieldPolicy for Recorder {
     fn can_write_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
-        _: &'a Database,
+        db: &'a Database,
         entity: &'static str,
         name: &'static str,
         key: Option<&'static str>,
@@ -415,6 +430,17 @@ impl FieldPolicy for Recorder {
                 value.is_some(),
                 field(Some(ctx))
             ));
+            if let Some(pending) = ctx.data_opt::<Arc<PendingUpsertField>>()
+                && entity == "SeqDevice"
+                && name == "name"
+            {
+                let row = record.unwrap().downcast_ref::<SeqDevice>().unwrap();
+                assert_eq!(row.name, "first");
+                assert!(db.policy_authority().hook_request().is_none());
+                let _on_drop = NotifyOnDrop(&pending.dropped);
+                pending.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(refusal(Some(ctx)) != Refuse::Field)
         })
     }
@@ -770,4 +796,114 @@ async fn generated_write_callback_sequence_is_unchanged() {
             expected.lines().nth(line),
         );
     }
+}
+
+#[tokio::test]
+async fn cancelling_an_admitted_upsert_drops_the_field_check_and_releases_the_transaction() {
+    let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    for sql in [
+        "CREATE TABLE seq_devices (id TEXT PRIMARY KEY, mac TEXT NOT NULL UNIQUE, name TEXT NOT NULL)",
+        "INSERT INTO seq_devices VALUES ('d1', 'm1', 'first')",
+    ] {
+        graphql_orm::sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let mut db = Database::new(pool).with_request_authority_propagated_to_hooks(true);
+    let log = Log(Arc::new(Mutex::new(Vec::new())));
+    let recorder = Recorder {
+        log: log.clone(),
+        active: Arc::new(Mutex::new(Refuse::Nothing)),
+    };
+    db.set_field_policy(recorder.clone());
+    db.set_row_policy(recorder.clone());
+    db.set_entity_policy(recorder.clone());
+    db.set_mutation_hook(recorder);
+    let mut events = db
+        .ensure_event_sender::<SeqDeviceChangedEvent>()
+        .subscribe();
+    let schema = schema_builder(db.clone()).finish();
+    let request = |actor, name| {
+        async_graphql::Request::new(format!(
+            r#"mutation {{ upsertSeqDevice(input: {{ id: "d1", mac: "m1", name: "{name}" }}) {{ success }} }}"#
+        ))
+        .data(
+            AuthSubject::builder(actor)
+                .scopes(vec!["devices.write".to_owned()])
+                .build(),
+        )
+    };
+    let pending = Arc::new(PendingUpsertField::default());
+    let timeout = Duration::from_secs(5);
+    {
+        let request = request("cancelled", "discarded").data(pending.clone());
+        let execution = schema.execute(request);
+        tokio::pin!(execution);
+        tokio::select! {
+            response = &mut execution => panic!("upsert completed early: {:?}", response.errors),
+            entered = tokio::time::timeout(timeout, pending.entered.notified()) => entered.unwrap(),
+        }
+        let log = log.0.lock().unwrap();
+        assert!(
+            log.iter()
+                .any(|line| line.starts_with("row-write SeqDevice"))
+        );
+        assert!(
+            log.last()
+                .unwrap()
+                .starts_with("field-write SeqDevice.name")
+        );
+        assert!(db.pool().try_acquire().is_none());
+    }
+    tokio::time::timeout(timeout, pending.dropped.notified())
+        .await
+        .unwrap();
+    assert!(events.try_recv().is_err());
+    assert!(
+        log.0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|line| !line.starts_with("hook "))
+    );
+
+    // Reacquire the only connection and begin a new write transaction. A
+    // leaked transaction or a connection still in a transaction fails here.
+    let mut connection = tokio::time::timeout(timeout, db.pool().acquire())
+        .await
+        .unwrap()
+        .unwrap();
+    graphql_orm::sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let stored: String = graphql_orm::sqlx::query_scalar("SELECT name FROM seq_devices")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(stored, "first");
+    graphql_orm::sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let response = tokio::time::timeout(timeout, schema.execute(request("retry", "committed")))
+        .await
+        .unwrap();
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(events.try_recv().unwrap().action, ChangeAction::Updated);
+    let log = log.0.lock().unwrap();
+    let hook_policies: Vec<_> = log
+        .iter()
+        .filter(|line| line.contains("hook_request="))
+        .collect();
+    assert_eq!(hook_policies.len(), 2);
+    assert!(
+        hook_policies
+            .iter()
+            .all(|line| line.ends_with("hook_request=retry"))
+    );
 }

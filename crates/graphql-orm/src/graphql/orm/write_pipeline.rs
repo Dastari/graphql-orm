@@ -35,8 +35,9 @@
 //!    dispatch, and the entity write decision is asked once more before each
 //!    invocation that attaches it.
 //!
-//! Field write policies, input transforms, value binding and the statements
-//! themselves stay in generated code: they are typed per entity field.
+//! Generated GraphQL upsert and its entity's create mutation share the field
+//! policy walk. Their resolver bodies retain the placement of the field
+//! checks, input transforms, value binding and statements.
 //!
 //! # The authority
 //!
@@ -95,12 +96,113 @@ use super::{
 };
 use crate::db::Database;
 use crate::graphql::auth::ResolverAuthMode;
-use crate::graphql::errors::{graphql_error_from_callback, graphql_error_from_sqlx};
+use crate::graphql::errors::{
+    OrmPublicError, graphql_error_from_callback, graphql_error_from_sqlx,
+};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
+/// When a generated create-input field needs a write decision.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum GeneratedCreateFieldCheck {
+    Never,
+    WhenSupplied,
+    Always,
+}
+
+impl GeneratedCreateFieldCheck {
+    fn applies(self, name: &str, supplied: &HashSet<&'static str>) -> bool {
+        match self {
+            Self::Never => false,
+            Self::WhenSupplied => supplied.contains(name),
+            Self::Always => true,
+        }
+    }
+}
+
+/// Typed access to a field in the input shared by generated create and upsert.
+#[doc(hidden)]
+pub struct GeneratedCreateField<I> {
+    pub name: &'static str,
+    pub policy: Option<&'static str>,
+    pub column: &'static str,
+    pub conflict_key: bool,
+    pub create_check: GeneratedCreateFieldCheck,
+    pub update_check: GeneratedCreateFieldCheck,
+    pub value: fn(&I) -> &(dyn Any + Send + Sync),
+    pub clear: Option<fn(&mut I)>,
+}
+
+/// The resolver branch that is about to write the checked input.
+#[doc(hidden)]
+pub enum GeneratedCreateFieldMode<'a> {
+    Create {
+        nested: bool,
+    },
+    Upsert {
+        current: Option<&'a (dyn Any + Send + Sync)>,
+    },
+}
+
+/// Check the fields in declaration order under the resolver's request.
+///
+/// An ignored denial on the update branch removes the column from both the
+/// SQL assignment list and the hook's change list.
+#[doc(hidden)]
+pub async fn __apply_generated_create_fields<B: OrmBackend, I>(
+    db: &Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    entity: &'static str,
+    input: &mut I,
+    supplied: &HashSet<&'static str>,
+    fields: &[GeneratedCreateField<I>],
+    mode: GeneratedCreateFieldMode<'_>,
+) -> async_graphql::Result<Vec<&'static str>> {
+    let (current, upsert_insert, nested) = match mode {
+        GeneratedCreateFieldMode::Create { nested } => (None, false, nested),
+        GeneratedCreateFieldMode::Upsert { current } => (current, current.is_none(), false),
+    };
+    let mut denied_columns = Vec::new();
+    for field in fields {
+        let check = if current.is_some() {
+            field.update_check
+        } else {
+            field.create_check
+        };
+        if !check.applies(field.name, supplied) {
+            continue;
+        }
+        let value = Some((field.value)(input));
+        // An upsert insert must use the same conflict key as its lookup.
+        if let Some(clear) = field
+            .clear
+            .filter(|_| !(upsert_insert && field.conflict_key))
+        {
+            let allowed = db
+                .check_field_write(ctx, entity, field.name, field.policy, current, value)
+                .await
+                .map_err(graphql_error_from_callback)?;
+            if !allowed {
+                if nested {
+                    return Err(OrmPublicError::field_write_denied(field.name).into_graphql_error());
+                }
+                clear(input);
+                if current.is_some() {
+                    denied_columns.push(field.column);
+                }
+            }
+        } else {
+            db.ensure_writable_field(ctx, entity, field.name, field.policy, current, value)
+                .await
+                .map_err(graphql_error_from_callback)?;
+        }
+    }
+    Ok(denied_columns)
+}
 
 /// The text of every binding refusal.
 const MISMATCH: &str =
