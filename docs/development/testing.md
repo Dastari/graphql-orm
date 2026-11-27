@@ -85,14 +85,14 @@ Tests that build GraphQL documents spell names through
 `argument_name` and `field_name` take the default camelCase spelling, and apply
 the same `convert_case` conversion the derive macros use for the selected
 case. Fixed wire names such as `NodeId` and `RecordVersion` are written
-literally. The CI `orm-case-features` job runs `managed_version`,
+literally. The CI `orm-case-features` job runs `write_assurance_contracts`,
 `keyed_changed_subscriptions`, `node_ids`, `grouped_aggregates` and the
 `record_version_ui` compile contract with all three variables set to
 `snake_case`:
 
 ```sh
 export GRAPHQL_ORM_RESOLVER_CASE=snake_case GRAPHQL_ORM_ARGUMENT_CASE=snake_case GRAPHQL_ORM_FIELD_CASE=snake_case
-cargo test -p graphql-orm --no-default-features --features sqlite --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates
+cargo test -p graphql-orm --no-default-features --features sqlite --test write_assurance_contracts --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates
 cargo test -p graphql-orm --no-default-features --features sqlite --test compile_ui record_version_ui
 ```
 
@@ -181,23 +181,54 @@ requires the skip list to be exactly the non-ignored tests of the binaries
 `orm-fixtures` runs, and no other test to share one of those names. A local
 `cargo test -p graphql-orm` still runs everything.
 
-The grouped integration binaries retain the original module names. Pass the
-module prefix after `--` to select just its tests. For ignored owned-database
+## ORM integration test harnesses
+
+Integration test harnesses use `tests/<binary>/main.rs`. Each moved file keeps
+its original stem as a module name and retains its backend and feature guards.
+Pass the module prefix after `--` to select just its tests, for example
+`cargo test -p graphql-orm --test sqlite_append_only -- append_only_composite::`.
+Keep a harness small enough to compile within the build memory cap and group
+modules that run together under the same test selectors. For ignored owned-database
 tests, also pass `--ignored --test-threads=1` and use the backend feature for
 the lane.
 
 | Integration binary | Modules |
 | --- | --- |
+| `auth_contracts` | `agql_assurance`, `auth_bridge` |
 | `consumer_fixtures` | `backend_coexistence_fixture`, `migration_api_compatibility_fixture`, `relationship_capability_fixture`, `repository_aggregate_consumer_fixture` |
-| `postgres_owned_contracts` | `authorized_pagination_postgres`, `postgres_constraint_index_idempotency` |
+| `core_contracts` | `bidirectional_keyset_input`, `canonical_json_properties`, `fenced_leases`, `rls_policy_sql` |
+| `cross_crate_fixtures` | `cross_crate_relations_fixture`, `federation_end_to_end_fixture` |
 | `mssql_owned_connections` | `mssql_notifications`, `mssql_tls`, `mssql_transport` |
-| `sqlite_query_contracts` | `query_shape_selection`, `root_field_names` |
-| `sqlite_schema_contracts` | `generated_input_member_inventory`, `graphql_attribute_composition` |
-| `postgres_runtime_repository` | `repository_only_postgres`, `runtime_records_postgres`, `runtime_relations_postgres` |
 | `mssql_owned_queries` | `mssql_correctness`, `mssql_integration` |
-| `mssql_owned_writes` | `mssql_trigger_writes`, `mssql_writes` |
-| `sqlite_runtime_queries` | `runtime_queries`, `runtime_relations` |
+| `mssql_owned_writes` | `mssql_restore_marker`, `mssql_trigger_writes`, `mssql_writes` |
+| `package_boundaries` | `backend_dependency_isolation`, `main_api_compatibility`, `storage_boundary` |
+| `postgres_key_contracts` | `binary_keys`, `portable_primitives_postgres` |
+| `postgres_owned_contracts` | `authorized_pagination_postgres`, `postgres_constraint_index_idempotency` |
+| `postgres_runtime_repository` | `repository_only_postgres`, `runtime_records_postgres`, `runtime_relations_postgres` |
+| `postgres_table_contracts` | `postgres_qualified_tables`, `retention_purge_postgres` |
+| `postgres_write_contracts` | `row_write_tracker`, `transaction_postgres` |
+| `row_count_refusals` | `bulk_refusals`, `single_row_refusals` |
+| `runtime_format_contracts` | `runtime_compat_goldens`, `runtime_field_formats`, `runtime_typed_defaults` |
+| `runtime_read_contracts` | `runtime_key_reads`, `runtime_read_bind_budget` |
+| `runtime_record_contracts` | `query_ir`, `runtime_records` |
+| `runtime_repository_contracts` | `runtime_auto_actor`, `runtime_auto_timestamps`, `runtime_dependent_deletes` |
+| `runtime_schema_contracts` | `runtime_descriptions`, `runtime_filters`, `runtime_identity_goldens`, `runtime_label_fields` |
+| `sqlite_append_only` | `append_only`, `append_only_composite`, `append_only_create_authorization` |
+| `sqlite_input_disclosure` | `custom_input_disclosure_roots`, `generated_input_disclosure` |
+| `sqlite_keyset_authority` | `keyset_cursor_binding`, `keyset_residual_policy` |
 | `sqlite_migration_rebuilds` | `migration_sqlite_prefix`, `migration_sqlite_rebuild_preservation`, `migration_sqlite_unique_preservation` |
+| `sqlite_missing_database` | `generated_mutation_missing_database`, `generated_query_missing_database` |
+| `sqlite_query_contracts` | `query_shape_selection`, `root_field_names` |
+| `sqlite_query_inputs` | `composite_keyset_pagination`, `date_filters`, `semantic_filter_contracts`, `static_signed64_capability` |
+| `sqlite_runtime_queries` | `runtime_queries`, `runtime_relations` |
+| `sqlite_schema_contracts` | `generated_input_member_inventory`, `graphql_attribute_composition` |
+| `sqlite_schema_metadata` | `generated_object_fields`, `schema_modules`, `wrapper_object_parity` |
+| `sqlite_storage_contracts` | `portable_constraints`, `public_host_timestamps`, `sqlite_memory_lifetime` |
+| `sqlite_subscription_authority` | `composite_readonly_subscriptions`, `subscription_integer_keys` |
+| `sqlite_transaction_contracts` | `transaction_api`, `transaction_authority`, `transaction_extensions` |
+| `sqlite_write_contracts` | `conditional_update`, `update_assignment_field_names`, `write_authorization_fences` |
+| `write_assurance_contracts` | `managed_version`, `update_assurance`, `update_assurance_registry` |
+| `write_scope_contracts` | `bulk_write_targets`, `transaction_scope_backends` |
 
 The existing `sqlserver-security` job executes `scripts/run-owned-database-lanes.sh mssql`,
 including the `mssql_integration` module in `mssql_owned_queries` (MONEY reads and two-parent paginated relation loading),
@@ -393,7 +424,7 @@ reviewed locked commit, and test the bridge feature explicitly:
 
 ```sh
 cargo check -p graphql-orm --no-default-features --features "sqlite auth-agql"
-cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql" --test agql_assurance
+cargo test -p graphql-orm --no-default-features --features "sqlite auth-agql" --test auth_contracts -- agql_assurance::
 cargo tree -p graphql-orm --locked --no-default-features --features "sqlite auth-agql"
 cargo test -p graphql-orm-router --locked --features auth-agql
 cargo tree -p graphql-orm-router --locked --features auth-agql

@@ -140,7 +140,28 @@ pub fn request_database<'ctx, B: OrmBackend>(
 // the snapshot runner. Other panics keep their ordinary behavior.
 struct SnapshotPolicyPoolRefusal;
 
+/// The next identity of a [`Database`] handle or a write transaction.
+pub(crate) fn fresh_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Identifies one [`Database`] handle for as long as it lives, wherever it
+/// is moved. A clone is another handle with another identity; every
+/// reference to one handle, such as the clones of an `Arc<Database>`, sees
+/// the same one. Unlike the handle's address, it is never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandleIdentity(u64);
+
+impl HandleIdentity {
+    fn fresh() -> Self {
+        Self(fresh_identity())
+    }
+}
+
 pub struct Database<B: OrmBackend = DefaultBackend> {
+    /// Assigned at construction and by `Clone`; never copied.
+    identity: HandleIdentity,
     pool: Option<B::Pool>,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
     entity_policy: Option<Arc<dyn crate::graphql::orm::EntityPolicy<B>>>,
@@ -188,6 +209,7 @@ impl<B: OrmBackend> Clone for Database<B> {
 impl<B: OrmBackend> Database<B> {
     fn clone_with_pool(&self, pool: Option<B::Pool>) -> Self {
         Self {
+            identity: HandleIdentity::fresh(),
             pool,
             mutation_hook: self.mutation_hook.clone(),
             entity_policy: self.entity_policy.clone(),
@@ -301,6 +323,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -341,6 +364,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -378,6 +402,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -415,6 +440,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -452,6 +478,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -492,6 +519,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -539,6 +567,7 @@ impl<B: OrmBackend> Database<B> {
                 DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             system_access: None,
             propagate_request_authority_to_hooks: false,
+            identity: HandleIdentity::fresh(),
             _backend: PhantomData,
         }
     }
@@ -796,6 +825,11 @@ impl<B: OrmBackend> Database<B> {
     /// hook's transaction.
     pub fn policy_authority(&self) -> crate::graphql::auth::PolicyAuthority<'_> {
         crate::graphql::auth::PolicyAuthority::new(self.system_access.as_deref(), None)
+    }
+
+    /// This handle's identity.
+    pub(crate) fn handle_identity(&self) -> HandleIdentity {
+        self.identity
     }
 
     /// Whether a generated GraphQL mutation presents its request's authority
@@ -3070,6 +3104,31 @@ mod database_contract_tests {
         let policy_view = rewrapped.snapshot_policy_view().clone();
         assert!(policy_view.backup_restore_is_externally_managed());
         assert!(policy_view.try_pool().is_err());
+    }
+
+    /// A handle's identity follows the handle, not its address (#921).
+    #[cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
+    #[tokio::test]
+    async fn a_handle_identity_is_not_its_address() {
+        let mut slot = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+        let address = std::ptr::from_ref(&slot);
+        let first = slot.handle_identity();
+        // Every reference to one handle sees the same identity.
+        let shared = std::sync::Arc::new(slot.clone());
+        assert_eq!(
+            shared.handle_identity(),
+            std::sync::Arc::clone(&shared).handle_identity()
+        );
+        // A clone is another handle.
+        assert_ne!(shared.handle_identity(), first);
+        // A replacement at the recycled address is another handle.
+        let replaced = std::mem::replace(&mut slot, Database::clone(&shared));
+        assert_eq!(std::ptr::from_ref(&slot), address);
+        assert_ne!(slot.handle_identity(), first);
+        assert_ne!(slot.handle_identity(), shared.handle_identity());
+        // A moved handle keeps its identity.
+        let moved = Box::new(replaced);
+        assert_eq!(moved.handle_identity(), first);
     }
 
     #[test]

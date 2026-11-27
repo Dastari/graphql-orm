@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.236.0 (breaking release)
+## Unreleased - ORM/macros 0.238.0 (breaking release)
 
 - **Fixed (#942).** Batched relation loads preserve default ordering by
   columns whose names contain escaped identifier delimiters. On SQL Server,
@@ -39,7 +39,7 @@ for historical context.
   `ReadSnapshot` variant runs the same policy-aware, read-only transaction
   as the dedicated snapshot methods. The general callback supports generated
   transaction keysets and refuses access to the underlying pool.
-  See the [migration guide](MIGRATION.md#breaking-release-unreleased-ormmacros-02360).
+  See the [migration guide](MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
 
 - **Breaking (#521):** SQL Server pools that opt into native temporal text
   binding refuse generated keyset orders on String-valued temporal fields.
@@ -50,6 +50,30 @@ for historical context.
   with a literal dot must be explicitly delimited as a single identifier.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
+## Unreleased - ORM/macros 0.237.0
+
+- **Security hardening (#921).** The authority that lets a generated GraphQL
+  mutation's hook present its originating request is now derived from the
+  entity's generated configuration, issued only after a target admission the
+  pipeline runs itself, and bound to one request and invocation, one
+  operation, one `Database` handle, one transaction and the admitted rows.
+  Upsert uses the entity's configured backend. Its create hooks must carry
+  the exact conflict-key binds used in the locked lookup. A denied conflict
+  field on an inserting upsert returns `FORBIDDEN` even when the field policy
+  opts into omission. Dispatch requires a matching admission. The SDL and
+  the catalogues are unchanged. A
+  generated write always enforces the assurance requirement of its own root
+  field, and the `Before` hook event of a single-row update names the stored
+  key. **No action** unless a custom resolver calls a generated mutation
+  resolver method, or host code calls the hidden pipeline functions.
+  [Migration](MIGRATION.md#02360-to-02370-bound-generated-write-authority)
+
+## Unreleased - ORM/macros 0.236.0
+
+- Group ORM integration tests that share a CI lane into small test harnesses.
+  The prior test target names identify the modules within those harnesses.
+  **No action.** [Migration](MIGRATION.md#02350-to-02360-orm-integration-test-harnesses)
 
 ## Unreleased - ORM/macros 0.235.0
 

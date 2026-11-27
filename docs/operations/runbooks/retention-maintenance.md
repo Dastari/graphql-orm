@@ -172,7 +172,7 @@ container, generated credentials, database, and cleanup; it never reads
 
 ```bash
 cargo test -p graphql-orm --no-default-features --features postgres \
-  --test retention_purge_postgres -- --ignored --nocapture
+  --test postgres_table_contracts -- retention_purge_postgres:: --ignored --nocapture --test-threads=1
 ```
 
 MSSQL generates no retention runtime capability, including for external-writable

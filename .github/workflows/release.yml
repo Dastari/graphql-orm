@@ -337,7 +337,7 @@ jobs:
           for backend in postgres mssql; do
             cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features "$backend"
           done
-          cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_relations_fixture --test repository_counts --locked
+          cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_fixtures --test repository_counts --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --test point_read_visibility_backends --test visible_row_pages --locked -- --ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_strings --test full_text_search -- --include-ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test postgres_rls --test postgres_rls_drift -- --include-ignored --test-threads=1
@@ -349,7 +349,7 @@ jobs:
           cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example complete_events
           cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test portable_groups --test host_timestamps -- --ignored --test-threads=1
           cargo check -p graphql-orm --no-default-features --features mssql --locked
-          cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --locked
+          cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_record_contracts --locked
 
   orm-security-sqlite:
     if: inputs.validation_profile == 'full'
