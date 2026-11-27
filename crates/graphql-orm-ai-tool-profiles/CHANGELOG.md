@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.36.0
+## Unreleased - 0.37.0
+
+- Added `AiCapabilityRankedMatch::iter_grouped_roots` to visit the
+  exact grouped roots in operation order without allocating a vector (#551).
 
 - **No action (#551).** `AiCapabilityIndex::subscriptions_checked_against_finished_schema`
   reports whether an index was built in process from a typed subscription

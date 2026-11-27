@@ -10,7 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.174.0 (breaking release)
+## Unreleased - 0.175.0 (breaking release)
+
+- Discovery streams grouped roots into authorization batches and tracks
+  each candidate's roots as a contiguous range, reducing allocations
+  during fresh policy admission (#551).
 
 - Capability discovery reuses the initial ranking after fresh policy
   admission when every retained entity keeps all its grouped roots (#551).

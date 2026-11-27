@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI 0.175.0 and AI tool profiles 0.37.0 (#551). Discovery reduces allocations when assembling grouped roots into policy batches. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#grouped-root-discovery-allocation-reduction-551) · [AI tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0370-grouped-root-iteration)
+
 - **No action** — AI 0.174.0 (#551). Discovery reuses ranking when retained entities keep all grouped roots after fresh policy admission. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#capability-discovery-ranking-reuse-551)
 
 - **No action** — AI 0.173.0 (#551). Generated aggregate roots accept ungrouped counts through the capability broker. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#ungrouped-counts-through-the-capability-broker-551)
