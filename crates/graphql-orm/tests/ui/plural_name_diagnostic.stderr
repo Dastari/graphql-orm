@@ -1,0 +1,11 @@
+error: graphql_entity plural must form valid Rust identifiers for generated bulk mutation results
+ --> tests/ui/plural_name_diagnostic.rs:4:46
+  |
+4 | #[graphql_entity(table = "records", plural = "Records-ByDay")]
+  |                                              ^^^^^^^^^^^^^^^
+
+error: graphql_entity plural must form valid Rust identifiers for generated bulk mutation results
+  --> tests/ui/plural_name_diagnostic.rs:11:46
+   |
+11 | #[graphql_entity(table = "entries", plural = "EntriesResult//")]
+   |                                              ^^^^^^^^^^^^^^^^^

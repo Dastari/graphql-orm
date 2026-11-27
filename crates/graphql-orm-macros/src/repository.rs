@@ -342,7 +342,8 @@ pub(crate) fn strip_operations_graphql_surface(
     let metadata = parse_entity_metadata(&input.attrs)?;
     let plural_name = metadata
         .plural_name
-        .clone()
+        .as_ref()
+        .map(syn::LitStr::value)
         .unwrap_or_else(|| format!("{entity_name}s"));
     let removed = HashSet::from([
         format!("{entity_name}Edge"),

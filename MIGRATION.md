@@ -17,6 +17,13 @@ upsert and create for an upsert-enabled entity share the field-policy walk.
 Policy callbacks still run in field declaration order with the same request,
 proposed value, and existing row when the upsert finds one.
 
+## 0.239.0: Plural-name diagnostics
+
+**No action.** Upgrade ORM and macros together. An invalid
+`#[graphql_entity(plural = "...")]` value that caused `GraphQLOperations`
+to panic while generating bulk mutation result types now produces a
+compile error at the string literal.
+
 ## 0.237.0 to 0.238.0: Nested closure targets
 
 **No action.** Upgrade ORM and macros together. A read-predicate closure

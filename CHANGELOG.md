@@ -20,6 +20,12 @@ for historical context.
   the same entity share the declaration-ordered field-policy checks to reduce
   generated code. [Migration](MIGRATION.md#02400-shared-create-and-upsert-field-policies)
 
+## Unreleased - ORM/macros 0.239.0
+
+- **No action** (refs #542). `GraphQLOperations` reports invalid plural
+  overrides at the attribute value when they prevent generation of bulk
+  mutation result types.
+
 ## Unreleased - ORM/macros 0.238.0
 
 - **No action** (closes #785). Nested read-predicate closures share the
