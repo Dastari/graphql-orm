@@ -16,8 +16,9 @@ use async_graphql::OutputType;
 use async_graphql::registry::{MetaType, Registry};
 
 use super::{
-    Entity, GraphqlGeneratedResolverSource, GraphqlResolverCatalog, GraphqlSemanticCatalog,
-    GraphqlSemanticError, GraphqlServedField, GraphqlServedObjects,
+    Entity, GraphqlGeneratedResolverSource, GraphqlHandwrittenResolverRegistration,
+    GraphqlResolverCatalog, GraphqlSemanticCatalog, GraphqlSemanticError, GraphqlServedField,
+    GraphqlServedObjects,
 };
 
 /// Compile-time resolver facts of one entity, emitted by `GraphQLOperations`.
@@ -78,6 +79,21 @@ impl ResolverEntitySource {
 pub fn compose_resolver_catalog<Q: OutputType>(
     catalog: &GraphqlSemanticCatalog,
     sources: Vec<ResolverEntitySource>,
+) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
+    compose_resolver_catalog_with_registrations::<Q>(catalog, sources, [])
+}
+
+/// Composes the resolver catalogue for `Q` with handwritten field registrations.
+///
+/// # Errors
+///
+/// Returns an error when the generated metadata or any registration fails
+/// validation.
+#[doc(hidden)]
+pub fn compose_resolver_catalog_with_registrations<Q: OutputType>(
+    catalog: &GraphqlSemanticCatalog,
+    sources: Vec<ResolverEntitySource>,
+    registrations: impl IntoIterator<Item = GraphqlHandwrittenResolverRegistration>,
 ) -> Result<GraphqlResolverCatalog, GraphqlSemanticError> {
     let mut registry = Registry::default();
     Q::create_type_info(&mut registry);
@@ -149,5 +165,5 @@ pub fn compose_resolver_catalog<Q: OutputType>(
                 .with_entity_root(owned(source.facts.entity_root)),
         )
     });
-    GraphqlResolverCatalog::compose(catalog, sources, &served)
+    GraphqlResolverCatalog::compose_with_registrations(catalog, sources, &served, registrations)
 }

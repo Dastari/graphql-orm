@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.241.0: Handwritten resolver registrations (operation catalogue 0.18.0)
+
+**No action.** Upgrade ORM and macros together. Hosts that want to export
+handwritten relationship fields can opt in with
+`graphql_orm_resolver_catalog_with_registrations`. The default export keeps
+its existing fingerprint. Review and update a receiver's pin when adding
+registrations to an export it uses.
+[Registration contract](crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field)
+
 ## 0.240.0: Shared create and upsert field policies
 
 **No action.** Upgrade ORM and macros together. The generated GraphQL

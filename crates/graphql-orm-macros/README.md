@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.241.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+[explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
 Version 0.240.0 emits one set of field descriptors for generated GraphQL
 upsert and create on upsert-enabled entities.
 [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).

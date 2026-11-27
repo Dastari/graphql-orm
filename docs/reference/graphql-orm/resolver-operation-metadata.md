@@ -177,8 +177,7 @@ reads the query root's type registry, so:
   not listed;
 - a relation is listed only when the entity's object mounts the generated
   resolver, including through `#[graphql_complex_object(...)]` with any
-  options. Handwritten relationship fields are out of scope for version 1 and
-  are never listed, whatever their shape;
+  options;
 - a generated relation is left out when a `SimpleObject` getter on the same
   struct serves the same name: on a `compose_complex_object` entity, a
   relation field without `#[graphql(skip)]`; anywhere, another field renamed
@@ -219,11 +218,15 @@ The owning entity's auth mode, field policies, row policies and RLS apply to
 every traversal in addition. The catalogue is descriptive and is never read
 back by the server.
 
-Handwritten `#[graphql(entity)]` resolvers and handwritten relationship fields
-are not listed; that needs an explicit per-field annotation and is a follow-up.
+Use `graphql_orm_resolver_catalog_with_registrations` to include individual
+handwritten fields that implement declared semantic relationships. The helper
+checks their target and arguments against the served schema and validates the
+authorization reference. The v1 format covers relationship fields and generated
+Federation lookups. See the
+[registration contract](../../../crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
 
-The catalogue reflects ORM-generated mounting and cannot observe handwritten
-dispatch. A host that writes a type's `#[Object]` implementation itself, for
+The catalogue reflects ORM-generated mounting and explicit host declarations.
+It cannot observe handwritten dispatch. A host that writes a type's `#[Object]` implementation itself, for
 example by flattening the generated relation wrapper and adding its own method
 for the same field name, is responsible for keeping that object consistent
 with what the catalogue says. Consumers must not treat an entry as proof of

@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.18.0 adds [opt-in handwritten relationship registrations](#register-a-handwritten-relationship-field)
+for resolver catalogue v1.
+
 Version 0.17.0 adds opt-in [receiver binding](#bind-a-resolver-catalogue-at-the-receiver)
 for a reviewed resolver catalogue v1 export.
 
@@ -255,7 +258,7 @@ version `GRAPHQL_RESOLVER_CATALOG_VERSION` 1) lists both:
 
 | Member | Contents |
 | --- | --- |
-| `relations` | one `GraphqlRelationResolverDescriptor` per served relationship field with a generated resolver: owning type, field, target type, cardinality, argument names, whether a field policy exists, and an authorization reference |
+| `relations` | one `GraphqlRelationResolverDescriptor` per served relationship field with a mounted generated resolver or explicit handwritten registration: owning type, field, target type, cardinality, argument names, whether a field policy exists, and an authorization reference |
 | `entities` | one `GraphqlEntityResolverDescriptor` per type the schema resolves by a `@key`: the type name, each key's field names in `@key` order, and an authorization reference |
 
 Coordinates are those of the served schema, not of the Rust declarations:
@@ -264,9 +267,8 @@ Coordinates are those of the served schema, not of the Rust declarations:
   schema serves it: the owning type has a field of that name, the field
   returns the related type (directly, or as the nodes of a connection for a
   to-many relationship), and it takes exactly the catalogue's arguments with
-  the same types. A handwritten field that only shares a relation's name is
-  not listed. An entity that declares a relation but mounts no resolver for it
-  has no entry.
+  the same types. The producer requires a generated mount witness or an
+  explicit handwritten registration in addition to this schema check.
 - A key is listed only when the schema resolves it. A type the subgraph marks
   unresolvable (a Federation reference) is not listed, whatever keys are
   registered for it.
@@ -291,7 +293,8 @@ a schema composed some other way. `served` is a `GraphqlServedObjects` holding
 the object types that schema serves and each field's type and arguments
 (`GraphqlServedField`); nothing outside it is listed. A relationship is
 listed only when a source names it as a mounted generated resolver; the served
-schema confirms that claim and never creates one. A source marked
+schema confirms that claim and never creates one. For handwritten fields, use
+`GraphqlResolverCatalog::compose_with_registrations`. A source marked
 `unregistered()` says the schema registers no type for that entity.
 
 ```rust,ignore
@@ -352,33 +355,58 @@ policy, and a consumer must not treat a reference as permission.
 Older version 1 documents may pair `same_as_root` with `has_field_policy: true`.
 In that case defer the field authorization decision to the subgraph.
 
-### Out of scope for version 1: handwritten resolvers
+### Register a handwritten relationship field
 
-Version 1 lists only what the ORM generates. The following are not listed,
-and their absence says nothing about whether the schema serves them:
+Use `GraphqlHandwrittenResolverRegistration` to include a handwritten field
+that implements a relationship already described in the semantic catalogue.
+Name the owning entity and target by their semantic catalogue identities, the
+field by its exact GraphQL name, and each argument by its public name and type.
+For a generated schema, pass declarations to
+`graphql_orm_resolver_catalog_with_registrations`.
 
-- handwritten relationship fields, including a handwritten field with the
-  name, return type and arguments of a declared relation;
-- a generated relation whose name a `SimpleObject` getter on the same struct
-  also serves (on a composed object, a relation field without
-  `#[graphql(skip)]`; anywhere, a field renamed to the relation's name). Which of the two the schema serves is
-  async-graphql's choice, so the entry is left out. If the struct has a
-  `#[graphql(flatten)]` field or a `#[graphql(derived(...))]` getter, the
-  derive does not know every name the object serves, and no relation of that
-  entity is listed;
-- handwritten entity resolvers (`#[graphql(entity)]` in a host's own object).
+```rust,ignore
+let children = GraphqlHandwrittenResolverRegistration::new(
+    "Parent",
+    "children",
+    "Child",
+    GraphqlResolverAuthorization::SubgraphOnly,
+)
+.with_argument("first", "Int");
 
-Nothing proves what a handwritten resolver resolves or enforces. Listing them
-is a follow-up that needs an explicit per-field annotation.
+let resolvers = my_service::graphql_orm_resolver_catalog_with_registrations([children])?;
+std::fs::write("resolver-catalog.json", resolvers.export_json()?)?;
+```
+
+The declared target and argument types must match the semantic relationship.
+The producer checks the served field's argument types and its return shape
+against the served target type. A to-one field returns that object, and a
+to-many field returns a list or a connection with an unambiguous `edges`
+list and `node` of that type. A repeated declaration or a conflict with a
+mounted generated resolver fails composition.
+
+Use `SubgraphOnly` for resolver-specific requirements, including any
+declared field policy. To declare `SameAsRoot`, choose the generated traversal
+root the target's source identifies for that cardinality and enforce exactly
+its static requirement in the handwritten resolver. The schema helper derives
+that root reference only for an exposed generated root with a publishable static
+requirement. The host is responsible for the behavior of the registered field.
+
+Registered entries use the existing v1 wire shape and fingerprint algorithm.
+Review and pin the resulting fingerprint when opting in. An empty registration
+list produces the same export as default composition. Version 1 has no entry
+for a field outside the semantic relationship catalogue or a handwritten
+Federation entity resolver.
 
 ### What the catalogue cannot observe
 
-The resolver catalogue reflects how the ORM's generated code mounts resolvers.
-It cannot observe dispatch a host writes by hand. A host that writes the
+The resolver catalogue reflects the generated mount witnesses and the host's
+explicit registrations. It cannot observe dispatch a host writes by hand. A host that writes the
 `#[Object]` implementation of a type itself, for example one that flattens the
 generated relation wrapper and adds its own method serving the same field
 name, decides what that field resolves to, and is responsible for keeping the
-object consistent with what the catalogue says about it.
+object consistent with what the catalogue says about it. The relations derive
+omits a generated mount witness when a known `SimpleObject` getter shadows its
+name or when it cannot determine the getter names due to `flatten` or `derived`.
 
 A consumer must therefore not treat an entry as proof of enforcement for a
 type whose object implementation the host wrote. For every type, an entry is

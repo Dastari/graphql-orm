@@ -327,15 +327,35 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     ::graphql_orm::graphql::orm::GraphqlSemanticError,
                 >
             > = ::std::sync::OnceLock::new();
-            CATALOG.get_or_init(|| {
-                ::graphql_orm::graphql::orm::compose_resolver_catalog::<QueryRoot>(
-                    __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
-                    ::std::vec![#(#resolver_sources),*],
-                )
-            })
-            .as_ref()
+            CATALOG.get_or_init(|| graphql_orm_resolver_catalog_with_registrations([]))
+                .as_ref()
         }
 
+        /// Composes an owned v1 resolver catalogue with explicit handwritten
+        /// relationship registrations in addition to mounted generated resolvers.
+        ///
+        /// See `GraphqlResolverCatalog::compose_with_registrations` for the
+        /// registration contract. Each call validates the supplied declarations
+        /// against this schema and leaves the cached generated catalogue intact.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if any catalogue fails to compose or a registration
+        /// conflicts with the generated resolvers or fails validation.
+        pub fn graphql_orm_resolver_catalog_with_registrations(
+            registrations: impl ::std::iter::IntoIterator<
+                Item = ::graphql_orm::graphql::orm::GraphqlHandwrittenResolverRegistration,
+            >,
+        ) -> ::std::result::Result<
+            ::graphql_orm::graphql::orm::GraphqlResolverCatalog,
+            ::graphql_orm::graphql::orm::GraphqlSemanticError,
+        > {
+            ::graphql_orm::graphql::orm::compose_resolver_catalog_with_registrations::<QueryRoot>(
+                __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
+                ::std::vec![#(#resolver_sources),*],
+                registrations,
+            )
+        }
 
         /// Returns this schema's interpretation fingerprint: a value that
         /// changes when a release may read existing cursors, keys or `NodeId`
