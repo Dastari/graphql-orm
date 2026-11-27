@@ -274,8 +274,8 @@ async-graphql dependency or handwritten query SQL. Run it on owned SQLite:
 
 ```sh
 CARGO_BUILD_JOBS=2 cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example runtime_strings
-CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test runtime_strings --test sqlite_runtime_queries --test query_ir
-CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features postgres --lib --test runtime_strings --test query_ir -- --include-ignored --test-threads=1
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test runtime_strings --test sqlite_runtime_queries --test runtime_record_contracts -- --skip runtime_records::
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features postgres --lib --test runtime_strings --test runtime_record_contracts -- --skip runtime_records:: --include-ignored --test-threads=1
 CARGO_BUILD_JOBS=2 cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
 ```
 

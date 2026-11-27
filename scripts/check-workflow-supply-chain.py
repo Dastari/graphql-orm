@@ -105,7 +105,7 @@ NON_IMAGE_TEST_LITERALS = {'crates/graphql-orm-ai/src/provider_calls/tests/stati
  'crates/graphql-orm-storage/tests/storage_s3/s3_integration.rs': ['127.0.0.1:0'],
  'crates/graphql-orm-storage/tests/samba/test_run.py': ['dperson/samba:latest'],
  'crates/graphql-orm-storage/tests/storage_smb/smb_integration.rs': ['contract/a:b'],
- 'crates/graphql-orm/tests/append_only_create_authorization.rs': ['field:optional',
+ 'crates/graphql-orm/tests/sqlite_append_only/append_only_create_authorization.rs': ['field:optional',
                                                                   'hook:After',
                                                                   'hook:Before',
                                                                   'read:entity',

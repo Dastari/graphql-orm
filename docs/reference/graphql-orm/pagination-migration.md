@@ -729,7 +729,7 @@ Ordering by a field therefore discloses its values to whoever receives the
 cursor; `keyset_cursor_field_authority.rs` covers the order-field checks.
 Treat a cursor as a position, never as an authorization token.
 `a_rewritten_cursor_only_moves_the_position_and_row_policy_still_applies` in
-`crates/graphql-orm/tests/keyset_cursor_binding.rs` pins this. The cursor
+`crates/graphql-orm/tests/sqlite_keyset_authority/keyset_cursor_binding.rs` pins this. The cursor
 length is bounded only by the request size the host accepts.
 
 A cursor is refused with `CURSOR_INVALID` unless it matches all of:
@@ -780,7 +780,7 @@ refused. The ORM does not try to detect this; doing so would need row versions
 or snapshots, which keyset pagination exists to avoid. Clients that need a
 stable view should page inside one transaction or order by an immutable column
 such as a creation time. `value_drift_after_the_cursor_is_accepted_and_resumes_by_value`
-in `crates/graphql-orm/tests/keyset_cursor_binding.rs` pins this behaviour.
+in `crates/graphql-orm/tests/sqlite_keyset_authority/keyset_cursor_binding.rs` pins this behaviour.
 
 ### Opt-in bounded scans
 

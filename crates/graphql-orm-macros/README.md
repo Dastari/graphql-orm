@@ -1179,3 +1179,6 @@ SDL export builds. Runtime builds must leave it disabled; see
 Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
 
 Test-owned PostgreSQL infrastructure uses digest-pinned images.
+
+See the [workspace testing guide](../../docs/development/testing.md) for the ORM
+integration test harnesses and backend selectors.
