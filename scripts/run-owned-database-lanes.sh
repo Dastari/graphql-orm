@@ -92,7 +92,7 @@ run_keyset_decimals() {
 
 run_time_host_fields() {
   cargo test -p graphql-orm --locked --no-default-features --features "$1,time" \
-    --test time_host_fields -- --include-ignored --test-threads=1
+    --test time_host_fields --test implicit_timestamp_defaults -- --include-ignored --test-threads=1
 }
 
 run_postgres() {
@@ -396,6 +396,8 @@ case "${lane}" in
     ;;
   time-host-fields)
     for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "$backend" \
+        --test implicit_timestamp_defaults -- legacy_upsert --include-ignored --test-threads=1
       run_time_host_fields "$backend"
     done
     run_time_host_fields postgres,time/large-dates
