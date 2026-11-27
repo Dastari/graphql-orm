@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — Operation catalogue 0.17.0 adds opt-in receiver binding for reviewed resolver catalogue v1 exports (#934). [Migration](../../MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
+
 Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): `graphql-orm` 0.236.0; `graphql-orm-macros` 0.236.0; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.

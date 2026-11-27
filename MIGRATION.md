@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.0 to 0.17.0: Resolver catalogue receiver binding
+
+**No action.** Existing resolver exports and fingerprints carry through the
+upgrade. Receivers can opt in to `GraphqlResolverCatalogBindingV1` using a
+reviewed resolver catalogue fingerprint and the corresponding semantic
+catalogue. See the [receiver binding reference](crates/graphql-orm-operation-catalog/README.md#bind-a-resolver-catalogue-at-the-receiver).
+
 ## 0.235.0 to 0.236.0: ORM integration test harnesses
 
 **No action.** Upgrade ORM and macros together. For workspace test commands
