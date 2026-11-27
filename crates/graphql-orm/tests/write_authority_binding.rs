@@ -59,6 +59,97 @@ struct BindLine {
     order_id: String,
 }
 
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "bind_devices",
+    plural = "BindDevices",
+    auth = "optional",
+    upsert = "mac"
+)]
+struct BindDevice {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    #[unique]
+    #[filterable(type = "string")]
+    mac: String,
+    name: String,
+}
+
+fn device(id: &str, mac: &str) -> CreateBindDeviceInput {
+    CreateBindDeviceInput {
+        id: id.to_owned(),
+        mac: mac.to_owned(),
+        name: "probe".to_owned(),
+    }
+}
+
+/// A row policy that admits every row, after waiting at the gate while it is
+/// closed. It counts the decisions it was asked.
+#[derive(Default)]
+struct Gate {
+    closed: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicUsize,
+    open: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn close(&self) {
+        self.asked.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn open(&self) {
+        self.closed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.open.notify_waiters();
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn pass(&self) -> async_graphql::Result<bool> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        while self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            let opened = self.open.notified();
+            if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                opened.await;
+            }
+        }
+        Ok(true)
+    }
+}
+
+struct GatedRows(Arc<Gate>);
+impl RowPolicy for GatedRows {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(self.0.pass())
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(self.0.pass())
+    }
+}
+
 /// The text of every binding refusal.
 const REFUSED: &str =
     "generated write admission does not match this request, operation or database";
@@ -173,11 +264,13 @@ impl HostMutation {
     ) -> graphql_orm::async_graphql::Result<Vec<String>> {
         use ChangeAction::{Created, Deleted, Updated};
         use GeneratedWriteKind::{Create, Delete, DeleteMany, Update, Upsert};
+        type Devices = BindDevice;
         use MutationPhase::{After, Before};
 
         let db = ctx.data::<Database>()?;
         let orders = GeneratedWriteEntity::of::<BindOrder>();
         let lines = GeneratedWriteEntity::of::<BindLine>();
+        let devices = GeneratedWriteEntity::of::<BindDevice>();
         let mut out = Vec::new();
         match case.as_str() {
             // The scopes and the authentication mode are the entity's.
@@ -217,6 +310,16 @@ impl HostMutation {
                     .await?;
                 assert!(absent.is_none());
                 out.push(dispatch(&mut tx, orders, ctx, authority, Before, Deleted, "o1").await);
+                // One target admission per admission, whatever it found.
+                out.push(outcome(
+                    admission
+                        .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1"))
+                        .await,
+                ));
+                rollback(tx).await?;
+                let admission = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
+                let authority = admission.authority();
+                let mut tx = admission.begin(TransactionMode::Default).await?;
                 let locked = admission
                     .__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1"))
                     .await?;
@@ -271,45 +374,148 @@ impl HostMutation {
                 out.push(dispatch(&mut tx, orders, ctx, &detached, Before, Deleted, "o1").await);
                 rollback(tx).await?;
             }
-            // An upsert's authority is the branch its target admission decided.
+            // An upsert's authority is the branch the pipeline's own lookup
+            // decided: the caller reports no row.
             "upsert" => {
-                let admission = admit::<BindLine>(ctx, Upsert)?.__admit_entity(ctx).await?;
+                // The key selects an existing row, whatever the caller thinks.
+                let admission = admit::<Devices>(ctx, Upsert)?.__admit_entity(ctx).await?;
                 let authority = admission.authority();
                 let mut tx = admission.begin(TransactionMode::Default).await?;
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l9").await);
-                // The key found no row: a create, and nothing else.
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Created, "d9").await);
+                // No decision before the lookup.
+                out.push(outcome(
+                    admission.__admit_upsert_target::<Devices>(ctx).await,
+                ));
+                let found = admission
+                    .__lookup_upsert_target::<Devices>(ctx, &mut tx, &device("d9", "m1"))
+                    .await?;
+                assert_eq!(found.map(|row| row.id).as_deref(), Some("d1"));
+                // Looked up, not yet admitted; and looked up once.
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
                 out.push(outcome(
                     admission
-                        .__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
+                        .__lookup_upsert_target::<Devices>(ctx, &mut tx, &device("d9", "m9"))
                         .await,
                 ));
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l1").await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, After, Created, "l9").await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l9").await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, After, Created, "l9").await);
+                out.push(outcome(
+                    admission.__admit_upsert_target::<Devices>(ctx).await,
+                ));
+                // An update of the row that was found, and nothing else.
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Created, "d9").await);
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d2").await);
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
+                // Decided once.
+                out.push(outcome(
+                    admission.__admit_upsert_target::<Devices>(ctx).await,
+                ));
                 rollback(tx).await?;
-                // The key found a row: an update of that row, and nothing else.
-                let admission = admit::<BindLine>(ctx, Upsert)?.__admit_entity(ctx).await?;
+                // The key selects no row: a create, and nothing else.
+                let admission = admit::<Devices>(ctx, Upsert)?.__admit_entity(ctx).await?;
                 let authority = admission.authority();
                 let mut tx = admission.begin(TransactionMode::Default).await?;
-                let existing = BindLine {
-                    id: "l1".to_owned(),
-                    order_id: "o1".to_owned(),
-                };
+                let found = admission
+                    .__lookup_upsert_target::<Devices>(ctx, &mut tx, &device("d9", "m9"))
+                    .await?;
+                assert!(found.is_none());
                 out.push(outcome(
-                    admission
-                        .__admit_upsert_target(ctx, &mut tx, Some(&existing))
-                        .await,
+                    admission.__admit_upsert_target::<Devices>(ctx).await,
                 ));
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Created, "l1").await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l2").await);
-                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Updated, "l1").await);
-                // The branch is decided once.
-                out.push(outcome(
-                    admission
-                        .__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
-                        .await,
-                ));
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Updated, "d1").await);
+                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
+                out.push(dispatch(&mut tx, devices, ctx, authority, Before, Created, "d9").await);
+                out.push(dispatch(&mut tx, devices, ctx, authority, After, Created, "d9").await);
+                rollback(tx).await?;
+            }
+            // Two callers share an admission: one target admission wins,
+            // before either finishes its policy decision.
+            "race" => {
+                let gate = ctx.data::<Arc<Gate>>()?;
+                // Upsert: both ask for the decision on the looked-up row.
+                let admission = admit::<Devices>(ctx, Upsert)?.__admit_entity(ctx).await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                let found = admission
+                    .__lookup_upsert_target::<Devices>(ctx, &mut tx, &device("d9", "m1"))
+                    .await?;
+                assert!(found.is_some());
+                gate.close();
+                let (first, second, ()) = graphql_orm::futures::join!(
+                    admission.__admit_upsert_target::<Devices>(ctx),
+                    admission.__admit_upsert_target::<Devices>(ctx),
+                    async { gate.open() },
+                );
+                out.push(outcome(first));
+                out.push(outcome(second));
+                out.push(format!("asked {}", gate.asked()));
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        devices,
+                        ctx,
+                        admission.authority(),
+                        Before,
+                        Updated,
+                        "d1",
+                    )
+                    .await,
+                );
+                rollback(tx).await?;
+                // Single row: the lock waits on the row decision; a second
+                // target admission of the same admission arrives meanwhile.
+                let admission = admit::<BindOrder>(ctx, Delete)?.__admit_entity(ctx).await?;
+                let mut tx = admission.begin(TransactionMode::Default).await?;
+                gate.close();
+                let (first, second, ()) = graphql_orm::futures::join!(
+                    admission.__lock_target(ctx, &mut tx, by_id::<BindOrder>("o1")),
+                    admission.__read_target(ctx, by_id::<BindOrder>("o2")),
+                    async { gate.open() },
+                );
+                out.push(outcome(first));
+                out.push(outcome(second));
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        orders,
+                        ctx,
+                        admission.authority(),
+                        Before,
+                        Deleted,
+                        "o1",
+                    )
+                    .await,
+                );
+                out.push(
+                    dispatch(
+                        &mut tx,
+                        orders,
+                        ctx,
+                        admission.authority(),
+                        Before,
+                        Deleted,
+                        "o2",
+                    )
+                    .await,
+                );
+                // Bulk: target selection waits on a row decision; the bulk
+                // admission of the same authority arrives meanwhile.
+                let bulk = admit::<BindLine>(ctx, DeleteMany)?
+                    .__admit_entity_bulk(ctx)
+                    .await??;
+                let authority = bulk.authority();
+                gate.close();
+                let (first, second, ()) = graphql_orm::futures::join!(
+                    bulk_write_targets(
+                        db,
+                        Some((ctx, authority)),
+                        &mut tx,
+                        lines_of("o1"),
+                        line_key,
+                    ),
+                    lines.__admit_bulk(db, Some((ctx, authority))),
+                    async { gate.open() },
+                );
+                out.push(bulk_outcome(first));
+                out.push(bulk_outcome(second));
+                out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
                 rollback(tx).await?;
             }
             // A different entity.
@@ -373,15 +579,12 @@ impl HostMutation {
                     bulk.__lock_target(ctx, &mut tx, by_id::<BindLine>("l1"))
                         .await,
                 ));
-                out.push(outcome(
-                    bulk.__admit_upsert_target::<BindLine>(ctx, &mut tx, None)
-                        .await,
-                ));
+                out.push(outcome(bulk.__admit_upsert_target::<BindLine>(ctx).await));
                 // Its own bulk admission.
                 out.push(bulk_outcome(
                     lines.__admit_bulk(db, Some((ctx, authority))).await,
                 ));
-                // A filter that admits no row issues nothing.
+                // A filter that admits no row issues nothing, for good.
                 let targets = bulk_write_targets(
                     db,
                     Some((ctx, authority)),
@@ -393,7 +596,21 @@ impl HostMutation {
                 .map_err(graphql_error_from_sqlx)?;
                 assert!(targets.is_empty());
                 out.push(dispatch(&mut tx, lines, ctx, authority, Before, Deleted, "l1").await);
+                out.push(bulk_outcome(
+                    bulk_write_targets(
+                        db,
+                        Some((ctx, authority)),
+                        &mut tx,
+                        lines_of("o1"),
+                        line_key,
+                    )
+                    .await,
+                ));
                 // Two rows: the authority is theirs alone.
+                let bulk = admit::<BindLine>(ctx, DeleteMany)?
+                    .__admit_entity_bulk(ctx)
+                    .await??;
+                let authority = bulk.authority();
                 let targets = bulk_write_targets(
                     db,
                     Some((ctx, authority)),
@@ -552,8 +769,23 @@ impl HostMutation {
                     .__admit_entity(&child)
                     .await?
                     .into_authority();
+                // The transaction of another invocation of the same root.
+                let other = admit::<BindOrder>(ctx, Create)?.__admit_entity(ctx).await?;
+                let mut tx = other.begin(TransactionMode::Default).await?;
+                out.push(dispatch(&mut tx, lines, &child, &authority, Before, Created, "c1").await);
+                rollback(tx).await?;
                 let mut tx = parent.begin(TransactionMode::Default).await?;
                 out.push(dispatch(&mut tx, lines, &child, &orphan, Before, Created, "c0").await);
+                // A repeated selection of the root, on this same transaction:
+                // the same response key and the same synthetic field name,
+                // placed at another selection of the document.
+                let mut elsewhere = field.clone();
+                elsewhere.pos.line += 1;
+                let repeated = ctx.with_field(&elsewhere);
+                out.push(
+                    dispatch(&mut tx, lines, &repeated, &authority, Before, Created, "c1").await,
+                );
+                out.push(outcome(nested(&repeated, &parent).map(drop)));
                 // The child's authority under its parent's field context.
                 out.push(dispatch(&mut tx, lines, ctx, &authority, Before, Created, "c1").await);
                 // The parent's authority under the child's.
@@ -617,7 +849,7 @@ impl HostMutation {
     }
 }
 
-schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [BindOrder, BindLine], extra_mutation_types: [HostMutation] }
+schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [BindOrder, BindLine, BindDevice], extra_mutation_types: [HostMutation] }
 
 /// Records each hook invocation with the subject of the originating request
 /// its transaction presents.
@@ -698,6 +930,8 @@ async fn fixture() -> Fixture {
     for sql in [
         "CREATE TABLE bind_orders (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE bind_lines (id TEXT PRIMARY KEY, order_id TEXT NOT NULL)",
+        "CREATE TABLE bind_devices (id TEXT PRIMARY KEY, mac TEXT NOT NULL UNIQUE, name TEXT NOT NULL)",
+        "INSERT INTO bind_devices VALUES ('d1', 'm1', 'first'), ('d2', 'm2', 'second')",
         "INSERT INTO bind_orders VALUES ('o1', 'first'), ('o2', 'second')",
         "INSERT INTO bind_lines VALUES ('l1', 'o1'), ('l2', 'o1'), ('l3', 'o3')",
     ] {
@@ -871,8 +1105,9 @@ async fn authority_is_issued_only_for_the_admitted_row_and_transaction() {
         &fixture,
         &steps,
         &[
-            // After the unlocked read alone, and after a missing target.
-            "refused", "refused",
+            // After the unlocked read alone; after a missing target; no
+            // second attempt.
+            "refused", "refused", "refused",
             // Locked and admitted: not an update; not another row; the
             // row's `Before`, once.
             "refused", "refused", "ok", "refused",
@@ -895,14 +1130,56 @@ async fn an_upsert_authority_is_the_branch_its_target_admission_decided() {
         &fixture,
         &steps,
         &[
-            // Before target admission.
-            "refused",
-            // No row: admitted; not an update; no `After` before `Before`;
-            // the create's two phases.
+            // Before the lookup: no dispatch, no decision.
+            "refused", "refused",
+            // Looked up: no dispatch yet; no second lookup; the decision.
+            "refused", "refused", "ok",
+            // The row that was found: not a create; not another row; its
+            // update; decided once.
+            "refused", "refused", "ok", "refused",
+            // No row: the decision; not an update; no `After` before
+            // `Before`; the create's two phases.
             "ok", "refused", "refused", "ok", "ok",
-            // A row: admitted; not a create; not another row; its update.
-            "ok", "refused", "refused", "ok", // Decided once.
-            "refused",
+        ],
+        3,
+    );
+}
+
+#[tokio::test]
+async fn concurrent_target_admissions_of_one_admission_do_not_both_win() {
+    // The row policy holds its decision until the second caller has been
+    // answered. The first caller's claim stands, the second is refused
+    // without reaching the policy, and nothing the second did replaced the
+    // first's binding.
+    let mut fixture = fixture().await;
+    let gate = Arc::new(Gate::default());
+    fixture.db.set_row_policy(GatedRows(gate.clone()));
+    let schema = schema_builder(fixture.db.clone())
+        .data(Stash::default())
+        .data(Repeats::default())
+        .data(gate)
+        .finish();
+    let steps = fixture
+        .run(
+            &schema,
+            "mutation { probe(case: \"race\") }",
+            Some(operator(&ALL_SCOPES)),
+        )
+        .await
+        .remove(0);
+    assert_hooks(
+        &fixture,
+        &steps,
+        &[
+            // Upsert: the first decision, the second refused; one policy
+            // decision was asked; the first's row dispatches.
+            "ok", "refused", "asked 1", "ok",
+            // Single row: the lock, the concurrent admission refused; the
+            // locked row dispatches, the other does not.
+            "ok", "refused", "ok", "refused",
+            // Bulk: the targets, the concurrent bulk admission refused; an
+            // admitted row dispatches.
+            "ok", "refused", "ok",
         ],
         3,
     );
@@ -929,8 +1206,9 @@ async fn an_authority_is_refused_for_a_different_operation_or_bulk_row() {
             "refused", "refused",
             // A bulk authority: unissued; no single-row or upsert target.
             "refused", "refused", "refused",
-            // Its own bulk admission; still unissued after an empty result.
-            "ok", "refused",
+            // Its own bulk admission; unissued after an empty result, and no
+            // second target admission.
+            "ok", "refused", "refused",
             // Issued for two rows: not an update; not a row outside them;
             // each row's `Before`, once.
             "refused", "refused", "ok", "ok", "refused",
@@ -1016,8 +1294,14 @@ async fn nested_child_contexts_share_one_invocation_and_nothing_more() {
         &[
             // Request admission under the child, entity admission under the
             // root; a parent that is not a create.
-            "refused", "refused", // A child admitted outside the invocation.
+            "refused", "refused",
+            // The child's authority on the transaction of another invocation
+            // of the same root.
+            "refused", // A child admitted outside the invocation.
             "refused",
+            // A repeated selection of the root on the same transaction: the
+            // child's dispatch, and a child admission through this parent.
+            "refused", "refused",
             // The child's authority under the parent's field; the parent's
             // under the child's.
             "refused", "refused",

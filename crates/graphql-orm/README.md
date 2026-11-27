@@ -10,10 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.235.0 derives the authority of a generated GraphQL write from the
+Version 0.236.0 derives the authority of a generated GraphQL write from the
 entity's configuration, issues it only after target admission and binds it to
 one request, operation and `Database`. Generated mutations are unchanged.
-[Migration](../../MIGRATION.md#02340-to-02350-bound-generated-write-authority)
+[Migration](../../MIGRATION.md#02350-to-02360-bound-generated-write-authority)
 
 Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
 chrono fields and stored date-time formats carry forward without migration.

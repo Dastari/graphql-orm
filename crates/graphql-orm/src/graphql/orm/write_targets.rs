@@ -177,13 +177,18 @@ where
         + Sync
         + 'static,
 {
-    if let Some((ctx, authority)) = request {
-        authority.__require_bulk_targets::<T, B>(ctx, db, tx.__base_database())?;
-    }
+    // Claimed before the first await: one bulk target admission per
+    // authority, whose result alone it is issued for.
+    let claim = match request {
+        Some((ctx, authority)) => {
+            Some(authority.__claim_bulk_targets::<T, B>(ctx, db, tx.__base_database())?)
+        }
+        None => None,
+    };
     let targets =
         admit_bulk_write_targets(db, request.map(|(ctx, _)| ctx), tx, query, key_value).await?;
-    if let Some((_, authority)) = request {
-        authority.__issue_bulk_targets(
+    if let Some(claim) = claim {
+        claim.__complete_bulk_targets(
             tx.__identity(),
             targets
                 .iter()

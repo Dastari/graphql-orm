@@ -1471,6 +1471,9 @@ struct HoldEventsUntilCommit;
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     /// Identifies this transaction; never reused.
     identity: u64,
+    /// The generated write invocation whose root admission began this
+    /// transaction, if one did.
+    write_invocation: Option<std::sync::Arc<super::write_pipeline::Invocation>>,
     db: &'tx crate::db::Database<B>,
     pub(crate) tx: B::Transaction<'tx>,
     mode: TransactionMode,
@@ -2545,6 +2548,7 @@ where
     ) -> Self {
         Self {
             identity: crate::db::fresh_identity(),
+            write_invocation: None,
             db,
             tx,
             mode,
@@ -3091,6 +3095,14 @@ where
         self.identity
     }
 
+    /// Mark this transaction as the one `invocation`'s root admission began.
+    pub(super) fn __carry_write_invocation(
+        &mut self,
+        invocation: std::sync::Arc<super::write_pipeline::Invocation>,
+    ) {
+        self.write_invocation = Some(invocation);
+    }
+
     /// Keep every queued event in the transaction until commit, including
     /// events queued by a hook that explicitly drains the queue.
     #[doc(hidden)]
@@ -3174,6 +3186,7 @@ where
         }
         let Self {
             identity: _,
+            write_invocation: _,
             db,
             tx,
             mode: _,
@@ -3239,8 +3252,9 @@ where
     /// A request is refused, before the hook runs, unless its authority was
     /// earned for `entity` under this request and field, on this
     /// transaction's `Database`, and is issued in this transaction for the
-    /// row `id` and an event that reports `action`; each row dispatches each
-    /// phase once.
+    /// row `id` and an event that reports `action`; a create must be
+    /// dispatched in the transaction its invocation's root admission began.
+    /// Each row dispatches each phase once.
     ///
     /// On a database that propagates request authority to hooks, the hook's
     /// operations on this transaction then present that request when it is
@@ -3281,6 +3295,7 @@ where
                 ctx,
                 self.db,
                 self.identity,
+                self.write_invocation.as_ref(),
                 &event.phase,
                 event.action,
                 &event.id,

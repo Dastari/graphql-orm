@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.234.0 to 0.235.0: Bound generated write authority
+## 0.235.0 to 0.236.0: Bound generated write authority
 
 **No action** for supported callers: hosts that use the derives, the
 repository API, `Database::transaction` and
@@ -22,9 +22,10 @@ The hidden write pipeline now reads a generated write's authentication
 mode, scope declarations and assurance coordinate from the entity's generated
 configuration. It issues the `GeneratedWriteAuthority` only when the
 admission the operation needs is complete, which for an update, a delete, an
-upsert and a bulk write means after target admission. It binds the authority
-to one request and invocation, one operation, one `Database` handle, one
-transaction and the rows that were admitted.
+upsert and a bulk write means after target admission, which the pipeline runs
+itself, once per admission. It binds the authority to one request and
+invocation, one operation, one `Database` handle, one transaction and the
+rows that were admitted.
 
 Two details of generated mutations change in narrow cases:
 
@@ -54,7 +55,9 @@ changed, so that code no longer compiles:
   and `__admit_entity_on` is removed. A nested child is admitted through its
   parent's admission with `__admit_generated_nested_create_request`.
 - `__lock_generated_write_target` and `__read_generated_write_target` are
-  replaced by methods of the admission.
+  replaced by methods of the admission. An upsert's target admission is
+  `__lookup_upsert_target`, which runs the locked lookup itself, followed by
+  `__admit_upsert_target`.
 - `bulk_write_targets` takes the request with its authority instead of the
   GraphQL context.
 

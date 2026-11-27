@@ -313,7 +313,8 @@ ORM source), which fixes the order of the checks in one place:
 3. **Target admission.** A single-row update or delete locks its row through
    the write-target prefilter and classifies it with the row read and write
    decisions; a bulk write does the same for every row its filter selects, and
-   an upsert asks the row write decision on the row its key found. See
+   an upsert looks its conflict key up under a lock and asks the row write
+   decision on the row it found. See
    [row policy on generated writes](#row-policy-on-generated-writes).
 4. **Hook dispatch.** Each `Before` and `After` hook invocation, the hook's
    [request authority](#hook-writes-on-the-originating-requests-authority) and
@@ -367,22 +368,32 @@ one.
   and a bulk write, target admission issues it. A target that is absent or
   refused, a bulk filter that admits no row, and the unlocked read of a
   `dependent_deletes` root issue nothing.
+- **Target admission is the pipeline's, once.** The pipeline reads the target
+  itself: it locks the row of a single-row write, selects the rows of a bulk
+  write, and runs the locked lookup of an upsert's conflict key. It does not
+  take a row or a lookup result from its caller. An admission admits a
+  target once, whatever the attempt finds. The attempt is claimed before its
+  first await, so of two callers that share an admission one is refused and
+  cannot replace what the other was issued.
 - **The authority is bound to what it was earned under:**
   - one request and one invocation: the request itself, the root field being
-    resolved, and one invocation of it. A nested child is admitted through
-    its parent's admission and inherits the parent's invocation, so the
-    synthetic child-field contexts of a nested create share it with their
-    root. A second selection of the same root field in one request is
-    another invocation;
+    resolved (its response key and where its selection is in the document),
+    and one invocation of it. The transaction a root's admission begins
+    carries the invocation, and a create dispatches only in a transaction
+    that carries its own. A nested child is admitted through its parent's
+    admission and inherits the parent's invocation, so the synthetic
+    child-field contexts of a nested create share it with their root. A
+    second selection of the same root field in one request is another
+    selection and another invocation;
   - one operation: the operation, the entity and the field whose context was
     admitted, which is the root field or a nested child's own create field;
   - one `Database`: the handle the entity was admitted on, which must be the
     handle of the transaction that dispatches the hook. A handle keeps one
     identity for its lifetime and a clone is another handle;
   - one transaction: the one target admission ran in, or for a create the one
-    its root's admission began;
+    that carries its invocation;
   - the admitted rows: the row a single-row target admission locked, the
-    branch an upsert decided (a new row, or the row its key found), or the
+    branch an upsert's lookup decided (a new row, or the row it found), or the
     rows a bulk target admission selected. Each row dispatches one `Before`
     and one `After`, so each nested child row needs its own admission.
 - **A mismatch is refused.** Entity admission, target admission, the bulk

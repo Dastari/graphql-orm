@@ -55,7 +55,9 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) acknowledge: bool,
 }
 
-pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
+/// The upsert root field, and the item-level lookup the runtime's target
+/// admission runs for it.
+pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream, TokenStream) {
     let ResolverInput {
         upsert_operation_description,
         upsert_mutation_name,
@@ -156,7 +158,22 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
         after_state: quote! { after_state },
     }
     .dispatch();
-    if generates_public_upsert {
+    if !generates_public_upsert {
+        return (quote! {}, quote! {});
+    }
+    let lookup = quote! {
+        impl ::graphql_orm::graphql::orm::GeneratedUpsertLookup<#backend_marker> for #struct_name {
+            type Input = #create_input;
+
+            fn __gom_upsert_lookup<'a, 'tx: 'a>(
+                hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'tx, #backend_marker>,
+                input: &'a Self::Input,
+            ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<::std::option::Option<Self>>> {
+                ::std::boxed::Box::pin(Self::__gom_fetch_by_upsert_on(hook_ctx, input))
+            }
+        }
+    };
+    let method = {
         quote! {
             #[doc = #upsert_operation_description]
             #[graphql(name = #upsert_mutation_name, #upsert_requires_scopes #authenticated_directive)]
@@ -201,14 +218,15 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 #principal_key_assignment
 
                 #unsigned_checks
-                let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                // Target admission. The runtime looks the conflict key up
+                // itself, locked, in this transaction.
+                let current_entity = __gom_write
+                    .__lookup_upsert_target::<#struct_name>(ctx, &mut hook_ctx, &input)
+                    .await?;
                 // Before any policy callback, hook or statement.
                 #principal_key_preimage_check
-                // Target admission: the row write decision on the row the
-                // key found, if any.
-                __gom_write.__admit_upsert_target(ctx, &mut hook_ctx, current_entity.as_ref()).await?;
+                // The row write decision on the row the key found, if any.
+                __gom_write.__admit_upsert_target::<#struct_name>(ctx).await?;
                 // Update candidates whose write the policy denied and the host
                 // chose to ignore: they stay out of the conflict update.
                 #[allow(unused_mut)]
@@ -300,7 +318,6 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> TokenStream {
                 __gom_outcome.finish::<_, #backend_marker>(ctx, __gom_result)
             }
         }
-    } else {
-        quote! {}
-    }
+    };
+    (method, lookup)
 }

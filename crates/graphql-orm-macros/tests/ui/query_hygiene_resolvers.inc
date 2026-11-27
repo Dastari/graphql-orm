@@ -851,12 +851,10 @@ impl RecordMutations {
                 .await
                 .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
             }
-            let current_entity = Record::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
-                .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-            __gom_write
-                .__admit_upsert_target(ctx, &mut hook_ctx, current_entity.as_ref())
+            let current_entity = __gom_write
+                .__lookup_upsert_target::<Record>(ctx, &mut hook_ctx, &input)
                 .await?;
+            __gom_write.__admit_upsert_target::<Record>(ctx).await?;
             #[allow(unused_mut)]
             let mut __gom_denied_upsert_columns: ::std::vec::Vec<&'static str> =
                 ::std::vec::Vec::new();
