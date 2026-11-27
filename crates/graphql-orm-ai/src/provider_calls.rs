@@ -17666,6 +17666,18 @@ mod tests {
                 },
                 ProviderEvent::ResponseCompleted { response_id: None },
             ],
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 38,
+                    output_tokens: 7,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
         ])
         .await;
         let provider_executor = AiProviderCallExecutor::new(
@@ -17701,17 +17713,20 @@ mod tests {
             "egress-v1",
         )
         .expect("tool-result route should validate");
-        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
-            fixture.run_service.clone(),
-            Arc::new(Resolver(fixture.principal.clone())),
-            Arc::new(AllowAccess),
-            Arc::new(ProtectionPolicy),
-            Arc::new(DatabaseManagedContentProtector),
-            Arc::new(TestRuleResolver::default()),
-            Arc::new(SystemClock),
-            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
-                .expect("checkpoint limits should validate"),
-        );
+        let checkpoint_service = || {
+            OrmAiCoordinatorCheckpointService::new(
+                fixture.run_service.clone(),
+                Arc::new(Resolver(fixture.principal.clone())),
+                Arc::new(AllowAccess),
+                Arc::new(ProtectionPolicy),
+                Arc::new(DatabaseManagedContentProtector),
+                Arc::new(TestRuleResolver::default()),
+                Arc::new(SystemClock),
+                AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                    .expect("checkpoint limits should validate"),
+            )
+        };
+        let writer = checkpoint_service();
         let mut guard = AiAgentLoopGuard::new(
             &fixture.lease,
             AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
@@ -17732,7 +17747,7 @@ mod tests {
         );
         let (rules, first_provider_rule_usage) =
             test_rule_checkpoint(&fixture.scope, &[&first_result], 0);
-        let first_lease = checkpoint_service
+        let first_lease = writer
             .persist_provider_turn(
                 &fixture.lease,
                 &first_result,
@@ -17769,7 +17784,7 @@ mod tests {
             .continuation()
             .expect("first stateless batch should continue");
         let (_, first_batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&first_result], 1);
-        let first_batch_lease = checkpoint_service
+        let first_batch_lease = writer
             .persist_tool_batch(
                 first_tool.lease(),
                 &first_result,
@@ -17788,7 +17803,7 @@ mod tests {
         let first_checkpoint_id = first_batch_lease
             .latest_checkpoint_id()
             .expect("first stateless checkpoint should link");
-        let first_consumed_lease = checkpoint_service
+        let first_consumed_lease = writer
             .consume_before_provider(&first_batch_lease, first_checkpoint_id)
             .await
             .expect("first stateless batch should consume exactly once");
@@ -17855,7 +17870,7 @@ mod tests {
         );
         let (_, second_provider_rule_usage) =
             test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 1);
-        let second_lease = checkpoint_service
+        let second_lease = writer
             .persist_provider_turn(
                 &first_consumed_lease,
                 &second_result,
@@ -17894,7 +17909,7 @@ mod tests {
         assert_eq!(second_continuation.replay_transfers().len(), 1);
         let (_, second_batch_rule_usage) =
             test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 2);
-        let second_batch_lease = checkpoint_service
+        let second_batch_lease = writer
             .persist_tool_batch(
                 second_tool.lease(),
                 &second_result,
@@ -17910,7 +17925,7 @@ mod tests {
             )
             .await
             .expect("second stateless batch should checkpoint full history");
-        let second_consumed_lease = checkpoint_service
+        let second_consumed_lease = writer
             .consume_before_provider(
                 &second_batch_lease,
                 second_batch_lease
@@ -18041,7 +18056,7 @@ mod tests {
             &[&first_result, &second_result, &third_result],
             2,
         );
-        let third_lease = checkpoint_service
+        let third_lease = writer
             .persist_provider_turn(
                 &second_consumed_lease,
                 &third_result,
@@ -18088,7 +18103,7 @@ mod tests {
             &[&first_result, &second_result, &third_result],
             3,
         );
-        let third_batch_lease = checkpoint_service
+        let third_batch_lease = writer
             .persist_tool_batch(
                 third_tool.lease(),
                 &third_result,
@@ -18104,7 +18119,8 @@ mod tests {
             )
             .await
             .expect("third stateless batch should checkpoint");
-        let adopted = checkpoint_service
+        let restarted = checkpoint_service();
+        let adopted = restarted
             .adopt_tool_batch(&third_batch_lease)
             .await
             .expect("the restarted adopter validates the marker")
@@ -18113,6 +18129,35 @@ mod tests {
             adopted.continuation().checkpoint_value(),
             third_continuation.checkpoint_value()
         );
+
+        let consumed = restarted
+            .consume_before_provider(&third_batch_lease, adopted.checkpoint_id())
+            .await
+            .expect("restarted adopter consumes the checkpoint");
+        let mut fourth_base = plan(&fixture);
+        fourth_base.budget.idempotency_key = format!("provider:{}:4", fixture.lease.attempt_id());
+        let fourth = AiProviderCallPlan::new_continuation_with_tools(
+            fourth_base.provider_kind,
+            ModelRequest {
+                input: Vec::new(),
+                continuation: None,
+                ..third_result.request_snapshot.clone()
+            },
+            fourth_base.budget,
+            fourth_base.transfers,
+            "stateless-history-provider-turn-4",
+            adopted.continuation().clone(),
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("the marker is usable on the next turn");
+        let result = provider_executor
+            .execute(&consumed, fourth)
+            .await
+            .expect("the restarted replay dispatches");
+        let sent = serde_json::to_string(&result.request_snapshot).expect("request");
+        assert!(!sent.contains(&previous_output.to_string()));
+        assert_eq!(fixture.mock.request_count(), 4);
     }
 
     #[tokio::test]

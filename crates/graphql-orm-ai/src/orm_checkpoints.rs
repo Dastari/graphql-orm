@@ -8,6 +8,7 @@ use std::sync::Arc;
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReferenceKind, ResolvedPrincipal};
 use async_trait::async_trait;
 use graphql_orm::graphql::errors::OrmPublicError;
+use graphql_orm::graphql::filters::UuidFilter;
 use serde::Deserialize;
 use serde_json::json;
 use time::Duration;
@@ -29,7 +30,6 @@ use crate::{
     AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute, ContentProtectionContext,
     ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind, ToolMaturity,
 };
-use graphql_orm::graphql::orm::{QueryBuilderTrait, UuidFilter};
 
 mod native;
 mod tool_media;
@@ -1790,7 +1790,7 @@ impl OrmAiCoordinatorCheckpointService {
         transfer: &AiEgressManifest,
         withheld_hash: Option<&str>,
     ) -> Result<(), AiError> {
-        let adoption =
+        let adoptions =
             AiSubscriptionWaitAdoptionRecord::query(self.run_service.custody_database().pool())
                 .filter(AiSubscriptionWaitAdoptionRecordWhereInput {
                     waiter_id: Some(UuidFilter {
@@ -1799,10 +1799,13 @@ impl OrmAiCoordinatorCheckpointService {
                     }),
                     ..Default::default()
                 })
-                .first()
+                .limit(2)
+                .fetch_all()
                 .await
-                .map_err(|error| map_orm(OrmPublicError::from(error)))?
-                .ok_or(AiError::NotFound)?;
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?;
+        let [adoption] = adoptions.as_slice() else {
+            return Err(AiError::Conflict);
+        };
         if adoption.run_id != waiter.run_id
             || adoption.tool_call_id != waiter.tool_call_id
             || adoption.state != "consumed"
