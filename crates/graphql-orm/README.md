@@ -22,6 +22,10 @@ In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
 fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased).
 
+Version 0.235.0 preserves authorized direct queries for generated
+relations without a compatible registered loader. See
+[generated relation loaders](../../docs/reference/graphql-orm/entities-and-relations.md#current-authority-for-generated-relationship-targets).
+
 Version 0.234.0 uses `time` 0.3 internally for date-time handling. Existing
 chrono fields and stored date-time formats carry forward without migration.
 See the [migration guide](../../MIGRATION.md#02330-to-02340-internal-date-time-engine).

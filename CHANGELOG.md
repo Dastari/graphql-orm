@@ -45,6 +45,13 @@ for historical context.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
 
+## Unreleased - ORM/macros 0.235.0
+
+- **No action** (refs #542). Generated to-one and to-many resolvers use
+  a checked loader lookup. They batch when eligible and a compatible loader
+  is registered, and otherwise keep using authorized direct queries.
+  [Migration](MIGRATION.md#02340-to-02350-optional-relation-loaders)
+
 ## Unreleased - ORM/macros 0.234.0
 
 - **Changed (refs #768).** The ORM uses `time` 0.3 for internal date-time
