@@ -21,6 +21,24 @@ for historical context.
   unsupported, stale or mismatched catalogues.
   [Migration](MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
 
+## Unreleased - ORM/macros 0.237.0
+
+- **Security hardening (#921).** The authority that lets a generated GraphQL
+  mutation's hook present its originating request is now derived from the
+  entity's generated configuration, issued only after a target admission the
+  pipeline runs itself, and bound to one request and invocation, one
+  operation, one `Database` handle, one transaction and the admitted rows.
+  Upsert uses the entity's configured backend. Its create hooks must carry
+  the exact conflict-key binds used in the locked lookup. A denied conflict
+  field on an inserting upsert returns `FORBIDDEN` even when the field policy
+  opts into omission. Dispatch requires a matching admission. The SDL and
+  the catalogues are unchanged. A
+  generated write always enforces the assurance requirement of its own root
+  field, and the `Before` hook event of a single-row update names the stored
+  key. **No action** unless a custom resolver calls a generated mutation
+  resolver method, or host code calls the hidden pipeline functions.
+  [Migration](MIGRATION.md#02360-to-02370-bound-generated-write-authority)
+
 ## Unreleased - ORM/macros 0.236.0
 
 - Group ORM integration tests that share a CI lane into small test harnesses.

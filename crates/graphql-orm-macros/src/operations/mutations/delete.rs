@@ -1,4 +1,4 @@
-use super::{Assurance, Hook, admit_request, admitted_request, write_entity};
+use super::{Hook, admit_request, admitted_request, write_entity};
 use crate::dependent_deletes::Boundary;
 
 use proc_macro2::TokenStream;
@@ -16,15 +16,12 @@ pub(in crate::operations) struct SingleInput<'a> {
     pub(in crate::operations) result_type: &'a syn::Ident,
     pub(in crate::operations) expected_version_binding: &'a TokenStream,
     pub(in crate::operations) reject_unplanned_delete_effects: &'a TokenStream,
-    pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) delete_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) delete_scope_arguments: &'a TokenStream,
     pub(in crate::operations) dependent_deletes: bool,
     pub(in crate::operations) backend_marker: &'a TokenStream,
-    pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
     pub(in crate::operations) sql_dialect: &'a TokenStream,
     pub(in crate::operations) pk_bind_value: &'a TokenStream,
-    pub(in crate::operations) table_name: &'a str,
     pub(in crate::operations) pk_id_for_entity: &'a TokenStream,
     pub(in crate::operations) sql_table_name: &'a str,
     pub(in crate::operations) notify_on_deleted: &'a TokenStream,
@@ -43,28 +40,19 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
         result_type,
         expected_version_binding,
         reject_unplanned_delete_effects,
-        resolver_auth_mode,
-        delete_scope_enforcement,
+        delete_scope_arguments,
         dependent_deletes,
         backend_marker,
-        entity_name_lit,
         struct_name,
         sql_dialect,
         pk_bind_value,
-        table_name,
         pk_id_for_entity,
         sql_table_name,
         notify_on_deleted,
     } = input;
-    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        resolver_auth_mode,
-        delete_scope_enforcement,
-        Assurance::Resolver,
-    );
+    let admit = admit_request(struct_name, "Delete", delete_scope_arguments);
     let hook = |phase, before_state| {
         Hook {
             request: &request,
@@ -108,7 +96,7 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 #reject_unplanned_delete_effects
                 #entity
                 #admit
-                let __gom_write = __gom_request.__admit_entity::<#backend_marker>(ctx, __gom_entity).await?;
+                let __gom_write = __gom_request.__admit_entity(ctx).await?;
                 let __gom_authority = __gom_write.authority();
                 let db = __gom_write.db();
                 let pool = db.pool();
@@ -120,11 +108,9 @@ pub(in crate::operations) fn single(input: SingleInput<'_>) -> TokenStream {
                 // The locked row is also the notification's entity. Missing,
                 // filtered out, or neither readable nor writable:
                 // indistinguishable to the client.
-                let entity = ::graphql_orm::graphql::orm::__lock_generated_write_target(
+                let entity = __gom_write.__lock_target(
                     ctx,
-                    db,
                     &mut hook_ctx,
-                    __gom_entity,
                     EntityQuery::<#struct_name, #backend_marker>::new()
                         .where_clause(
                             &::std::format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
@@ -194,12 +180,9 @@ pub(in crate::operations) struct BulkInput<'a> {
     pub(in crate::operations) where_input: &'a syn::Ident,
     pub(in crate::operations) delete_many_result_type: &'a syn::Ident,
     pub(in crate::operations) reject_unplanned_delete_effects: &'a TokenStream,
-    pub(in crate::operations) resolver_auth_mode: &'a TokenStream,
-    pub(in crate::operations) delete_many_scope_enforcement: &'a TokenStream,
+    pub(in crate::operations) delete_many_scope_arguments: &'a TokenStream,
     pub(in crate::operations) backend_marker: &'a TokenStream,
-    pub(in crate::operations) entity_name_lit: &'a str,
     pub(in crate::operations) struct_name: &'a syn::Ident,
-    pub(in crate::operations) table_name: &'a str,
     pub(in crate::operations) notify_bulk_deleted: &'a TokenStream,
 }
 
@@ -214,23 +197,14 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
         where_input,
         delete_many_result_type,
         reject_unplanned_delete_effects,
-        resolver_auth_mode,
-        delete_many_scope_enforcement,
+        delete_many_scope_arguments,
         backend_marker,
-        entity_name_lit,
         struct_name,
-        table_name,
         notify_bulk_deleted,
     } = input;
-    let entity = write_entity(entity_name_lit, table_name, struct_name);
+    let entity = write_entity(struct_name);
     let request = admitted_request();
-    let admit = admit_request(
-        struct_name,
-        backend_marker,
-        resolver_auth_mode,
-        delete_many_scope_enforcement,
-        Assurance::Resolver,
-    );
+    let admit = admit_request(struct_name, "DeleteMany", delete_many_scope_arguments);
     quote! {
             #[doc = #delete_many_operation_description]
             #[graphql(name = #delete_many_mutation_name, #delete_many_requires_scopes #authenticated_directive)]
@@ -249,7 +223,7 @@ pub(in crate::operations) fn bulk(input: BulkInput<'_>) -> TokenStream {
                 #reject_unplanned_delete_effects
                 #entity
                 #admit
-                let __gom_write = match __gom_request.__admit_entity_bulk::<#backend_marker>(ctx, __gom_entity).await? {
+                let __gom_write = match __gom_request.__admit_entity_bulk(ctx).await? {
                     ::std::result::Result::Ok(admission) => admission,
                     ::std::result::Result::Err(error) => {
                         return ::std::result::Result::Ok(#delete_many_result_type::from_graphql_error(error));
