@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.242.0 reduces the code compiled for ordinary generated entity
+objects by emitting field dispatch over shared runtime helpers.
+[Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).
+
 Version 0.241.0 adds `#[graphql_orm(time_offset_datetime)]` for persisted
 `time::OffsetDateTime` and `Option<time::OffsetDateTime>` fields when the ORM
 `time` feature is enabled. See the

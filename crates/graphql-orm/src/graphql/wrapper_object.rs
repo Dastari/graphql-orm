@@ -14,6 +14,9 @@
 //! visibility, federation or complexity attributes, and no authorization runs
 //! in them; their fields are already-authorized values.
 //!
+//! Ordinary entity objects use the same registration and authorize each
+//! selected field before handing its value to async-graphql.
+//!
 //! Reached by generated code through this absolute path only.
 
 use async_graphql::parser::types::Field;
@@ -145,4 +148,71 @@ pub async fn resolve_field(
     };
     let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
     value.resolve_value(&ctx_obj, ctx.item).await.map(Some)
+}
+
+/// Read policy for a stored field on an ordinary generated entity object.
+pub struct ScalarFieldPolicy {
+    /// Entity name used by the field policy provider.
+    pub entity: &'static str,
+    /// GraphQL field name, before any query alias.
+    pub field: &'static str,
+    /// Explicit policy key, if declared.
+    pub key: Option<&'static str>,
+    /// Whether the field can be selected in a subscription.
+    pub subscribable: bool,
+}
+
+impl ScalarFieldPolicy {
+    /// Apply the same checks as the generated field getter, in the same order.
+    pub async fn authorize<B: crate::graphql::orm::OrmBackend>(
+        &self,
+        ctx: &Context<'_>,
+        record: &(dyn std::any::Any + Send + Sync),
+    ) -> async_graphql::Result<()> {
+        let db = crate::db::request_database::<B>(ctx)?;
+        if !self.subscribable
+            && ctx.query_env.operation.node.ty
+                == async_graphql::parser::types::OperationType::Subscription
+        {
+            return Err(async_graphql::Error::new(format!(
+                "Field {}.{} is not available in subscriptions",
+                self.entity, self.field,
+            )));
+        }
+        db.ensure_readable_field(ctx, self.entity, self.field, self.key, Some(record))
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_callback)
+    }
+}
+
+/// Authorize a generated field before reading or validating its value.
+///
+/// Map authorization and read errors to the selected response path before
+/// handing a successful value to its GraphQL output type.
+pub async fn resolve_scalar<B: crate::graphql::orm::OrmBackend, T: OutputType>(
+    ctx: &Context<'_>,
+    policy: ScalarFieldPolicy,
+    record: &(dyn std::any::Any + Send + Sync),
+    read: impl FnOnce() -> async_graphql::Result<T> + Send,
+) -> ServerResult<Option<Value>> {
+    let value = policy
+        .authorize::<B>(ctx, record)
+        .await
+        .and_then(|()| read())
+        .map_err(|error| ctx.set_error_path(error.into_server_error(ctx.item.pos)))?;
+    let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
+    value.resolve(&ctx_obj, ctx.item).await.map(Some)
+}
+
+/// Validate a federation representation as `Object` does for a type with no entity resolvers.
+pub fn find_unkeyed_entity(ctx: &Context<'_>, params: &Value) -> ServerResult<Option<Value>> {
+    if let Value::Object(params) = params
+        && !matches!(params.get("__typename"), Some(Value::String(_)))
+    {
+        return Err(async_graphql::ServerError::new(
+            r#""__typename" must be an existing string."#,
+            Some(ctx.item.pos),
+        ));
+    }
+    Ok(None)
 }
