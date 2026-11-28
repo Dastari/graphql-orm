@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.245.0 shares forward and bidirectional transaction keyset execution.
+[Migration](../../MIGRATION.md#02450-shared-transaction-keyset-pagination).
+
 Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
 [explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
 

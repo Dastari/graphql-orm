@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.245.0
+
+- **No action** (refs #677). Generated forward and bidirectional transaction
+  keyset reads share pagination execution to reduce per-entity compile cost.
+  [Migration](MIGRATION.md#02450-shared-transaction-keyset-pagination)
+
 ## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
 
 - **No action** (refs #934). Hosts can explicitly register handwritten
