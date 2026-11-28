@@ -521,7 +521,14 @@ impl<'a> Trial<'a> {
             "maximumItems": 1,
         });
         if intent.shape == "aggregate" {
-            args["arguments"] = self.count_arguments(&description, operation).await?;
+            if let Some(example) = operation["ungroupedCount"].as_object() {
+                let mut count_args = Value::Object(example.clone());
+                count_args["loadedReference"] = args["loadedReference"].clone();
+                count_args["operation"] = args["operation"].clone();
+                args = count_args;
+            } else {
+                args["arguments"] = self.count_arguments(&description, operation).await?;
+            }
         }
         if stale_control {
             let mut stale = args.clone();
@@ -773,7 +780,7 @@ pub(super) async fn measure(entries: usize, flag: &str) -> BenchResult<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Resolver;
+    use super::super::{Resolver, production_signature};
     use super::*;
     use agql_auth::{ResolvedPrincipal, SystemClock};
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -972,6 +979,143 @@ mod tests {
             host.authorize_broker_execution(&reference, &run, &session, &execute)
                 .await?;
         }
+        Ok(())
+    }
+
+    struct CountReads(AtomicU8);
+
+    #[async_trait::async_trait]
+    impl AiCapabilityAuthorityPolicy for CountReads {
+        async fn authorize(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _index: &AiCapabilityIndex,
+            entry: &AiCapabilityIndexEntry,
+            _run: &AiCapabilityRunBinding,
+        ) -> Result<AiCapabilityAuthorityDecision, AiError> {
+            Ok(AiCapabilityAuthorityDecision {
+                allowed: entry.operation_shape != AiCapabilityOperationShape::Aggregate
+                    || self.0.load(Ordering::Relaxed) == 0,
+                policy_fingerprint: "count-reads-v1".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn count_example_is_bounded_and_requires_current_policy() -> BenchResult<()> {
+        let fixture = Fixture::compile(400).await?;
+        let policy = Arc::new(CountReads(AtomicU8::new(0)));
+        let host = AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(principal())),
+            Arc::new(CachedSet(Arc::clone(&fixture.indexes))),
+            policy.clone(),
+            Arc::new(SystemClock),
+            Duration::minutes(5),
+        )?;
+        let mut trial = Trial::new(&fixture, &host, DiscoveryMode::Inline)?;
+        let query = scoped_query();
+        let result = trial.discover(query.clone()).await?;
+        let candidate = &result["candidates"][0];
+        assert!(
+            !candidate["inlineDescription"]
+                .to_string()
+                .contains("ungroupedCount")
+        );
+        let description = host
+            .dispatch_describe(
+                &principal().reference(),
+                &trial.run,
+                &trial.session,
+                &describe_args(candidate),
+            )
+            .await?;
+        let limits = AiCapabilityDeliveryLimits::default();
+        let rendered = production_describe(&fixture.catalog, description.clone(), limits)?;
+        let operation = rendered["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["shape"] == "aggregate")
+            .unwrap();
+        let mut execute = operation["ungroupedCount"].clone();
+        assert!(execute.is_object());
+        execute["operation"] = operation["operation"].clone();
+        execute["loadedReference"] = rendered["loadedReference"].clone();
+        let expected = serde_json::from_str::<Vec<Question>>(CASES)?;
+        assert_eq!(
+            trial.execute(&execute).await?.result,
+            expected[2].expected[0].result
+        );
+        assert_eq!(trial.session.amplification().describe_type_calls, 0);
+
+        let summaries = description
+            .operations()
+            .iter()
+            .map(|operation| {
+                production_signature(&fixture.catalog, operation)
+                    .map(|signature| signature.summary())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let plain =
+            description.with_operation_signatures(summaries, limits.maximum_describe_bytes)?;
+        let plain_bytes = serde_json::to_vec(plain.contract())?.len();
+        for (describe_bytes, model_bytes) in [
+            (plain_bytes as u32, 64 * 1024),
+            (limits.maximum_describe_bytes, plain_bytes),
+        ] {
+            let mut bounded = plain.clone();
+            assert!(!bounded.add_ungrouped_count_example(
+                &fixture.catalog,
+                describe_bytes,
+                model_bytes
+            ));
+            assert_eq!(bounded.contract(), plain.contract());
+        }
+        let mut missing_catalog = plain.clone();
+        assert!(!missing_catalog.add_ungrouped_count_example(
+            &AiToolCatalog::new(),
+            limits.maximum_describe_bytes,
+            64 * 1024,
+        ));
+        assert_eq!(missing_catalog.contract(), plain.contract());
+
+        let plain_aggregate = plain.contract()["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["shape"] == "aggregate")
+            .unwrap();
+        let mut fallback = execute.clone();
+        fallback["arguments"] = trial
+            .count_arguments(plain.contract(), plain_aggregate)
+            .await?;
+        assert_eq!(
+            trial.execute(&fallback).await?.result,
+            expected[2].expected[0].result
+        );
+        assert_eq!(trial.session.amplification().describe_type_calls, 2);
+
+        policy.0.store(1, Ordering::Relaxed);
+        let error = trial
+            .execute(&execute)
+            .await
+            .err()
+            .ok_or("revoked COUNT executed")?;
+        assert!(matches!(
+            error.downcast_ref::<AiError>(),
+            Some(AiError::Forbidden)
+        ));
+        let result = trial.discover(query).await?;
+        let restricted = trial.describe(&result["candidates"][0]).await?;
+        assert!(
+            restricted["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|operation| {
+                    operation["shape"] != "aggregate" && operation.get("ungroupedCount").is_none()
+                })
+        );
         Ok(())
     }
 

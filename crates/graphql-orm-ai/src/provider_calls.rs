@@ -6489,6 +6489,9 @@ mod tests {
         }
     }
 
+    #[path = "broker_count_description_tests.rs"]
+    mod broker_count_description_tests;
+
     #[path = "pre_execution_rejection_tests.rs"]
     mod pre_execution_rejection_tests;
 
@@ -7573,6 +7576,27 @@ mod tests {
         automatic_static: bool,
         start: bool,
     ) -> Fixture {
+        fixture_with_tools_and_egress(
+            mock,
+            access_policy,
+            generated_mutation_policy,
+            provider,
+            automatic_static,
+            start,
+            None,
+        )
+        .await
+    }
+
+    async fn fixture_with_tools_and_egress(
+        mock: MockProvider,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        generated_mutation_policy: Option<AiMutationExecutionPolicy>,
+        provider: Option<Arc<dyn crate::AiProvider>>,
+        automatic_static: bool,
+        start: bool,
+        custom_tools_and_egress: Option<(AiToolCatalog, Arc<dyn AiEgressPolicy>)>,
+    ) -> Fixture {
         let include_static_tools = generated_mutation_policy.is_none() || automatic_static;
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
@@ -7988,6 +8012,8 @@ mod tests {
             provider: std::sync::Mutex::new(provider.clone()),
             expire_during_admission: std::sync::Mutex::new(None),
         });
+        let (tool_catalog, egress_policy) =
+            custom_tools_and_egress.unwrap_or_else(|| (tool_catalog, Arc::new(AllowEgress)));
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(CountingResolver {
                 principal: principal.clone(),
@@ -8002,7 +8028,7 @@ mod tests {
                 completed: completed_executions.clone(),
             }))
             .graphql_targets(targets)
-            .egress_policy(Arc::new(AllowEgress))
+            .egress_policy(egress_policy)
             .deployment_egress(AiDeploymentEgressBoundary {
                 allowed_destination_trust: [
                     AiDestinationTrust::Local,

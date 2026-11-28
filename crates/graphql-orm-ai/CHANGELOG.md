@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.176.0 (breaking release)
+## Unreleased - 0.177.0 (breaking release)
+
+- Ordinary fixed-broker descriptions can include a bounded, compiler-checked
+  `ungroupedCount` example for one admitted generated aggregate (#551).
 
 - Fixed-broker hosts can opt in to an inline description for one explicitly
   scoped entity with a simple list or keyset ID read. It uses the ordinary

@@ -12,6 +12,15 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Ungrouped count examples in capability descriptions (#551)
+
+**No action.** An ordinary describe result can include `ungroupedCount`
+on its single admitted generated aggregate. Copy its execute arguments,
+selections and row bound and add the description's `loadedReference`
+and the operation's `operation` name. Existing signature and type-page
+planning remains available. No data migration or provider session rebind
+is needed.
+
 ### Scoped discovery descriptions (#551)
 
 **No action.** To enable the additive discovery result, set

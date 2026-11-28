@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI 0.177.0 (#551). Ordinary describe can include a bounded ungrouped count example for one admitted generated aggregate. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#ungrouped-count-examples-in-capability-descriptions-551)
+
 - **No action** — AI tool profiles 0.38.0 (#551). Plan compilation reuses the validated semantic catalogue. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0380-capability-plan-compilation)
 
 - **No action** — AI 0.176.0 (#551). Fixed-broker hosts can opt in to bounded descriptions for scoped ID reads. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#scoped-discovery-descriptions-551)
