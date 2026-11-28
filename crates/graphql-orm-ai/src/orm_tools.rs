@@ -1918,13 +1918,21 @@ impl OrmAiApplicationToolCallService {
                     }
                     summaries.push(summary);
                 }
-                let description =
+                let mut description =
                     description.with_operation_signatures(summaries, maximum_bytes)?;
-                BrokerCallOutput::metadata(
-                    description.into_model_result(),
-                    broker_disclosure_fingerprint(operation),
-                )
-                .map_err(Into::into)
+                let fingerprint = if description.add_ungrouped_count_example(
+                    self.runtime.tool_catalog(),
+                    maximum_bytes,
+                    self.limits.maximum_model_output_bytes,
+                ) {
+                    hex::encode(Sha256::digest(
+                        b"graphql-orm-ai/capability-broker-describe-count/v1",
+                    ))
+                } else {
+                    broker_disclosure_fingerprint(operation)
+                };
+                BrokerCallOutput::metadata(description.into_model_result(), fingerprint)
+                    .map_err(Into::into)
             }
             crate::AiCapabilityBrokerOperation::DescribeType => {
                 let request = broker

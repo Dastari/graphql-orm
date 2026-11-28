@@ -514,7 +514,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   collision-free multi-target index set, bounded shape-aware discovery,
   coordinator-selected eager/client-deferred/provider-deferred/fixed-broker
   delivery, and short-lived current-authority loaded bindings. The fixed
-  broker supports ungrouped counts on generated aggregate roots. See
+  broker can describe a compiler-checked ungrouped count example for a
+  single admitted generated aggregate. See
   [capability discovery and execution](docs/capability-discovery-and-execution.md).
 - One bounded owner-authorized conversation bootstrap combines the newest
   messages, durable watermark, active/recent runs, tool calls, provider

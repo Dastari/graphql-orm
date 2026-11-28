@@ -874,12 +874,19 @@ for broker calls.
 operations: a count question's top candidate offers the `aggregate`
 operation, and its result is the aggregate, not the rows.
 
-For an ungrouped count on that operation, send the `COUNT` metrics as
-dotted paths such as `metrics.0.operator`, omit grouping and selections,
-and set the required `maximumItems`. Use the exact metric names in the
-operation's signature. `AiToolCatalog::compile_query_capability` supplies
-the empty grouping list using the target's argument name and passes the
-fixed-result plan to the same closed-plan compiler.
+Ordinary `describe` may attach an `ungroupedCount` example to the single
+admitted generated aggregate. Copy the example's `arguments`, `selections`
+and `maximumItems` into `execute` alongside the enclosing `loadedReference`
+and the operation's `operation` name. The broker derives the example from
+the registered schema and checks it with the same compiler that supplies the
+empty grouping list for execution. The description must fit the describe
+and model-output byte limits and pass the usual tool-result egress policy.
+Execute checks current authority again.
+
+When the example is absent, use the signature and `describe_type` pages
+to find the exact metric path and the `COUNT` operator. Send them as a
+dotted argument, omit grouping, use empty selections and set
+`maximumItems`.
 
 ### Generated mutations through the fixed broker
 

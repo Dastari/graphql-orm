@@ -890,6 +890,18 @@ impl OpenAiProvider {
         )
     }
 
+    #[cfg(all(test, feature = "provider-openai-core", feature = "sqlite"))]
+    pub(crate) fn serialize_fixture_request(request: &ModelRequest) -> Value {
+        let config = OpenAiProviderConfig {
+            store_responses: true,
+            ..OpenAiProviderConfig::new(SecretRef::parse("openai/wire-fixture").unwrap())
+        };
+        let provider = Self::new(config, Arc::new(crate::EnvironmentSecretStore::new())).unwrap();
+        provider
+            .request_body(request, &tests::context(&request.model, 16_384))
+            .unwrap()
+    }
+
     fn dispatch_body(
         &self,
         request: &ModelRequest,
@@ -2914,7 +2926,7 @@ mod tests {
             .expect("retrieval context should validate")
     }
 
-    fn context(model: &str, estimated_bytes: u64) -> ProviderRequestContext {
+    pub(super) fn context(model: &str, estimated_bytes: u64) -> ProviderRequestContext {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();
         let attempt_id = uuid::Uuid::new_v4();

@@ -3743,6 +3743,57 @@ impl AiCapabilityDescription {
         (description.contract["signaturesAvailable"] != false).then_some(description)
     }
 
+    /// Adds a compiler-checked example to ordinary describe for the single
+    /// admitted generated aggregate, when it fits both metadata budgets.
+    ///
+    /// The caller must apply normal tool-result egress checks. The example
+    /// grants no authority and execute must reauthorize its loaded operation.
+    /// Returns whether it added the example.
+    #[doc(hidden)]
+    pub fn add_ungrouped_count_example(
+        &mut self,
+        catalog: &AiToolCatalog,
+        maximum_describe_bytes: u32,
+        maximum_model_output_bytes: usize,
+    ) -> bool {
+        let Some(metadata) = self.contract["operations"].as_array() else {
+            return false;
+        };
+        let mut aggregates = metadata
+            .iter()
+            .enumerate()
+            .filter(|(_, summary)| summary["shape"] == "aggregate");
+        let Some((position, summary)) = aggregates.next() else {
+            return false;
+        };
+        if aggregates.next().is_some()
+            || !summary["signature"].is_string()
+            || summary.get("ungroupedCount").is_some()
+        {
+            return false;
+        }
+        let Some(example) = self
+            .operations
+            .get(position)
+            .filter(|operation| summary["operation"] == operation.operation_name())
+            .and_then(|operation| ungrouped_count_example(operation, catalog))
+        else {
+            return false;
+        };
+
+        self.contract["operations"][position]["ungroupedCount"] = example;
+        let maximum_bytes = (maximum_describe_bytes as usize).min(maximum_model_output_bytes);
+        if serde_json::to_vec(&self.contract).is_ok_and(|encoded| encoded.len() <= maximum_bytes) {
+            return true;
+        }
+        // Preserve the ordinary signatures and type pages on a budget miss.
+        self.contract["operations"][position]
+            .as_object_mut()
+            .expect("the aggregate summary was just enriched")
+            .remove("ungroupedCount");
+        false
+    }
+
     /// Consumes the description and returns the one bounded model result.
     pub fn into_model_result(self) -> serde_json::Value {
         self.contract
@@ -4092,6 +4143,70 @@ fn inline_id_read_summary(capability: &AiGraphqlQueryCapability) -> Option<serde
     }
     summary["idRead"] = recipe;
     Some(summary)
+}
+
+// Resolve the exact public spelling in the registered, export-filtered
+// schema. The same dotted path parser and compiler are used by execute.
+fn ungrouped_count_example(
+    operation: &AiCapabilityDescribedOperation,
+    catalog: &AiToolCatalog,
+) -> Option<serde_json::Value> {
+    use serde_json::Value;
+
+    fn member<'a>(properties: &'a Value, key: &str) -> Option<(&'a str, &'a Value)> {
+        let mut matches = properties
+            .as_object()?
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(key));
+        let (name, schema) = matches.next()?;
+        matches.next().is_none().then_some((name.as_str(), schema))
+    }
+
+    if operation.capability_kind() != AiCapabilityKind::GeneratedQuery {
+        return None;
+    }
+    let capability = catalog
+        .exact_query_capability(
+            operation.capability_id(),
+            operation.capability_fingerprint(),
+        )
+        .ok()?;
+    if !capability.is_aggregate() {
+        return None;
+    }
+
+    let (metrics_name, metrics) = member(
+        capability
+            .compact_argument_schema()
+            .pointer("/properties/arguments/properties")?,
+        "metrics",
+    )?;
+    let (operator_name, operator) = member(metrics.pointer("/items/properties")?, "operator")?;
+    let count = operator["enum"]
+        .as_array()?
+        .iter()
+        .find(|value| **value == "COUNT")?;
+    let path = format!("{metrics_name}.0.{operator_name}");
+    let mut arguments = json!({});
+    insert_broker_argument(&mut arguments, &path, count.clone(), &mut BTreeSet::new()).ok()?;
+    catalog
+        .compile_query_capability(
+            capability.id(),
+            capability.fingerprint(),
+            json!({
+                "arguments": arguments,
+                "selections": [],
+                "maximumItems": 1,
+                "relationshipArguments": {},
+                "relationshipMaximumItems": {},
+            }),
+        )
+        .ok()?;
+    Some(json!({
+        "arguments": [{"name": path, "value": count}],
+        "selections": [],
+        "maximumItems": 1,
+    }))
 }
 
 /// Authorized `describe_type` request: one named type of one loaded

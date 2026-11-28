@@ -1081,9 +1081,10 @@ fn production_describe(
             Ok(summary)
         })
         .collect::<Result<Vec<_>, AiError>>()?;
-    Ok(description
-        .with_operation_signatures(summaries, limits.maximum_describe_bytes)?
-        .into_model_result())
+    let mut description =
+        description.with_operation_signatures(summaries, limits.maximum_describe_bytes)?;
+    description.add_ungrouped_count_example(catalog, limits.maximum_describe_bytes, 64 * 1024);
+    Ok(description.into_model_result())
 }
 
 /// The coordinator's `describe_type` page, refused above the describe byte
