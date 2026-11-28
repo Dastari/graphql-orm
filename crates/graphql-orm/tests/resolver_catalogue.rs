@@ -15,9 +15,10 @@
 
 use graphql_orm::async_graphql::SDLExportOptions;
 use graphql_orm::graphql::orm::{
-    GRAPHQL_RESOLVER_CATALOG_VERSION, GeneratedResolverFacts, GraphqlOperationKind,
-    GraphqlResolverAuthorization, GraphqlResolverCatalog, GraphqlSemanticRelationshipCardinality,
-    ResolverEntitySource, compose_resolver_catalog,
+    GRAPHQL_RESOLVER_CATALOG_VERSION, GeneratedResolverFacts,
+    GraphqlHandwrittenResolverRegistration, GraphqlOperationKind, GraphqlResolverAuthorization,
+    GraphqlResolverCatalog, GraphqlResolverCatalogBindingV1,
+    GraphqlSemanticRelationshipCardinality, ResolverEntitySource, compose_resolver_catalog,
 };
 use graphql_orm::prelude::*;
 
@@ -26,7 +27,8 @@ mod graphql_case;
 use graphql_case::{field_name, resolver_name};
 
 mod catalogued {
-    use graphql_orm::async_graphql::{ComplexObject, SimpleObject};
+    use graphql_orm::GraphQLSemanticObject;
+    use graphql_orm::async_graphql::{ComplexObject, Object, SimpleObject};
     use graphql_orm::prelude::*;
 
     /// Two keys and a global identity; fixed scopes on both traversal shapes.
@@ -267,6 +269,14 @@ mod catalogued {
         #[graphql(skip)]
         #[relation(target = "CatLedger", from = "ledger_id", to = "id", emit_fk = false)]
         pub ledger: Option<CatLedger>,
+        pub owner_id: String,
+        #[graphql(skip)]
+        #[relation(target = "CatOwner", from = "owner_id", to = "id", emit_fk = false)]
+        pub owner: Option<CatOwner>,
+        pub sealed_id: String,
+        #[graphql(skip)]
+        #[relation(target = "CatSealed", from = "sealed_id", to = "id", emit_fk = false)]
+        pub sealed: Option<CatSealed>,
     }
 
     #[cfg_attr(
@@ -278,6 +288,14 @@ mod catalogued {
         /// Shares the declared relation's name, not its type.
         async fn ledger(&self) -> String {
             self.ledger_id.clone()
+        }
+
+        async fn owner(&self) -> Option<CatOwner> {
+            self.owner.clone()
+        }
+
+        async fn sealed(&self) -> Option<CatSealed> {
+            self.sealed.clone()
         }
     }
 
@@ -361,12 +379,52 @@ mod catalogued {
     #[graphql_complex_object]
     impl CatDerived {}
 
+    #[derive(SimpleObject, GraphQLSemanticObject)]
+    pub struct Badge {
+        pub label: String,
+    }
+
+    #[derive(SimpleObject)]
+    pub struct ShadowBadge {
+        pub badge: Badge,
+    }
+
+    #[derive(SimpleObject, GraphQLSemanticObject)]
+    #[graphql(name = "ShadowBadge")]
+    pub struct ShadowBadgeDeclaration {
+        pub badge: Badge,
+    }
+
+    #[derive(SimpleObject, GraphQLSemanticObject)]
+    pub struct UnservedBadge {
+        pub badge: Badge,
+    }
+
+    #[derive(SimpleObject, GraphQLSemanticObject)]
+    pub struct BadgeGroup {
+        pub badge: Option<Badge>,
+        pub shadow: Option<ShadowBadge>,
+    }
+
+    #[derive(Default)]
+    pub struct BadgeQuery;
+
+    #[graphql_orm::graphql_orm_root_fields]
+    #[Object]
+    impl BadgeQuery {
+        async fn badge_group(&self) -> Option<BadgeGroup> {
+            None
+        }
+    }
+
     schema_roots! {
         backend: "sqlite",
         query_custom_ops: [],
         entities: [
             CatOwner, CatLedger, CatSealed, CatListed, CatNote, CatStub, CatLoose, CatDerived,
         ],
+        extra_query_types: [BadgeQuery],
+        semantic_types: [Badge, BadgeGroup, ShadowBadgeDeclaration, UnservedBadge],
     }
 }
 
@@ -1120,6 +1178,104 @@ async fn the_export_names_only_what_the_schema_and_semantic_catalogue_publish() 
             .authorization()
     );
     assert!(scopes.contains("cat.ledgers.list"));
+}
+
+#[test]
+fn schema_root_registers_only_explicit_handwritten_relationships() {
+    let cached = resolvers();
+    let cached_export = cached.export_json().unwrap();
+    let owner = field_name("owner");
+    assert!(cached.relation("CatStub", owner).is_none());
+
+    let register = |field, target| {
+        GraphqlHandwrittenResolverRegistration::new(
+            "CatStub",
+            field,
+            target,
+            GraphqlResolverAuthorization::SubgraphOnly,
+        )
+    };
+    let compose = catalogued::graphql_orm_resolver_catalog_with_registrations;
+    let registered = compose([register(owner, "CatOwner")]).unwrap();
+    let relation = registered.relation("CatStub", owner).unwrap();
+    assert_eq!(relation.target, "PublicOwner");
+    assert_eq!(relation.semantic_target.as_deref(), Some("CatOwner"));
+    assert_eq!(
+        relation.authorization,
+        GraphqlResolverAuthorization::SubgraphOnly
+    );
+    assert!(
+        registered
+            .relation("CatStub", field_name("ledger"))
+            .is_none()
+    );
+    assert_eq!(registered.relations.len(), cached.relations.len() + 1);
+    assert_eq!(registered.entities, cached.entities);
+
+    let export = registered.export_json().unwrap();
+    let binding = GraphqlResolverCatalogBindingV1::new(&registered.fingerprint).unwrap();
+    let semantic = catalogued::graphql_orm_semantic_catalog();
+    assert_eq!(
+        binding.decode_export_json(&export, semantic).unwrap(),
+        registered
+    );
+    assert_eq!(
+        catalogued::graphql_orm_resolver_catalog_with_registrations([])
+            .unwrap()
+            .export_json()
+            .unwrap(),
+        cached_export,
+    );
+    assert!(compose([register(field_name("ledger"), "CatLedger")]).is_err());
+    assert!(
+        registered
+            .relation("CatStub", field_name("sealed"))
+            .is_none()
+    );
+    let register_as_root = |field, target, root| {
+        GraphqlHandwrittenResolverRegistration::new(
+            "CatStub",
+            field,
+            target,
+            GraphqlResolverAuthorization::SameAsRoot {
+                kind: GraphqlOperationKind::Query,
+                field_name: resolver_name(root).into(),
+            },
+        )
+    };
+    assert!(compose([register_as_root(owner, "CatOwner", "catOwner")]).is_ok());
+    assert!(
+        compose([register_as_root(
+            field_name("sealed"),
+            "CatSealed",
+            "catSealed"
+        )])
+        .is_err()
+    );
+    assert!(compose([register(field_name("sealed"), "CatSealed")]).is_ok());
+    assert_eq!(resolvers().export_json().unwrap(), cached_export);
+}
+
+#[test]
+fn schema_root_requires_the_declared_rust_type_for_handwritten_relationships() {
+    let compose = catalogued::graphql_orm_resolver_catalog_with_registrations;
+    let register = |owner, field, target| {
+        GraphqlHandwrittenResolverRegistration::new(
+            owner,
+            field,
+            target,
+            GraphqlResolverAuthorization::SubgraphOnly,
+        )
+    };
+    assert!(resolvers().relation("BadgeGroup", "badge").is_none());
+    let registered = compose([register("BadgeGroup", "badge", "Badge")]).unwrap();
+    assert_eq!(
+        registered.relation("BadgeGroup", "badge").unwrap().target,
+        "Badge"
+    );
+    assert!(compose([register("ShadowBadge", "badge", "Badge")]).is_err());
+    assert!(compose([register("BadgeGroup", "shadow", "ShadowBadge")]).is_err());
+    assert!(compose([register("UnservedBadge", "badge", "Badge")]).is_err());
 }
 
 #[test]

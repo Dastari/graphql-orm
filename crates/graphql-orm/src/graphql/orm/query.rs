@@ -4725,6 +4725,31 @@ pub fn render_upsert_sql_with_managed_version(
     update_updated_at: bool,
     managed_version: Option<&str>,
 ) -> String {
+    render_upsert_sql_with_clock(
+        dialect,
+        table,
+        insert_columns,
+        insert_values,
+        conflict_columns,
+        update_columns,
+        update_updated_at.then(|| dialect.current_epoch_expr()),
+        managed_version,
+    )
+}
+
+/// Render a generated upsert with the entity's automatic update clock.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn render_upsert_sql_with_clock(
+    dialect: DatabaseBackend,
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    updated_at_expr: Option<&str>,
+    managed_version: Option<&str>,
+) -> String {
     let quoted_table = dialect.render_table_identifier_path(table);
     let quoted_insert_columns = insert_columns
         .iter()
@@ -4742,11 +4767,11 @@ pub fn render_upsert_sql_with_managed_version(
                 format!("target.{quoted} = source.{quoted}",)
             })
             .collect::<Vec<_>>();
-        if update_updated_at {
+        if let Some(clock) = updated_at_expr {
             assignments.push(format!(
                 "target.{} = {}",
                 dialect.quote_identifier("updated_at"),
-                dialect.current_epoch_expr()
+                clock
             ));
         }
         let mut predicates = conflict_columns
@@ -4823,11 +4848,11 @@ pub fn render_upsert_sql_with_managed_version(
             format!("{quoted} = EXCLUDED.{quoted}")
         })
         .collect::<Vec<_>>();
-    if update_updated_at {
+    if let Some(clock) = updated_at_expr {
         set_clauses.push(format!(
             "{} = {}",
             dialect.quote_identifier("updated_at"),
-            dialect.current_epoch_expr()
+            clock
         ));
     }
     let mut version_guard = String::new();

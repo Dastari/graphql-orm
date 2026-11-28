@@ -19,7 +19,6 @@ pub(in crate::operations) struct ResolverInput<'a> {
     pub(in crate::operations) upsert_key_columns: &'a [String],
     pub(in crate::operations) create_client_supplied: &'a TokenStream,
     pub(in crate::operations) unsigned_checks: &'a TokenStream,
-    pub(in crate::operations) upsert_policy_checks_graphql: &'a [TokenStream],
     pub(in crate::operations) created_pk_init: &'a TokenStream,
     pub(in crate::operations) pk_id_for_entity: &'a TokenStream,
     pub(in crate::operations) created_pk_id_string: &'a TokenStream,
@@ -76,7 +75,6 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
         upsert_key_columns,
         create_client_supplied,
         unsigned_checks,
-        upsert_policy_checks_graphql,
         created_pk_init,
         pk_id_for_entity,
         created_pk_id_string,
@@ -235,13 +233,14 @@ pub(in crate::operations) fn resolver(input: ResolverInput<'_>) -> (TokenStream,
                 #principal_key_preimage_check
                 // The row write decision on the row the key found, if any.
                 __gom_write.__admit_upsert_target::<#struct_name>(ctx).await?;
-                // The conflict key is fixed after the lookup. On the insert
-                // branch a denied conflict-column write fails field admission.
-                // Update candidates whose write the policy denied and the host
-                // chose to ignore: they stay out of the conflict update.
-                #[allow(unused_mut)]
-                let mut __gom_denied_upsert_columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
-                #(#upsert_policy_checks_graphql)*
+                let __gom_denied_upsert_columns =
+                    ::graphql_orm::graphql::orm::__apply_generated_create_fields(
+                        db, ctx, #entity_name_lit, &mut input, &__gom_client_supplied,
+                        #struct_name::__GOM_CREATE_FIELDS,
+                        ::graphql_orm::graphql::orm::GeneratedCreateFieldMode::Upsert {
+                            current: current_entity.as_ref().map(|row| row as _),
+                        },
+                    ).await?;
 
                 #created_pk_init
                 let action = if current_entity.is_some() {

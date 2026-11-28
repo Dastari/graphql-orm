@@ -10,6 +10,25 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+[explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
+Version 0.242.0 reduces the code compiled for ordinary generated entity
+objects by emitting field dispatch over shared runtime helpers.
+[Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).
+
+Version 0.241.0 adds `#[graphql_orm(time_offset_datetime)]` for persisted
+`time::OffsetDateTime` and `Option<time::OffsetDateTime>` fields when the ORM
+`time` feature is enabled. See the
+[host timestamp example](../graphql-orm/README.md#host-timestamps-with-time).
+
+Version 0.240.0 emits one set of field descriptors for generated GraphQL
+upsert and create on upsert-enabled entities.
+[Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).
+
+Version 0.238.0 aligns with the ORM's
+[nested closure target update](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.237.0 generates each entity's write configuration, which the ORM's
 write pipeline reads to admit a generated write and to
 [bind its authority](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority).
@@ -20,7 +39,7 @@ See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-p
 
 Generated relation search documents reject statically unreadable target
 fields unless the target field explicitly opts in.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02440).
 
 In the next breaking ORM/macros release, `db_column` must designate one
 physical column. A literal dot requires one delimited identifier, such as
@@ -1054,6 +1073,10 @@ struct Note {
     body: String,
 }
 ```
+
+`GraphQLOperations` uses the `plural` override in bulk mutation result
+type names such as `DeleteNotesResult`. If the override prevents
+forming a Rust identifier, the derive points to the string literal.
 
 The generated surface depends on the selected backend and schema policy.
 MSSQL and `external_read_only` schemas retain reads but omit generated

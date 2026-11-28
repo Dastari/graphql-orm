@@ -202,6 +202,7 @@ mod policy_object;
 mod relations;
 mod relationship_contract;
 mod repository;
+mod scalar_object;
 mod schema_export;
 mod schema_roots;
 mod semantic_object;

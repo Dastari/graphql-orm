@@ -34,7 +34,12 @@ struct ImplicitClock {
 }
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "text_update_clocks", plural = "TextUpdateClocks")]
+#[graphql_entity(
+    table = "text_update_clocks",
+    plural = "TextUpdateClocks",
+    schema_policy = "external_writable",
+    upsert = "id"
+)]
 struct TextUpdateClock {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -42,6 +47,179 @@ struct TextUpdateClock {
     id: String,
     label: String,
     updated_at: String,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "aliased_update_clocks",
+    plural = "AliasedUpdateClocks",
+    schema_policy = "external_writable",
+    upsert = "id"
+)]
+struct AliasedUpdateClock {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[sortable]
+    id: String,
+    label: String,
+    #[graphql_orm(db_column = "updated_at", write = false)]
+    modified_at: Option<String>,
+}
+
+#[cfg(feature = "mssql")]
+schema_roots! {
+    backend: "mssql", schema_policy: "external_writable",
+    query_custom_ops: [], entities: [TextUpdateClock, AliasedUpdateClock],
+}
+#[cfg(feature = "postgres")]
+schema_roots! {
+    backend: "postgres", query_custom_ops: [], entities: [TextUpdateClock, AliasedUpdateClock],
+}
+#[cfg(feature = "sqlite")]
+schema_roots! {
+    backend: "sqlite", query_custom_ops: [], entities: [TextUpdateClock, AliasedUpdateClock],
+}
+
+#[cfg(feature = "sqlite")]
+type Backend = SqliteBackend;
+#[cfg(feature = "postgres")]
+type Backend = PostgresBackend;
+#[cfg(feature = "mssql")]
+type Backend = MssqlBackend;
+
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "included in the owned backend runner"
+)]
+async fn legacy_upsert_repository_uses_epoch_seconds() -> Result<(), Box<dyn std::error::Error>> {
+    exercise_legacy_upsert(false).await
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "included in the owned backend runner"
+)]
+async fn legacy_upsert_graphql_uses_epoch_seconds() -> Result<(), Box<dyn std::error::Error>> {
+    exercise_legacy_upsert(true).await
+}
+
+async fn exercise_legacy_upsert(graphql: bool) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    #[cfg(feature = "postgres")]
+    let pool = owned_postgres::OwnedPostgres::pool("legacy-upsert-clock", 1).await?;
+    #[cfg(feature = "mssql")]
+    let mut server = owned_mssql::OwnedSqlServer::start().await?;
+    #[cfg(feature = "mssql")]
+    let pool =
+        graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(&server.connection_string)
+            .await?;
+
+    for statement in [
+        "CREATE TABLE text_update_clocks (id VARCHAR(32) PRIMARY KEY, label VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NOT NULL DEFAULT 'seed')",
+        "CREATE TABLE aliased_update_clocks (id VARCHAR(32) PRIMARY KEY, label VARCHAR(32) NOT NULL, updated_at VARCHAR(32) NULL)",
+    ] {
+        #[cfg(feature = "mssql")]
+        owned_mssql::execute_batch(&server.connection_string, statement).await?;
+        #[cfg(not(feature = "mssql"))]
+        <Backend as WriteBackend>::execute_with_binds(&pool, statement, &[]).await?;
+    }
+    for statement in [
+        "INSERT INTO text_update_clocks (id, label) VALUES ('one', 'before')",
+        "INSERT INTO aliased_update_clocks (id, label) VALUES ('one', 'before')",
+    ] {
+        <Backend as WriteBackend>::execute_with_binds(&pool, statement, &[]).await?;
+    }
+
+    let db = Database::<Backend>::builder(pool.clone())
+        .schema_policy(SchemaPolicy::ExternalWritable)
+        .build();
+    let before = chrono::Utc::now().timestamp();
+    let (text, optional_text) = if graphql {
+        let schema = schema_builder(db.clone()).finish();
+        let response = schema
+            .execute(
+                graphql_orm::async_graphql::Request::new(
+                    r#"mutation {
+                        upsertTextUpdateClock(input: { id: "one", label: "after" }) {
+                            success action error textUpdateClock { label updatedAt }
+                        }
+                        upsertAliasedUpdateClock(input: { id: "one", label: "after" }) {
+                            success action error aliasedUpdateClock { label modifiedAt }
+                        }
+                    }"#,
+                )
+                .data(AuthSubject::new("legacy-upsert-clock")),
+            )
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        let text = &data["upsertTextUpdateClock"];
+        let optional_text = &data["upsertAliasedUpdateClock"];
+        for (result, entity) in [
+            (text, "textUpdateClock"),
+            (optional_text, "aliasedUpdateClock"),
+        ] {
+            assert_eq!(result["success"], true, "{result}");
+            assert_eq!(result["action"], "UPDATED", "{result}");
+            assert_eq!(result[entity]["label"], "after", "{result}");
+        }
+        (
+            text["textUpdateClock"]["updatedAt"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            optional_text["aliasedUpdateClock"]["modifiedAt"]
+                .as_str()
+                .map(str::to_owned),
+        )
+    } else {
+        let text = TextUpdateClock::upsert(
+            &db,
+            CreateTextUpdateClockInput {
+                id: "one".into(),
+                label: "after".into(),
+            },
+        )
+        .await?;
+        let optional_text = AliasedUpdateClock::upsert(
+            &db,
+            CreateAliasedUpdateClockInput {
+                id: "one".into(),
+                label: "after".into(),
+            },
+        )
+        .await?;
+        assert_eq!(text.action, ChangeAction::Updated);
+        assert_eq!(optional_text.action, ChangeAction::Updated);
+        assert_eq!(text.entity.label, "after");
+        assert_eq!(optional_text.entity.label, "after");
+        (text.entity.updated_at, optional_text.entity.modified_at)
+    };
+    let after = chrono::Utc::now().timestamp();
+    for stamp in [
+        text.as_str(),
+        optional_text.as_deref().expect("aliased clock"),
+    ] {
+        let epoch = stamp
+            .parse::<i64>()
+            .unwrap_or_else(|_| panic!("expected epoch seconds, got {stamp:?}"));
+        // PostgreSQL rounds the extracted epoch when casting it to bigint.
+        assert!(
+            (before..=after + 1).contains(&epoch),
+            "{epoch} outside write window"
+        );
+    }
+
+    #[cfg(feature = "mssql")]
+    {
+        drop(db);
+        drop(pool);
+        server.cleanup()?;
+    }
+    Ok(())
 }
 
 fn defaults() -> (&'static str, &'static str) {

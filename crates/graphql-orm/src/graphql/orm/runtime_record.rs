@@ -1506,8 +1506,7 @@ fn decode_postgres_timestamp(micros: i64) -> Option<temporal::Timestamp> {
     if matches!(micros, i64::MAX | i64::MIN) {
         return None; // PostgreSQL's infinities
     }
-    if let Some(value) =
-        time::macros::datetime!(2000-01-01 0:00).checked_add(time::Duration::microseconds(micros))
+    if let Some(value) = temporal::postgres_to_primitive_datetime(micros)
         && temporal::is_default_time_year(value.year())
     {
         return Some(temporal::Timestamp::from_utc(value));

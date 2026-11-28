@@ -10,9 +10,9 @@ supersedes: []
 
 # Migration Guide
 
-## Breaking release (unreleased, ORM/macros 0.238.0)
+## Breaking release (unreleased, ORM/macros 0.244.0)
 
-Upgrade ORM and macros together to 0.238.0.
+Upgrade ORM and macros together to 0.244.0.
 
 ### 1. Match transaction modes with a wildcard (#833)
 
@@ -206,6 +206,123 @@ that does not reach a loaded reference's family gets `selection_stale`.
 This completes the #551 broker scope. See the
 [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551).
 No schema or data migration is needed.
+
+## 0.243.0: Handwritten resolver registrations (operation catalogue 0.18.0)
+
+**No action.** Upgrade ORM and macros together. Hosts that want to export
+handwritten relationship fields can opt in with
+`graphql_orm_resolver_catalog_with_registrations`. The default export keeps
+its existing fingerprint. Review and update a receiver's pin when adding
+registrations to an export it uses.
+[Registration contract](crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field)
+
+## 0.242.0: Shared dispatch for generated entity fields
+
+**No action.** Upgrade ORM and macros together. Ordinary generated entity
+objects use shared GraphQL field dispatch with the same generated getters,
+field policies, schema and metadata.
+
+## 0.241.0: Opt-in host timestamps with `time`
+
+**No action** for existing entities. The `chrono` feature is implied by
+`postgres` and `mssql`, and the existing chrono APIs remain available.
+To opt in, enable `graphql-orm/time`, add a direct `time = "0.3"`
+dependency, and mark each persisted `OffsetDateTime` or
+`Option<OffsetDateTime>` with `#[graphql_orm(time_offset_datetime)]`.
+See the [field example](crates/graphql-orm/README.md#host-timestamps-with-time).
+
+Before opting in an existing text column, plan a schema and data migration
+to `TIMESTAMPTZ` on PostgreSQL or `DATETIMEOFFSET` on SQL Server. On
+PostgreSQL, normalize existing values to valid timestamps with explicit
+offsets, then run an explicit conversion:
+
+```sql
+ALTER TABLE reservations
+    ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::timestamptz;
+```
+
+If the text column has a default, drop it before the type change and
+recreate it with a timestamp expression if needed. Generated PostgreSQL
+date comparisons and both `between` bounds cast their parameters to
+`TIMESTAMPTZ`. PostgreSQL interprets date-only operands and timestamps
+without an explicit offset in the session time zone. For a range with a
+session-local bound, PostgreSQL resolves both endpoints before comparing them.
+A reversed range with a session-local bound matches no rows.
+
+PostgreSQL returns timestamps in UTC at microsecond precision and
+rejects both infinities on read. Simple-query decoding normalizes the session's
+rendered offset to UTC using PostgreSQL's ISO date style, the SQLx default.
+SQL Server retains the stored offset at 100 ns precision and requires offsets
+in whole minutes within ±14 hours.
+SQLite stores RFC 3339 text, preserves the offset and uses text ordering,
+which can differ from instant ordering. Generated `created_at` and
+`updated_at` defaults and automatic `updated_at` assignments use the
+backend's timestamp clock for opted-in fields, including on upsert conflicts.
+
+The async-graphql `DateTime` scalar for `time` parses RFC 3339 and emits UTC
+with `Z`. Opted-in values must have years in 0001–9999 both as stored or
+supplied and after conversion to UTC. For example,
+`9999-12-31T23:59:59-01:00` falls outside the supported UTC range.
+Generated GraphQL reads return an error for out-of-range values. Review
+the UTC wire spelling if you switch a field from chrono.
+The SQL Server text-temporal option still controls text binds from
+`#[date_field]`, date filters and `SqlValue::temporal_text`. Opted-in Rust
+offset timestamp fields bind as typed values, including nulls.
+
+## 0.240.0: Shared create and upsert field policies
+
+**No action.** Upgrade ORM and macros together. The generated GraphQL
+upsert and create for an upsert-enabled entity share the field-policy walk.
+Policy callbacks still run in field declaration order with the same request,
+proposed value, and existing row when the upsert finds one.
+
+## 0.239.0: Plural-name diagnostics
+
+**No action.** Upgrade ORM and macros together. An invalid
+`#[graphql_entity(plural = "...")]` value that caused `GraphQLOperations`
+to panic while generating bulk mutation result types now produces a
+compile error at the string literal.
+
+## 0.237.0 to 0.238.0: Nested closure targets
+
+**No action.** Upgrade ORM and macros together. A read-predicate closure
+whose target holds another closure can share the target's SQL when the
+target is built from stable column tests, generated filters, relations and
+their `and`, `or` and `not` combinations. The closure computes one
+three-valued verdict per row. A relation contributes the greatest truth
+among its related rows, FALSE when there is none and UNKNOWN when a key
+column is NULL.
+
+- **Handwritten SQL.** Nested closures keep the existing TRUE and FALSE
+  evaluation sites by default, including fragments inside relations or
+  generated relation filters. A host may implement
+  `ReadVisibilityFilter::is_stable_for_closure` to enable sharing when
+  repeated evaluations for the same row and binds always give the same
+  verdict and have no side effects. On PostgreSQL, a standalone closure
+  over a native Boolean target retains one evaluation at the anchor and
+  one at the recursive step per reached row.
+- **Eligibility.** Sharing also requires a target with supported negation,
+  without the deny fallback `1 = 0`, whose row columns can be projected.
+  Generated calendar-relative date filters keep the original sites because
+  they depend on the database clock. On SQL Server, names outside ASCII or
+  names that differ only by case prevent sharing. SQL Server tests each
+  scalar condition for TRUE and FALSE when it encodes the target verdict.
+- **Limits.** `READ_PREDICATE_CLOSURE_MAX_NESTING` (2),
+  `READ_PREDICATE_MAX_RENDERED_BYTES` (1 MiB) and
+  `READ_PREDICATE_MSSQL_MAX_NESTING` (75) are unchanged: they bound execution
+  cost and a server limit, which the smaller SQL does not change. The
+  composition budgets are measured on the SQL that is rendered, so a nested
+  composition previously refused with `AUTHORIZATION_MISCONFIGURED` for its
+  size, its `CASE` nesting or its relation total can now build. A closure
+  that built before still builds: it keeps the original rendering when the
+  shared one does not fit a limit.
+
+## 0.16.0 to 0.17.0: Resolver catalogue receiver binding
+
+**No action.** Existing resolver exports and fingerprints carry through the
+upgrade. Receivers can opt in to `GraphqlResolverCatalogBindingV1` using a
+reviewed resolver catalogue fingerprint and the corresponding semantic
+catalogue. See the [receiver binding reference](crates/graphql-orm-operation-catalog/README.md#bind-a-resolver-catalogue-at-the-receiver).
 
 ## 0.236.0 to 0.237.0: Bound generated write authority
 

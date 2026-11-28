@@ -2,3 +2,4 @@
 
 mod generated_mutation_missing_database;
 mod generated_query_missing_database;
+mod scalar_object_dispatch;

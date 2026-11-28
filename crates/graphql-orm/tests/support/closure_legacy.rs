@@ -1,5 +1,6 @@
-//! A bound column test that takes the original nested closure rendering.
-//! Hand-written filters preserve their evaluation sites.
+//! A bound column test that takes the original nested closure rendering:
+//! a hand-written filter marked to keep its evaluation sites in every
+//! closure composed from it.
 use graphql_orm::prelude::*;
 use std::{any::TypeId, marker::PhantomData};
 
@@ -64,4 +65,5 @@ fn column_test<B: OrmBackend, E: Entity + 'static>(
         entity: PhantomData,
     })
     .unwrap()
+    .__gom_original_closure_rendering()
 }

@@ -368,6 +368,7 @@ dependencies = [
  "serde_urlencoded",
  "static_assertions_next",
  "thiserror 2.0.18",
+ "time",
  "uuid",
 ]
 
@@ -3117,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.238.0"
+version = "0.244.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3159,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.178.0"
+version = "0.179.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3236,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.238.0"
+version = "0.244.0"
 dependencies = [
  "Inflector",
  "convert_case 0.7.1",
@@ -3248,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.16.0"
+version = "0.18.0"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",
@@ -8938,6 +8939,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -9024,6 +9026,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -9064,6 +9067,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -9090,6 +9094,7 @@ dependencies = [
  "serde_urlencoded",
  "sqlx-core",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "url",
  "uuid",

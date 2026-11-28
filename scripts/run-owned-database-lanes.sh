@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [index-introspection|unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [index-introspection|unique-index-preflight|time-host-fields|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  index-introspection|unique-index-preflight|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all) ;;
+  index-introspection|unique-index-preflight|time-host-fields|sqlite|postgres|postgres-table-case|backup-postgres|postgres-legacy|migration-journal|mssql|mssql-typed-parameters|runtime-live|runtime-search-catalog|ai-postgres|ai-mssql|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|bounded-set-delete|changed-subscriptions|bulk-write-targets|query-loader-batch|page-limit-contract|authorized-page|callback-errors|nested-create|keyset-decimals|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -90,7 +90,13 @@ run_keyset_decimals() {
     --test keyset_decimals -- --include-ignored --test-threads=1
 }
 
+run_time_host_fields() {
+  cargo test -p graphql-orm --locked --no-default-features --features "$1,time" \
+    --test time_host_fields --test implicit_timestamp_defaults -- --include-ignored --test-threads=1
+}
+
 run_postgres() {
+  run_time_host_fields postgres
   run_nested_create postgres
   run_bounded_set_delete postgres
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
@@ -206,6 +212,7 @@ run_migration_journal() {
 }
 
 run_mssql() {
+  run_time_host_fields mssql
   run_nested_create mssql
   run_bounded_set_delete mssql
   cargo test -p graphql-orm --locked --no-default-features --features mssql \
@@ -392,6 +399,14 @@ case "${lane}" in
     for backend in sqlite postgres mssql; do
       run_bounded_set_delete "$backend"
     done
+    ;;
+  time-host-fields)
+    for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "$backend" \
+        --test implicit_timestamp_defaults -- legacy_upsert --include-ignored --test-threads=1
+      run_time_host_fields "$backend"
+    done
+    run_time_host_fields postgres,time/large-dates
     ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;

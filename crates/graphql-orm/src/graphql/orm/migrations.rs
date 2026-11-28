@@ -309,7 +309,9 @@ fn timestamp_default_for_comparison(backend: DatabaseBackend, default: &str) -> 
     }
 
     if (backend == DatabaseBackend::Postgres && value.eq_ignore_ascii_case("NOW()"))
-        || (backend == DatabaseBackend::Mssql && value.eq_ignore_ascii_case("SYSUTCDATETIME()"))
+        || (backend == DatabaseBackend::Mssql
+            && (value.eq_ignore_ascii_case("SYSUTCDATETIME()")
+                || value.eq_ignore_ascii_case("SYSDATETIMEOFFSET()")))
     {
         return value.to_ascii_uppercase();
     }

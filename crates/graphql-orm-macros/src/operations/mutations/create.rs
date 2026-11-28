@@ -24,7 +24,7 @@ pub(in crate::operations) struct CreateInput<'a> {
     pub(in crate::operations) create_client_supplied: &'a TokenStream,
     pub(in crate::operations) created_key_init: &'a TokenStream,
     pub(in crate::operations) insert_sql: &'a str,
-    pub(in crate::operations) create_policy_checks: &'a [TokenStream],
+    pub(in crate::operations) create_policy_checks: &'a TokenStream,
     pub(in crate::operations) prepend_pk_bind: &'a TokenStream,
     pub(in crate::operations) insert_binds_graphql: &'a [TokenStream],
     pub(in crate::operations) create_mutation_field_literals: &'a [syn::LitStr],
@@ -149,7 +149,7 @@ pub(in crate::operations) fn create(
 
                     // Collect all values first
                     let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> = ::std::vec::Vec::new();
-                    #(#create_policy_checks)*
+                    #create_policy_checks
                     #prepend_pk_bind
                     #(#insert_binds_graphql)*
         }

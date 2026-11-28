@@ -524,6 +524,11 @@ Client-deferred discovery is unchanged: it keeps `version: 2`,
 `indexFingerprint` and `candidateFingerprint` under its version 2 contract.
 No GraphQL SDL, AI schema-module or data migration is needed.
 
+## 0.168.0 to 0.169.0 operational telemetry
+
+**No action.** Existing telemetry imports and sinks continue to work with the
+same event schema. No schema or data migration is needed.
+
 ## 0.167.0 to 0.168.0 subscription wait allowlists
 
 **No action** for hosts that already use registered capability fingerprints
