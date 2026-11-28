@@ -14,6 +14,10 @@ The next breaking tool-profile release adds continuable keyset pages, compact mu
 and subscription signatures, and capability contract fingerprints.
 See the [migration guide](MIGRATION.md).
 
+AI tool profiles 0.39.0 speeds up broad discovery ranking and grouped-root
+metadata lookup.
+[Migration guide](MIGRATION.md#0390-discovery-ranking)
+
 AI tool profiles 0.38.0 reduces per-plan compiler work by reusing the validated
 semantic catalogue. See the [migration guide](MIGRATION.md#0380-capability-plan-compilation).
 

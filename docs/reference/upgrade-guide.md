@@ -68,6 +68,9 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI 0.178.0 (#551). Discovery allocates less while constructing ordered host-policy batches. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#internal-discovery-batching-551)
+- **No action** — AI tool profiles 0.39.0 (#551). Broad discovery uses dense score accumulation and grouped root metadata uses one lookup per entity. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0390-discovery-ranking)
+
 - **No action** — AI 0.177.0 (#551). Ordinary describe can include a bounded ungrouped count example for one admitted generated aggregate. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#ungrouped-count-examples-in-capability-descriptions-551)
 
 - **No action** — AI tool profiles 0.38.0 (#551). Plan compilation reuses the validated semantic catalogue. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0380-capability-plan-compilation)
