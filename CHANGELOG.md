@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
+
+- **No action** (refs #934). Hosts can explicitly register handwritten
+  relationship fields in resolver catalogue v1. Composition rejects invalid,
+  ambiguous, duplicate or conflicting registrations.
+  [Migration](MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
+
 ## Unreleased - ORM/macros 0.242.0
 
 - **No action** (refs #677, #358). Ordinary generated entity objects share

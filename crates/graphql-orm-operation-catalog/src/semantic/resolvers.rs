@@ -5,11 +5,9 @@
 //! resolves below an object, and a Federation entity resolver is reached
 //! through `_entities`, so neither has a root coordinate. A consumer that
 //! binds policy to root fields therefore has no view of them.
-//! [`GraphqlResolverCatalog`] lists both, for the resolvers the ORM
-//! generates. Handwritten relationship fields and handwritten entity
-//! resolvers are out of scope for version 1: nothing proves what they resolve
-//! or enforce, so a served field is listed only when its generated resolver
-//! is proven mounted.
+//! [`GraphqlResolverCatalog`] lists mounted generated resolvers and
+//! explicitly registered handwritten relationship fields. Version 1 requires
+//! each relation entry to match a semantic relationship.
 //!
 //! It is a separate, versioned and fingerprinted document, bound to one
 //! semantic catalogue by that catalogue's fingerprint. Composing it changes no
@@ -36,9 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     GraphqlEntitySemanticMetadata, GraphqlSemanticCatalog, GraphqlSemanticError,
-    GraphqlSemanticOperationSource, GraphqlSemanticRelationshipCardinality,
-    GraphqlSemanticRelationshipDescriptor, GraphqlSemanticTypeRef, MAXIMUM_ENTITIES,
-    MAXIMUM_FIELDS_PER_ENTITY, hex_sha256, valid_fingerprint, valid_graphql_name,
+    GraphqlSemanticFieldMetadata, GraphqlSemanticOperationSource,
+    GraphqlSemanticRelationshipCardinality, GraphqlSemanticRelationshipDescriptor,
+    GraphqlSemanticTypeKind, GraphqlSemanticTypeRef, MAXIMUM_ENTITIES, MAXIMUM_FIELDS_PER_ENTITY,
+    hex_sha256, valid_fingerprint, valid_graphql_name,
 };
 use crate::{GeneratedGraphqlOperationCategory, GraphqlOperationKind, rfc8785_canonical_json};
 
@@ -71,7 +70,8 @@ const MAXIMUM_ENTITY_KEYS: usize = MAXIMUM_FIELDS_PER_ENTITY;
 
 /// Relation and entity resolvers of one semantic catalogue.
 ///
-/// Compose it with [`Self::compose`]. A deserialized document is a trusted
+/// Compose it with [`Self::compose`] or [`Self::compose_with_registrations`].
+/// A deserialized document is a trusted
 /// host assertion like the catalogue itself; [`Self::validate_against`]
 /// checks every entry against the catalogue it claims to describe. It cannot
 /// check that no served relationship is missing: the semantic catalogue does
@@ -84,7 +84,7 @@ pub struct GraphqlResolverCatalog {
     pub version: u16,
     /// Fingerprint of the semantic catalogue this document describes.
     pub semantic_catalog_fingerprint: String,
-    /// Every served relationship field with a generated resolver, ordered
+    /// Every catalogued relationship field, ordered
     /// by owning type and field name.
     pub relations: Vec<GraphqlRelationResolverDescriptor>,
     /// Types with a resolvable Federation key, ordered by type name.
@@ -218,7 +218,7 @@ impl GraphqlResolverCatalogBindingV1 {
     }
 }
 
-/// One generated relationship field resolver.
+/// One generated or explicitly registered relationship field resolver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -327,6 +327,54 @@ pub enum GraphqlResolverAuthorization {
     SubgraphOnly,
 }
 
+/// A trusted host's declaration for a handwritten relationship resolver.
+///
+/// The names given to [`Self::new`] are semantic entity identities and the
+/// exact GraphQL field name. Composition uses the served type mapping to
+/// check the field and produce the v1 coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphqlHandwrittenResolverRegistration {
+    entity_name: String,
+    field_name: String,
+    target: String,
+    arguments: Vec<(String, String)>,
+    authorization: GraphqlResolverAuthorization,
+}
+
+impl GraphqlHandwrittenResolverRegistration {
+    /// Declares a field with no arguments.
+    ///
+    /// Choose [`GraphqlResolverAuthorization::SubgraphOnly`] for resolver-specific
+    /// policy. With [`GraphqlResolverAuthorization::SameAsRoot`], the host
+    /// asserts that the resolver enforces the named root's static requirement.
+    pub fn new(
+        entity_name: impl Into<String>,
+        field_name: impl Into<String>,
+        target: impl Into<String>,
+        authorization: GraphqlResolverAuthorization,
+    ) -> Self {
+        Self {
+            entity_name: entity_name.into(),
+            field_name: field_name.into(),
+            target: target.into(),
+            arguments: Vec::new(),
+            authorization,
+        }
+    }
+
+    /// Declares a public argument, with its GraphQL type including list and
+    /// nullability markers. Declare every argument exactly once.
+    #[must_use]
+    pub fn with_argument(
+        mut self,
+        name: impl Into<String>,
+        graphql_type: impl Into<String>,
+    ) -> Self {
+        self.arguments.push((name.into(), graphql_type.into()));
+        self
+    }
+}
+
 /// Generated resolver facts for one entity, as input to
 /// [`GraphqlResolverCatalog::compose`].
 ///
@@ -426,12 +474,14 @@ impl GraphqlGeneratedResolverSource {
 pub struct GraphqlServedField {
     name: String,
     result_type: String,
+    graphql_type: String,
     arguments: Vec<(String, String)>,
+    duplicated: bool,
 }
 
 impl GraphqlServedField {
     /// Creates a field from its name and its GraphQL type as the schema
-    /// spells it, for example `[Child!]!`. Only the named type is kept.
+    /// spells it, for example `[Child!]!`.
     pub fn new(name: impl Into<String>, graphql_type: &str) -> Self {
         Self {
             name: name.into(),
@@ -439,7 +489,9 @@ impl GraphqlServedField {
                 .chars()
                 .filter(|character| !matches!(character, '[' | ']' | '!'))
                 .collect(),
+            graphql_type: graphql_type.to_owned(),
             arguments: Vec::new(),
+            duplicated: false,
         }
     }
 
@@ -463,6 +515,7 @@ impl GraphqlServedField {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphqlServedObjects {
     objects: BTreeMap<String, BTreeMap<String, GraphqlServedField>>,
+    registration_type_names: Option<BTreeMap<String, String>>,
 }
 
 impl GraphqlServedObjects {
@@ -478,10 +531,20 @@ impl GraphqlServedObjects {
         type_name: impl Into<String>,
         fields: impl IntoIterator<Item = GraphqlServedField>,
     ) -> Self {
-        self.objects
-            .entry(type_name.into())
-            .or_default()
-            .extend(fields.into_iter().map(|field| (field.name.clone(), field)));
+        let object = self.objects.entry(type_name.into()).or_default();
+        for mut field in fields {
+            field.duplicated = object.contains_key(&field.name);
+            object.insert(field.name.clone(), field);
+        }
+        self
+    }
+
+    /// Requires handwritten registrations to use these witnessed semantic-to-served
+    /// type names. The generated schema helper supplies them from its type registry.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_registration_type_names(mut self, names: BTreeMap<String, String>) -> Self {
+        self.registration_type_names = Some(names);
         self
     }
 
@@ -525,15 +588,93 @@ impl GraphqlServedObjects {
                 && member(&field.result_type, "edges")
                     .and_then(|edges| member(&edges.result_type, "node"))
                     .is_some_and(|node| node.result_type == target));
-        returns_target
-            && field.arguments.len() == relationship.arguments.len()
-            && relationship.arguments.iter().all(|argument| {
-                field.arguments.iter().any(|(name, graphql_type)| {
-                    *name == argument.graphql_name
-                        && *graphql_type == graphql_type_text(&argument.type_ref)
-                })
-            })
+        returns_target && arguments_match(&field.arguments, relationship)
     }
+
+    fn serves_handwritten_relationship(
+        &self,
+        type_name: &str,
+        target: &str,
+        semantic_field: &GraphqlSemanticFieldMetadata,
+        relationship: &GraphqlSemanticRelationshipDescriptor,
+    ) -> bool {
+        let Some(field) = self
+            .field(type_name, &semantic_field.field_name)
+            .filter(|field| !field.duplicated)
+        else {
+            return false;
+        };
+        let object_type = |type_ref: &GraphqlSemanticTypeRef| match type_ref {
+            GraphqlSemanticTypeRef::Named {
+                name,
+                kind: GraphqlSemanticTypeKind::Object,
+                nullable,
+            } if *name == relationship.target => {
+                Some(format!("{target}{}", if *nullable { "" } else { "!" }))
+            }
+            _ => None,
+        };
+        let returns_target = match (relationship.cardinality, &semantic_field.type_ref) {
+            (GraphqlSemanticRelationshipCardinality::One, declared) => {
+                object_type(declared).is_some_and(|expected| field.graphql_type == expected)
+            }
+            (
+                GraphqlSemanticRelationshipCardinality::Many,
+                GraphqlSemanticTypeRef::List { item, nullable, .. },
+            ) => object_type(item).is_some_and(|expected_item| {
+                let list_suffix = if *nullable { "" } else { "!" };
+                field.graphql_type == format!("[{expected_item}]{list_suffix}")
+                    || self.connection_node(&field.graphql_type, *nullable)
+                        == Some(expected_item.as_str())
+            }),
+            _ => false,
+        };
+        returns_target && arguments_match(&field.arguments, relationship)
+    }
+
+    fn connection_node(&self, connection_type: &str, nullable_list: bool) -> Option<&str> {
+        // The connection occupies the list's nullable position, and node the
+        // item's. Intermediate edges and edge objects cannot introduce nulls.
+        let connection = if nullable_list {
+            connection_type
+        } else {
+            connection_type.strip_suffix('!')?
+        };
+        // Naming rules may change the case of either member. A second
+        // case-insensitive match makes the connection shape ambiguous.
+        let member = |object: &str, name: &str| {
+            if !valid_graphql_name(object) {
+                return None;
+            }
+            let mut matching = self
+                .objects
+                .get(object)?
+                .values()
+                .filter(|field| field.name.eq_ignore_ascii_case(name));
+            let field = matching.next()?;
+            (!field.duplicated && field.arguments.is_empty() && matching.next().is_none())
+                .then_some(field.graphql_type.as_str())
+        };
+        let edge = member(connection, "edges")?
+            .strip_suffix('!')?
+            .strip_prefix('[')?
+            .strip_suffix(']')?
+            .strip_suffix('!')?;
+        member(edge, "node")
+    }
+}
+
+fn arguments_match(
+    arguments: &[(String, String)],
+    relationship: &GraphqlSemanticRelationshipDescriptor,
+) -> bool {
+    arguments.len() == relationship.arguments.len()
+        && relationship.arguments.iter().all(|argument| {
+            let expected_type = graphql_type_text(&argument.type_ref);
+            arguments.iter().any(|(name, graphql_type)| {
+                *name == argument.graphql_name && *graphql_type == expected_type
+            })
+        })
 }
 
 /// A semantic type as GraphQL spells it, for example `[Child!]!`.
@@ -580,7 +721,54 @@ impl GraphqlResolverCatalog {
         sources: impl IntoIterator<Item = GraphqlGeneratedResolverSource>,
         served: &GraphqlServedObjects,
     ) -> Result<Self, GraphqlSemanticError> {
+        Self::compose_with_registrations(catalog, sources, served, [])
+    }
+
+    /// Composes a v1 catalogue with explicit registrations for handwritten fields.
+    ///
+    /// Every registration must match a declared semantic relationship and
+    /// a served field, including the target, cardinality, exact result
+    /// nullability and argument types. A to-one field returns the target
+    /// object. A to-many field returns a list of targets or a connection
+    /// whose nullability matches the list's. The connection must have an
+    /// unambiguous non-null `edges` list of non-null edges, with a `node`
+    /// field whose type matches the declared list item. Other served fields
+    /// are left out unless witnessed by a generated source.
+    ///
+    /// A root reference must match the target's generated traversal root
+    /// for this cardinality. A host that supplies its own generated source
+    /// facts must supply only static traversal requirements there. Registrations with a field policy require
+    /// [`GraphqlResolverAuthorization::SubgraphOnly`]. The host is responsible
+    /// for enforcing the declared requirement in the handwritten resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns composition errors from [`Self::compose`]. Also returns an
+    /// error if a registration is duplicated, names an ambiguous or
+    /// unserved identity, conflicts with a generated resolver, or fails
+    /// the semantic, served schema or authorization checks.
+    pub fn compose_with_registrations(
+        catalog: &GraphqlSemanticCatalog,
+        sources: impl IntoIterator<Item = GraphqlGeneratedResolverSource>,
+        served: &GraphqlServedObjects,
+        registrations: impl IntoIterator<Item = GraphqlHandwrittenResolverRegistration>,
+    ) -> Result<Self, GraphqlSemanticError> {
         catalog.validate()?;
+        let mut registrations_by_field = BTreeMap::new();
+        for registration in registrations {
+            let coordinate = (
+                registration.entity_name.clone(),
+                registration.field_name.clone(),
+            );
+            if registrations_by_field
+                .insert(coordinate, registration)
+                .is_some()
+            {
+                return Err(GraphqlSemanticError::new(
+                    "handwritten resolver registration is duplicated",
+                ));
+            }
+        }
         let sources = sources.into_iter().collect::<Vec<_>>();
         let mut names = BTreeSet::new();
         if !sources
@@ -607,16 +795,39 @@ impl GraphqlResolverCatalog {
                 })
         };
 
-        // The served name of a semantic entity, and the semantic name to
-        // carry beside it when the two differ.
+        // The served name of a semantic entity for generated resolvers and
+        // standalone composition.
         let served_name = |entity_name: &str| {
-            let type_name = source(entity_name)
+            source(entity_name)
                 .and_then(|source| source.type_name.clone())
-                .unwrap_or_else(|| entity_name.to_owned());
-            let semantic = (type_name != entity_name).then(|| entity_name.to_owned());
-            (type_name, semantic)
+                .unwrap_or_else(|| entity_name.to_owned())
         };
 
+        let registration_type_name = |entity_name: &str| {
+            if let Some(names) = &served.registration_type_names {
+                names.get(entity_name).cloned()
+            } else if source(entity_name).is_some_and(|source| source.unregistered) {
+                None
+            } else {
+                Some(served_name(entity_name))
+            }
+        };
+        // A registration cannot use a served name shared by two semantic
+        // entities, even if the other entity has no resolver entry.
+        let mut served_entities = BTreeMap::new();
+        if !registrations_by_field.is_empty() {
+            for entity in &catalog.entities {
+                let Some(type_name) = registration_type_name(&entity.entity_name) else {
+                    continue;
+                };
+                if served.has_object(&type_name) {
+                    served_entities
+                        .entry(type_name)
+                        .and_modify(|binding| *binding = None)
+                        .or_insert(Some(entity.entity_name.as_str()));
+                }
+            }
+        }
         let mut relations = Vec::new();
         let mut entities = Vec::new();
         for entity in &catalog.entities {
@@ -624,27 +835,71 @@ impl GraphqlResolverCatalog {
             if owner.is_some_and(|owner| owner.unregistered) {
                 continue;
             }
-            let (type_name, semantic_entity_name) = served_name(&entity.entity_name);
+            let type_name = served_name(&entity.entity_name);
             for field in &entity.fields {
                 let Some(relationship) = &field.relationship else {
                     continue;
                 };
-                let (target, semantic_target) = served_name(&relationship.target);
-                // Only a mounted generated resolver is listed. The checks
-                // against the served schema confirm it; they never admit a
-                // field on their own.
-                if !owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name))
-                    || source(&relationship.target).is_some_and(|target| target.unregistered)
-                    || !served.has_object(&target)
-                    || !served.serves_relationship(
-                        &type_name,
-                        &field.field_name,
-                        &target,
-                        relationship,
-                    )
-                {
-                    continue;
-                }
+                let registration = if registrations_by_field.is_empty() {
+                    None
+                } else {
+                    registrations_by_field
+                        .remove(&(entity.entity_name.clone(), field.field_name.clone()))
+                };
+                let generated =
+                    owner.is_some_and(|owner| owner.relation_fields.contains(&field.field_name));
+                let target_unregistered =
+                    source(&relationship.target).is_some_and(|target| target.unregistered);
+                let (relation_type_name, target) = if let Some(registration) = &registration {
+                    if generated {
+                        return Err(GraphqlSemanticError::new(
+                            "handwritten resolver registration conflicts with a mounted generated resolver",
+                        ));
+                    }
+                    if registration.target != relationship.target
+                        || !arguments_match(&registration.arguments, relationship)
+                    {
+                        return Err(GraphqlSemanticError::new(
+                            "handwritten resolver registration does not match the semantic relationship",
+                        ));
+                    }
+                    let served_mismatch = || {
+                        GraphqlSemanticError::new(
+                            "handwritten resolver registration does not match an unambiguous served relationship",
+                        )
+                    };
+                    let owner_name =
+                        registration_type_name(&entity.entity_name).ok_or_else(served_mismatch)?;
+                    let target =
+                        registration_type_name(&relationship.target).ok_or_else(served_mismatch)?;
+                    if served_entities.get(&owner_name) != Some(&Some(entity.entity_name.as_str()))
+                        || served_entities.get(&target) != Some(&Some(relationship.target.as_str()))
+                        || !served.serves_handwritten_relationship(
+                            &owner_name,
+                            &target,
+                            field,
+                            relationship,
+                        )
+                    {
+                        return Err(served_mismatch());
+                    }
+                    (owner_name, target)
+                } else {
+                    let target = served_name(&relationship.target);
+                    if !generated
+                        || target_unregistered
+                        || !served.has_object(&target)
+                        || !served.serves_relationship(
+                            &type_name,
+                            &field.field_name,
+                            &target,
+                            relationship,
+                        )
+                    {
+                        continue;
+                    }
+                    (type_name.clone(), target)
+                };
                 let target_source =
                     source(&relationship.target).filter(|_| !field.has_field_policy);
                 let authorization = match target_source {
@@ -662,12 +917,26 @@ impl GraphqlResolverCatalog {
                     },
                     None => GraphqlResolverAuthorization::SubgraphOnly,
                 };
+                let authorization = if let Some(registration) = registration {
+                    if registration.authorization != GraphqlResolverAuthorization::SubgraphOnly
+                        && registration.authorization != authorization
+                    {
+                        return Err(GraphqlSemanticError::new(
+                            "handwritten resolver authorization does not match the target's static traversal requirement",
+                        ));
+                    }
+                    registration.authorization
+                } else {
+                    authorization
+                };
                 relations.push(GraphqlRelationResolverDescriptor {
-                    type_name: type_name.clone(),
-                    semantic_entity_name: semantic_entity_name.clone(),
+                    semantic_entity_name: (relation_type_name != entity.entity_name)
+                        .then(|| entity.entity_name.clone()),
+                    type_name: relation_type_name,
                     field_name: field.field_name.clone(),
+                    semantic_target: (target != relationship.target)
+                        .then(|| relationship.target.clone()),
                     target,
-                    semantic_target,
                     cardinality: relationship.cardinality,
                     arguments: relationship
                         .arguments
@@ -682,8 +951,9 @@ impl GraphqlResolverCatalog {
                 .filter(|owner| !owner.federation_keys.is_empty() && served.has_object(&type_name))
             {
                 entities.push(GraphqlEntityResolverDescriptor {
+                    semantic_entity_name: (type_name != entity.entity_name)
+                        .then(|| entity.entity_name.clone()),
                     type_name,
-                    semantic_entity_name,
                     keys: owner
                         .federation_keys
                         .iter()
@@ -696,6 +966,11 @@ impl GraphqlResolverCatalog {
                     ),
                 });
             }
+        }
+        if !registrations_by_field.is_empty() {
+            return Err(GraphqlSemanticError::new(
+                "handwritten resolver registration does not name a served semantic relationship",
+            ));
         }
         relations.sort_by(|left, right| {
             (&left.type_name, &left.field_name).cmp(&(&right.type_name, &right.field_name))
@@ -1335,6 +1610,293 @@ mod tests {
     fn resealed(mut resolvers: GraphqlResolverCatalog) -> GraphqlResolverCatalog {
         resolvers.fingerprint = resolvers.compute_fingerprint().unwrap();
         resolvers
+    }
+
+    fn handwritten_parent() -> GraphqlHandwrittenResolverRegistration {
+        GraphqlHandwrittenResolverRegistration::new("Child", "Parent", "Parent", same_as("Parent"))
+    }
+
+    #[test]
+    fn handwritten_fields_require_explicit_registration_and_use_the_v1_receiver() {
+        let semantic = catalog();
+        let generated = || sources().into_iter().take(1);
+        let served = serving(&semantic);
+        let legacy = GraphqlResolverCatalog::compose(&semantic, generated(), &served).unwrap();
+        assert!(legacy.relation("Child", "Parent").is_none());
+        let empty =
+            GraphqlResolverCatalog::compose_with_registrations(&semantic, generated(), &served, [])
+                .unwrap();
+        assert_eq!(legacy.export_json().unwrap(), empty.export_json().unwrap());
+
+        let registered = GraphqlResolverCatalog::compose_with_registrations(
+            &semantic,
+            generated(),
+            &served,
+            [handwritten_parent()],
+        )
+        .unwrap();
+        assert_eq!(registered.version, 1);
+        assert_eq!(registered.entities, legacy.entities);
+        assert_eq!(
+            registered.relation("Parent", "Children"),
+            legacy.relation("Parent", "Children")
+        );
+        let relation = registered.relation("Child", "Parent").unwrap();
+        assert_eq!(relation.target, "Parent");
+        assert_eq!(relation.authorization, same_as("Parent"));
+        assert!(registered.relation("Child", "Summary").is_none());
+        assert!(registered.relation("Child", "Guarded").is_none());
+        assert_ne!(registered.fingerprint, legacy.fingerprint);
+
+        let export = registered.export_json().unwrap();
+        let binding = GraphqlResolverCatalogBindingV1::new(&registered.fingerprint).unwrap();
+        assert_eq!(
+            binding.decode_export_json(&export, &semantic).unwrap(),
+            registered
+        );
+        let old_binding = GraphqlResolverCatalogBindingV1::new(&legacy.fingerprint).unwrap();
+        assert!(old_binding.decode_export_json(&export, &semantic).is_err());
+        #[cfg(feature = "router-protocol")]
+        assert_eq!(
+            binding
+                .decode_extensions(
+                    &[registered.router_protocol_extension().unwrap()],
+                    &semantic
+                )
+                .unwrap(),
+            registered,
+        );
+    }
+
+    #[test]
+    fn handwritten_registrations_reject_conflicts_and_invalid_metadata() {
+        let semantic = catalog();
+        let served = serving(&semantic);
+        let subgraph = GraphqlResolverAuthorization::SubgraphOnly;
+        let registration = GraphqlHandwrittenResolverRegistration::new;
+        let generated = || sources().into_iter().take(1);
+        let compose = |declarations| {
+            GraphqlResolverCatalog::compose_with_registrations(
+                &semantic,
+                generated(),
+                &served,
+                declarations,
+            )
+        };
+        for invalid in [
+            registration("Other", "Parent", "Parent", subgraph.clone()),
+            registration("Child", "Missing", "Parent", subgraph.clone()),
+            registration("Child", "Id", "Parent", subgraph.clone()),
+            registration("Child", "Parent", "Summary", subgraph.clone()),
+            registration("Child", "Parent", "Parent", same_as("Parents")),
+            registration("Child", "Guarded", "Parent", same_as("Parent")),
+            registration("Child", "Summary", "Summary", same_as("Parent")),
+            registration(
+                "Child",
+                "Parent",
+                "Parent",
+                GraphqlResolverAuthorization::SameAsRoot {
+                    kind: GraphqlOperationKind::Mutation,
+                    field_name: "Parent".into(),
+                },
+            ),
+            handwritten_parent().with_argument("Unexpected", "Int"),
+        ] {
+            assert!(compose(vec![invalid.clone()]).is_err(), "{invalid:?}");
+        }
+        assert!(compose(vec![handwritten_parent(), handwritten_parent()]).is_err());
+        let guarded = registration("Child", "Guarded", "Parent", subgraph);
+        assert!(
+            compose(vec![guarded])
+                .unwrap()
+                .relation("Child", "Guarded")
+                .unwrap()
+                .has_field_policy
+        );
+        assert!(
+            GraphqlResolverCatalog::compose_with_registrations(
+                &semantic,
+                sources(),
+                &served,
+                [handwritten_parent()],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn handwritten_registrations_check_served_shape_and_type_identity() {
+        let semantic = catalog();
+        let registration = || {
+            GraphqlHandwrittenResolverRegistration::new(
+                "Parent",
+                "Children",
+                "Child",
+                GraphqlResolverAuthorization::SubgraphOnly,
+            )
+            .with_argument("Page", "Int")
+        };
+        let base = || {
+            serving_with(
+                &semantic,
+                |name| Some(if name == "Child" { "PublicChild" } else { name }.into()),
+                |_, field| field != "Children",
+            )
+        };
+        let compose = |served: &GraphqlServedObjects, declaration| {
+            GraphqlResolverCatalog::compose_with_registrations(
+                &semantic,
+                [GraphqlGeneratedResolverSource::new("Child").with_type_name("PublicChild")],
+                served,
+                [declaration],
+            )
+        };
+        let field =
+            GraphqlServedField::new("Children", "[PublicChild!]!").with_argument("Page", "Int");
+        let served = base().with_object("Parent", [field.clone()]);
+        let resolvers = compose(&served, registration()).unwrap();
+        let relation = resolvers.relation("Parent", "Children").unwrap();
+        assert_eq!(relation.target, "PublicChild");
+        assert_eq!(relation.semantic_target.as_deref(), Some("Child"));
+        assert_eq!(relation.arguments, ["Page"]);
+        assert!(compose(&served, registration().with_argument("Page", "Int")).is_err());
+        for invalid in [
+            GraphqlServedField::new("Children", "[PublicChild!]").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "[PublicChild]!").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "PublicChild").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "[[PublicChild]]").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "[Child]").with_argument("Page", "Int"),
+            GraphqlServedField::new("Children", "[PublicChild]").with_argument("Page", "Int!"),
+            GraphqlServedField::new("Children", "[PublicChild]"),
+        ] {
+            assert!(compose(&base().with_object("Parent", [invalid]), registration()).is_err());
+        }
+        let duplicated = base().with_object("Parent", [field.clone(), field]);
+        assert!(compose(&duplicated, registration()).is_err());
+        assert!(compose(&base(), registration()).is_err());
+        let ambiguous_target =
+            [GraphqlGeneratedResolverSource::new("Child").with_type_name("Summary")];
+        let ambiguous_schema = base().with_object(
+            "Parent",
+            [GraphqlServedField::new("Children", "[Summary!]!").with_argument("Page", "Int")],
+        );
+        assert!(
+            GraphqlResolverCatalog::compose_with_registrations(
+                &semantic,
+                ambiguous_target,
+                &ambiguous_schema,
+                [registration()],
+            )
+            .is_err()
+        );
+
+        let connection = |result, edges, node| {
+            base()
+                .with_object(
+                    "Parent",
+                    [GraphqlServedField::new("Children", result).with_argument("Page", "Int")],
+                )
+                .with_object("ChildConnection", [GraphqlServedField::new("Edges", edges)])
+                .with_object("ChildEdge", [GraphqlServedField::new("Node", node)])
+        };
+        for (result, edges, node) in [
+            ("ChildConnection", "[ChildEdge!]!", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge!]", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge]!", "PublicChild!"),
+            ("ChildConnection!", "[ChildEdge!]!", "PublicChild"),
+            ("ChildConnection!", "[ChildEdge!]!", "[PublicChild!]!"),
+        ] {
+            assert!(
+                compose(&connection(result, edges, node), registration()).is_err(),
+                "{result}, {edges}, {node}"
+            );
+        }
+        let connection = connection("ChildConnection!", "[ChildEdge!]!", "PublicChild!");
+        assert!(compose(&connection, registration()).is_ok());
+        let ambiguous_connection = connection.with_object(
+            "ChildEdge",
+            [GraphqlServedField::new("node", "PublicChild!")],
+        );
+        assert!(compose(&ambiguous_connection, registration()).is_err());
+        assert!(
+            GraphqlResolverCatalog::compose_with_registrations(
+                &semantic,
+                [GraphqlGeneratedResolverSource::new("Parent").unregistered()],
+                &serving(&semantic),
+                [GraphqlHandwrittenResolverRegistration::new(
+                    "Child",
+                    "Parent",
+                    "Parent",
+                    GraphqlResolverAuthorization::SubgraphOnly,
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn handwritten_registrations_match_declared_nullability() {
+        for nullable in [true, false] {
+            let mut one = to_one("Child", "Child");
+            one.type_ref = object("Child", nullable);
+            let mut many = to_many("Children", "Child");
+            many.type_ref =
+                GraphqlSemanticTypeRef::list(nullable, Some(100), object("Child", nullable));
+            let semantic = GraphqlSemanticCatalog::compose_descriptors(
+                [entity("Parent", vec![one, many]), entity("Child", vec![])],
+                [],
+            )
+            .unwrap();
+            let compose = |one, many, node| {
+                let served = GraphqlServedObjects::new()
+                    .with_object("Child", [])
+                    .with_object(
+                        "Parent",
+                        [
+                            GraphqlServedField::new("Child", one),
+                            GraphqlServedField::new("Children", many).with_argument("Page", "Int"),
+                        ],
+                    )
+                    .with_object(
+                        "ChildConnection",
+                        [GraphqlServedField::new("edges", "[ChildEdge!]!")],
+                    )
+                    .with_object("ChildEdge", [GraphqlServedField::new("node", node)]);
+                let register = |field| {
+                    GraphqlHandwrittenResolverRegistration::new(
+                        "Parent",
+                        field,
+                        "Child",
+                        GraphqlResolverAuthorization::SubgraphOnly,
+                    )
+                };
+                GraphqlResolverCatalog::compose_with_registrations(
+                    &semantic,
+                    [],
+                    &served,
+                    [
+                        register("Child"),
+                        register("Children").with_argument("Page", "Int"),
+                    ],
+                )
+            };
+            let (object, list, connection, wrong_object, wrong_list) = if nullable {
+                ("Child", "[Child]", "ChildConnection", "Child!", "[Child!]")
+            } else {
+                (
+                    "Child!",
+                    "[Child!]!",
+                    "ChildConnection!",
+                    "Child",
+                    "[Child]!",
+                )
+            };
+            assert!(compose(object, list, object).is_ok());
+            assert!(compose(object, connection, object).is_ok());
+            assert!(compose(wrong_object, list, object).is_err());
+            assert!(compose(object, wrong_list, object).is_err());
+            assert!(compose(object, connection, wrong_object).is_err());
+        }
     }
 
     #[test]

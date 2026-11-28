@@ -327,15 +327,37 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     ::graphql_orm::graphql::orm::GraphqlSemanticError,
                 >
             > = ::std::sync::OnceLock::new();
-            CATALOG.get_or_init(|| {
-                ::graphql_orm::graphql::orm::compose_resolver_catalog::<QueryRoot>(
-                    __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
-                    ::std::vec![#(#resolver_sources),*],
-                )
-            })
-            .as_ref()
+            CATALOG.get_or_init(|| graphql_orm_resolver_catalog_with_registrations([]))
+                .as_ref()
         }
 
+        /// Composes an owned v1 resolver catalogue with explicit handwritten
+        /// relationship registrations in addition to mounted generated resolvers.
+        ///
+        /// See `GraphqlResolverCatalog::compose_with_registrations` for the
+        /// registration contract. The owner and target must be backed by their
+        /// declared Rust types in the query root's registry. Each call validates
+        /// the declarations against this schema.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if any catalogue fails to compose or a registration
+        /// conflicts with the generated resolvers or fails validation.
+        pub fn graphql_orm_resolver_catalog_with_registrations(
+            registrations: impl ::std::iter::IntoIterator<
+                Item = ::graphql_orm::graphql::orm::GraphqlHandwrittenResolverRegistration,
+            >,
+        ) -> ::std::result::Result<
+            ::graphql_orm::graphql::orm::GraphqlResolverCatalog,
+            ::graphql_orm::graphql::orm::GraphqlSemanticError,
+        > {
+            ::graphql_orm::graphql::orm::compose_resolver_catalog_with_registrations::<QueryRoot>(
+                __graphql_orm_try_semantic_catalog().map_err(::std::clone::Clone::clone)?,
+                ::std::vec![#(#resolver_sources),*],
+                __graphql_orm_custom_semantic_sources(),
+                registrations,
+            )
+        }
 
         /// Returns this schema's interpretation fingerprint: a value that
         /// changes when a release may read existing cursors, keys or `NodeId`
@@ -407,6 +429,18 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 .expect("macro-generated GraphQL semantic catalogue must validate")
         }
 
+        fn __graphql_orm_custom_semantic_sources(
+        ) -> &'static [::graphql_orm::graphql::orm::GraphqlSemanticEntitySource] {
+            static SOURCES: ::std::sync::OnceLock<
+                ::std::vec::Vec<::graphql_orm::graphql::orm::GraphqlSemanticEntitySource>,
+            > = ::std::sync::OnceLock::new();
+            SOURCES.get_or_init(|| {
+                ::std::iter::IntoIterator::into_iter([#(#semantic_type_items),*])
+                    #(.chain(#described_result_type_items))*
+                    .collect()
+            })
+        }
+
         /// The semantic catalogue, or the error its composition returned.
         /// Composed once; `graphql_orm_semantic_catalog` and the resolver
         /// catalogue share the result.
@@ -425,8 +459,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 let operation_catalog = __graphql_orm_try_operation_catalog().map_err(|&error| error)?;
                 ::graphql_orm::graphql::orm::GraphqlSemanticCatalog::compose_with_custom_sources(
                     [#(#semantic_entity_items),*],
-                    ::std::iter::IntoIterator::into_iter([#(#semantic_type_items),*])
-                        #(.chain(#described_result_type_items))*,
+                    __graphql_orm_custom_semantic_sources().iter().copied(),
                     operation_catalog,
                     ::std::iter::empty()
                         #(.chain(#semantic_custom_operation_items))*,
