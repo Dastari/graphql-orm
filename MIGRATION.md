@@ -16,6 +16,21 @@ supersedes: []
 borrow in authorized pagination and uses `AtomicUsize::try_update` to reserve
 runtime mutation response bytes. Rust 1.97.1 remains the supported baseline.
 
+## 0.243.0: Handwritten resolver registrations (operation catalogue 0.18.0)
+
+**No action.** Upgrade ORM and macros together. Hosts that want to export
+handwritten relationship fields can opt in with
+`graphql_orm_resolver_catalog_with_registrations`. The default export keeps
+its existing fingerprint. Review and update a receiver's pin when adding
+registrations to an export it uses.
+[Registration contract](crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field)
+
+## 0.242.0: Shared dispatch for generated entity fields
+
+**No action.** Upgrade ORM and macros together. Ordinary generated entity
+objects use shared GraphQL field dispatch with the same generated getters,
+field policies, schema and metadata.
+
 ## 0.241.0: Opt-in host timestamps with `time`
 
 **No action** for existing entities. The `chrono` feature is implied by

@@ -13,6 +13,13 @@ supersedes: []
 Version 0.244.0 resolves two Rust 1.99 diagnostics while retaining support for
 Rust 1.97.1. [Migration](../../MIGRATION.md#02440-orm-compiler-diagnostics).
 
+Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+[explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
+Version 0.242.0 shares field-policy checks and output handling for
+ordinary generated entity objects.
+[Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).
+
 Version 0.240.0 shares the field-policy checks for generated GraphQL upsert
 and create on upsert-enabled entities.
 [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).

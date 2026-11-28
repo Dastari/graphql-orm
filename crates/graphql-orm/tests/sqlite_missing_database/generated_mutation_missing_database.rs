@@ -4,7 +4,7 @@ use graphql_orm::graphql::input_validation::GeneratedInputValidation;
 use graphql_orm::prelude::*;
 use sqlx::Row;
 
-const DATABASE_ERROR: &str = "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data";
+pub(super) const DATABASE_ERROR: &str = "graphql-orm Database runtime not registered; build the schema with schema_builder(database) or add Database to schema data";
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(table = "records", auth = "none", upsert = "id")]

@@ -114,6 +114,7 @@ fn expand(tokens: TokenStream) -> syn::Result<TokenStream> {
         ));
     }
 
+    let output = output_impl(&ident, &type_name, &type_description, schema_fields);
     Ok(quote! {
         #item
 
@@ -136,6 +137,19 @@ fn expand(tokens: TokenStream) -> syn::Result<TokenStream> {
             }
         }
 
+        #output
+    })
+}
+
+/// Emit the output traits shared by plain generated objects and wrappers.
+pub(crate) fn output_impl(
+    ident: &syn::Ident,
+    type_name: &str,
+    type_description: &TokenStream,
+    schema_fields: impl IntoIterator<Item = TokenStream>,
+) -> TokenStream {
+    let schema_fields = schema_fields.into_iter();
+    quote! {
         #[allow(clippy::all, clippy::pedantic)]
         impl ::graphql_orm::async_graphql::OutputType for #ident {
             fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
@@ -165,7 +179,7 @@ fn expand(tokens: TokenStream) -> syn::Result<TokenStream> {
         }
 
         impl ::graphql_orm::async_graphql::ObjectType for #ident {}
-    })
+    }
 }
 
 /// Remove every `#[graphql(...)]` attribute and return its `key = "value"`

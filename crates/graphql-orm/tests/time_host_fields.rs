@@ -9,6 +9,7 @@
 ))]
 
 use graphql_orm::prelude::*;
+use std::any::Any;
 use time::{OffsetDateTime, UtcOffset, macros::datetime};
 
 #[cfg(feature = "mssql")]
@@ -120,6 +121,120 @@ fn generated_update_distinguishes_omitted_and_explicit_null_timestamps() -> grap
     TimeHostField::__gom_push_update_assignments(&input, &mut clauses, &mut changed, &mut binds)?;
     assert_eq!(binds, [SqlValue::from(stamp)]);
     Ok(())
+}
+
+struct HostTimestampQuery(TimeHostField);
+
+#[async_graphql::Object]
+impl HostTimestampQuery {
+    async fn records(&self) -> Vec<TimeHostField> {
+        vec![self.0.clone()]
+    }
+}
+
+struct HostTimestampPolicy;
+struct DenyTimestamp;
+
+impl FieldPolicy<Backend> for HostTimestampPolicy {
+    fn can_read_field<'a>(
+        &'a self,
+        ctx: &'a async_graphql::Context<'_>,
+        _: &'a Database<Backend>,
+        entity: &'static str,
+        field: &'static str,
+        key: Option<&'static str>,
+        record: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            assert_eq!(entity, "TimeHostField");
+            assert!(matches!(field, "recorded" | "expires"));
+            assert_eq!(key, None);
+            assert_eq!(
+                record.unwrap().downcast_ref::<TimeHostField>().unwrap().id,
+                1
+            );
+            Ok(ctx.data_opt::<DenyTimestamp>().is_none())
+        })
+    }
+
+    fn can_write_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database<Backend>,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+async fn assert_host_timestamp_output(mut db: Database<Backend>, mut record: TimeHostField) {
+    use async_graphql::{EmptyMutation, EmptySubscription, PathSegment, Pos, Request, Schema};
+
+    db.set_field_policy(HostTimestampPolicy);
+    record.recorded = datetime!(2026-04-09 12:34:56.125 +05:30);
+    let schema = Schema::build(
+        HostTimestampQuery(record.clone()),
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .data(db.clone())
+    .finish();
+    let sdl = schema.sdl();
+    assert!(sdl.contains("recorded: DateTime!"), "{sdl}");
+    assert!(
+        sdl.lines().any(|line| line.trim() == "expires: DateTime"),
+        "{sdl}"
+    );
+    let response = schema.execute("{ records { recorded expires } }").await;
+    assert!(response.errors.is_empty(), "{response:?}");
+    assert_eq!(
+        response.data.into_json().unwrap(),
+        serde_json::json!({"records": [{"recorded": "2026-04-09T07:04:56.125Z", "expires": null}]}),
+    );
+
+    // A host resolver can return a constructed entity without going through row decoding.
+    record.recorded = datetime!(0001-01-01 00:00 +01:00);
+    record.expires = Some(datetime!(9999-12-31 23:59:59 -01:00));
+    let schema = Schema::build(HostTimestampQuery(record), EmptyMutation, EmptySubscription)
+        .data(db)
+        .finish();
+    for field in ["recorded", "expires"] {
+        let query = format!("{{\n  list: records {{ alias: {field} }}\n}}");
+        for (request, code) in [
+            (Request::new(&query), "INTERNAL_ERROR"),
+            (Request::new(&query).data(DenyTimestamp), "FORBIDDEN"),
+        ] {
+            let response = schema.execute(request).await;
+            assert_eq!(response.errors.len(), 1, "{response:?}");
+            let error = &response.errors[0];
+            if code == "INTERNAL_ERROR" {
+                assert_eq!(error.message, "internal error");
+            }
+            assert_eq!(
+                error.extensions.as_ref().unwrap().get("code"),
+                Some(&async_graphql::Value::from(code)),
+            );
+            assert_eq!(
+                error.path,
+                [
+                    PathSegment::Field("list".into()),
+                    PathSegment::Index(0),
+                    PathSegment::Field("alias".into()),
+                ],
+            );
+            assert_eq!(
+                error.locations,
+                [Pos {
+                    line: 2,
+                    column: 19
+                }]
+            );
+        }
+    }
 }
 
 async fn create_table(
@@ -508,6 +623,7 @@ async fn binds_and_generated_decode_round_trip_nullable_fields()
     let db = Database::<Backend>::builder(pool.clone())
         .schema_policy(SchemaPolicy::ExternalWritable)
         .build();
+    assert_host_timestamp_output(db.clone(), first.clone()).await;
     let created = TimeHostField::insert(
         &db,
         CreateTimeHostFieldInput {
