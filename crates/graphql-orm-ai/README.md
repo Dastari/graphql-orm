@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+AI 0.169.0 reorganizes the operational telemetry implementation and preserves
+the existing exporter API. See the
+[migration guide](MIGRATION.md#01680-to-01690-operational-telemetry).
+
 AI 0.167.0 verifies the stored provider plan hash when executing an approved
 generated mutation. See the [migration guide](MIGRATION.md#01660-to-01670-approved-generated-mutations).
 

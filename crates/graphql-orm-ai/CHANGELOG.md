@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.169.0
+
+- Split operational telemetry into modules for provider and tool calls and
+  runtime lifecycle observations. Move its three unit tests out of production
+  source files. Export paths, event names, and payloads stay the same (#506).
+  [Migration](MIGRATION.md#01680-to-01690-operational-telemetry)
+
 ## Unreleased - 0.168.0
 
 - **Fixed (#937).** Direct subscription waits check
