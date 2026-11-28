@@ -175,8 +175,8 @@ impl MssqlPoolOptions {
 
     /// Bind temporal text values as native SQL Server parameters for this pool.
     ///
-    /// Chrono values always bind natively. The default sends temporal text as
-    /// written. Native date, datetime2 and datetimeoffset parameters avoid
+    /// Typed Rust temporal values always bind natively. The default sends
+    /// temporal text as written. Native date, datetime2 and datetimeoffset parameters avoid
     /// session-dependent text conversion. Legacy datetime columns can round
     /// and compare differently.
     pub fn typed_temporal_parameters(mut self, enabled: bool) -> Self {
@@ -1734,6 +1734,70 @@ impl MssqlScalar for chrono::DateTime<chrono::Utc> {
     }
 }
 
+#[cfg(feature = "time")]
+impl MssqlScalar for OffsetDateTime {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        use tiberius::FromSql;
+
+        decode_column(row, index, |value| match value {
+            ColumnData::DateTimeOffset(Some(raw))
+                if !(-840..=840).contains(&raw.offset()) || !datetimeoffset_fits_time(*raw) =>
+            {
+                Err(incompatible_column(
+                    "SQL Server datetimeoffset is outside the time range",
+                ))
+            }
+            ColumnData::DateTimeOffset(_) => Self::from_sql(value),
+            _ => Err(incompatible_column(
+                "expected a SQL Server datetimeoffset column",
+            )),
+        })
+        .map_err(map_tiberius_error)
+    }
+}
+
+#[cfg(feature = "time")]
+impl MssqlScalar for Date {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        use tiberius::FromSql;
+
+        decode_column(row, index, |value| match value {
+            ColumnData::Date(Some(raw)) if raw.days() > LAST_TDS_DAY_IN_TIME_RANGE => Err(
+                incompatible_column("SQL Server date is outside the time range"),
+            ),
+            _ => Self::from_sql(value),
+        })
+        .map_err(map_tiberius_error)
+    }
+}
+
+#[cfg(feature = "time")]
+impl MssqlScalar for PrimitiveDateTime {
+    fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
+    where
+        I: MssqlColumnIndex,
+    {
+        use tiberius::FromSql;
+
+        decode_column(row, index, |value| match value {
+            ColumnData::DateTime(Some(raw)) => legacy_datetime(*raw).map(Some),
+            ColumnData::DateTime2(Some(raw)) if raw.date().days() > LAST_TDS_DAY_IN_TIME_RANGE => {
+                Err(incompatible_column(
+                    "SQL Server datetime2 is outside the time range",
+                ))
+            }
+            _ => Self::from_sql(value),
+        })
+        .map_err(map_tiberius_error)
+    }
+}
+
 impl MssqlScalar for serde_json::Value {
     fn try_get_optional<I>(row: &MssqlRow, index: I) -> crate::Result<Option<Self>>
     where
@@ -2110,10 +2174,12 @@ impl MssqlParamValue {
     fn from_value(value: &SqlValue, options: &MssqlPoolOptions) -> crate::Result<Self> {
         Ok(match value {
             SqlValue::String(value) => Self::String(value.clone()),
-            SqlValue::Temporal(value) if options.typed_temporal_parameters || value.is_chrono() => {
+            SqlValue::Temporal(value) if options.typed_temporal_parameters || value.is_typed() => {
                 Self::Native(encode_temporal(value)?)
             }
             SqlValue::Temporal(value) => Self::String(value.as_text().to_owned()),
+            #[cfg(feature = "time")]
+            SqlValue::OffsetDateTimeNull => Self::Native(ColumnData::DateTimeOffset(None)),
             SqlValue::StringNull => Self::NullString,
             SqlValue::Bytes(value) => Self::Bytes(value.clone()),
             SqlValue::BytesNull => Self::NullBytes,

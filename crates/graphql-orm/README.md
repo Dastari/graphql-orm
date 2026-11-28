@@ -10,8 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.241.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
 [explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
+Version 0.242.0 shares field-policy checks and output handling for
+ordinary generated entity objects.
+[Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).
 
 Version 0.240.0 shares the field-policy checks for generated GraphQL upsert
 and create on upsert-enabled entities.
@@ -1107,6 +1111,38 @@ select `TransactionMode::StateMachine` automatically; an upsert composed inside
 `Database::transaction` must explicitly select that mode so an absent-key
 decision is fenced across every backend. See [runtime writes and repository
 operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
+
+### Host timestamps with `time`
+
+Add `"time"` to the ORM dependency's features alongside your backend (for
+example, `features = ["postgres", "time"]`) and add
+`time = { version = "0.3", features = ["serde"] }` for entity serialization.
+The ORM feature enables the SQLx and async-graphql `time` integrations.
+PostgreSQL and SQL Server continue to imply the ORM's `chrono` feature.
+Both host features can be enabled together. Hosts that expose chrono scalars
+continue selecting async-graphql's `chrono` feature directly.
+
+```rust
+use graphql_orm::prelude::*;
+use time::OffsetDateTime;
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "reservations", plural = "Reservations", lifetime(field = "expires_at"))]
+struct Reservation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    #[graphql_orm(time_offset_datetime)]
+    expires_at: Option<OffsetDateTime>,
+}
+```
+
+The attribute selects `TIMESTAMPTZ` on PostgreSQL, `DATETIMEOFFSET` on
+SQL Server, and RFC 3339 `TEXT` on SQLite. Fields without the attribute
+keep their previous column mapping. An opted-in field can declare
+`rfc3339_utc` lifetime metadata. See the
+[migration notes](../../MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+for storage, precision and GraphQL wire behavior.
 
 ## Read snapshot transactions
 

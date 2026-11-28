@@ -130,6 +130,7 @@ Every encoding is UTC:
 | Field type | `format` | Published `encoding` |
 | --- | --- | --- |
 | `DateTime<Utc>` | omitted or `rfc3339_utc` | `rfc3339_utc` |
+| `time::OffsetDateTime` with `#[graphql_orm(time_offset_datetime)]` | omitted or `rfc3339_utc` | `rfc3339_utc` |
 | `i32`, `i64`, `u32` | `unix_seconds` (required) | `unix_seconds` |
 | `i64` | `unix_milliseconds` | `unix_milliseconds` |
 | `String` | `rfc3339_utc` or `sqlite_utc_text` (required) | as declared |

@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.241.0: Handwritten resolver registrations (operation catalogue 0.18.0)
+## 0.243.0: Handwritten resolver registrations (operation catalogue 0.18.0)
 
 **No action.** Upgrade ORM and macros together. Hosts that want to export
 handwritten relationship fields can opt in with
@@ -18,6 +18,59 @@ handwritten relationship fields can opt in with
 its existing fingerprint. Review and update a receiver's pin when adding
 registrations to an export it uses.
 [Registration contract](crates/graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field)
+
+## 0.242.0: Shared dispatch for generated entity fields
+
+**No action.** Upgrade ORM and macros together. Ordinary generated entity
+objects use shared GraphQL field dispatch with the same generated getters,
+field policies, schema and metadata.
+
+## 0.241.0: Opt-in host timestamps with `time`
+
+**No action** for existing entities. The `chrono` feature is implied by
+`postgres` and `mssql`, and the existing chrono APIs remain available.
+To opt in, enable `graphql-orm/time`, add a direct `time = "0.3"`
+dependency, and mark each persisted `OffsetDateTime` or
+`Option<OffsetDateTime>` with `#[graphql_orm(time_offset_datetime)]`.
+See the [field example](crates/graphql-orm/README.md#host-timestamps-with-time).
+
+Before opting in an existing text column, plan a schema and data migration
+to `TIMESTAMPTZ` on PostgreSQL or `DATETIMEOFFSET` on SQL Server. On
+PostgreSQL, normalize existing values to valid timestamps with explicit
+offsets, then run an explicit conversion:
+
+```sql
+ALTER TABLE reservations
+    ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::timestamptz;
+```
+
+If the text column has a default, drop it before the type change and
+recreate it with a timestamp expression if needed. Generated PostgreSQL
+date comparisons and both `between` bounds cast their parameters to
+`TIMESTAMPTZ`. PostgreSQL interprets date-only operands and timestamps
+without an explicit offset in the session time zone. For a range with a
+session-local bound, PostgreSQL resolves both endpoints before comparing them.
+A reversed range with a session-local bound matches no rows.
+
+PostgreSQL returns timestamps in UTC at microsecond precision and
+rejects both infinities on read. Simple-query decoding normalizes the session's
+rendered offset to UTC using PostgreSQL's ISO date style, the SQLx default.
+SQL Server retains the stored offset at 100 ns precision and requires offsets
+in whole minutes within ±14 hours.
+SQLite stores RFC 3339 text, preserves the offset and uses text ordering,
+which can differ from instant ordering. Generated `created_at` and
+`updated_at` defaults and automatic `updated_at` assignments use the
+backend's timestamp clock for opted-in fields, including on upsert conflicts.
+
+The async-graphql `DateTime` scalar for `time` parses RFC 3339 and emits UTC
+with `Z`. Opted-in values must have years in 0001–9999 both as stored or
+supplied and after conversion to UTC. For example,
+`9999-12-31T23:59:59-01:00` falls outside the supported UTC range.
+Generated GraphQL reads return an error for out-of-range values. Review
+the UTC wire spelling if you switch a field from chrono.
+The SQL Server text-temporal option still controls text binds from
+`#[date_field]`, date filters and `SqlValue::temporal_text`. Opted-in Rust
+offset timestamp fields bind as typed values, including nulls.
 
 ## 0.240.0: Shared create and upsert field policies
 

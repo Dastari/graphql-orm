@@ -14,12 +14,25 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.241.0, operation catalogue 0.18.0
+## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
 
 - **No action** (refs #934). Hosts can explicitly register handwritten
   relationship fields in resolver catalogue v1. Composition rejects invalid,
   ambiguous, duplicate or conflicting registrations.
-  [Migration](MIGRATION.md#02410-handwritten-resolver-registrations-operation-catalogue-0180)
+  [Migration](MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
+
+## Unreleased - ORM/macros 0.242.0
+
+- **No action** (refs #677, #358). Ordinary generated entity objects share
+  GraphQL field dispatch, schema registration and field-policy handling to
+  reduce the amount of code compiled per entity.
+  [Migration](MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
+
+## Unreleased - ORM/macros 0.241.0
+
+- **No action** (refs #768). Hosts can enable `time` and opt individual
+  `OffsetDateTime` fields into timestamp mapping and lifetime metadata.
+  [Migration](MIGRATION.md#02410-opt-in-host-timestamps-with-time)
 
 ## Unreleased - ORM/macros 0.240.0
 

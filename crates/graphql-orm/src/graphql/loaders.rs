@@ -60,6 +60,8 @@ impl RelationKey {
                 SqlValue::Bool(_) => (Type::Bool, false),
                 SqlValue::Bytes(_) => (Type::Bytes, false),
                 SqlValue::Json(_) => (Type::Json, false),
+                #[cfg(feature = "time")]
+                SqlValue::OffsetDateTimeNull => (Type::String, true),
                 SqlValue::StringNull => (Type::String, true),
                 SqlValue::UuidNull => (Type::Uuid, true),
                 SqlValue::IntNull => (Type::Int, true),
@@ -790,6 +792,8 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         crate::graphql::orm::SqlValue::Bool(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Bytes(value) => crate::graphql::orm::binary_key_id(value),
         crate::graphql::orm::SqlValue::Json(value) => value.to_string(),
+        #[cfg(feature = "time")]
+        crate::graphql::orm::SqlValue::OffsetDateTimeNull => String::new(),
         crate::graphql::orm::SqlValue::StringNull
         | crate::graphql::orm::SqlValue::BytesNull
         | crate::graphql::orm::SqlValue::JsonNull
