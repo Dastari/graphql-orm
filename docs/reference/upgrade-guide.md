@@ -72,6 +72,9 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.243.0**; **`graphql-orm-macros` 0.243.0**; **`graphql-orm-operation-catalog` 0.18.0**; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
+- **No action** — ORM/macros 0.245.0 groups the SQLite Federation subgraph
+  tests (#771, #545). [Migration](../../MIGRATION.md#02450-sqlite-federation-subgraph-tests)
+
 - **No action** — AI 0.169.0 reorganizes operational telemetry source files and preserves existing exporter APIs (#506). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01680-to-01690-operational-telemetry)
 - **No action** — ORM/macros 0.243.0 and operation catalogue 0.18.0 add
   opt-in handwritten relationship registrations for resolver catalogue v1

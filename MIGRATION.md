@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.245.0: SQLite Federation subgraph tests
+
+**No action.** Upgrade ORM and macros together. Repository contributors can
+run the grouped tests with `cargo test -p graphql-orm --test sqlite_federation_subgraphs`.
+[Testing guide](docs/development/testing.md#orm-integration-test-harnesses)
+
 ## 0.243.0: Handwritten resolver registrations (operation catalogue 0.18.0)
 
 **No action.** Upgrade ORM and macros together. Hosts that want to export

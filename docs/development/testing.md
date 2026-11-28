@@ -214,6 +214,7 @@ the lane.
 | `runtime_repository_contracts` | `runtime_auto_actor`, `runtime_auto_timestamps`, `runtime_dependent_deletes` |
 | `runtime_schema_contracts` | `runtime_descriptions`, `runtime_filters`, `runtime_identity_goldens`, `runtime_label_fields` |
 | `sqlite_append_only` | `append_only`, `append_only_composite`, `append_only_create_authorization` |
+| `sqlite_federation_subgraphs` | `federation_shareable_aggregate_results`, `federation_shareable_page_info`, `federation_stub_only_subgraph` |
 | `sqlite_input_disclosure` | `custom_input_disclosure_roots`, `generated_input_disclosure` |
 | `sqlite_keyset_authority` | `keyset_cursor_binding`, `keyset_residual_policy` |
 | `sqlite_migration_rebuilds` | `migration_sqlite_prefix`, `migration_sqlite_rebuild_preservation`, `migration_sqlite_unique_preservation` |

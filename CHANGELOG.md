@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.245.0
+
+- **No action** (refs #771, #545). Group the SQLite Federation subgraph export
+  tests into the `sqlite_federation_subgraphs` harness.
+  [Testing guide](docs/development/testing.md#orm-integration-test-harnesses)
+
 ## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
 
 - **No action** (refs #934). Hosts can explicitly register handwritten
