@@ -788,10 +788,9 @@ impl AiCapabilityIndex {
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilitySearchResult, AiError> {
         query.validate(self.limits.maximum_search_results)?;
-        let candidates = rank_entries([self], query)
+        let candidates = ranked_entries([self], query, Some(usize::from(query.maximum_results)))
             .into_iter()
-            .take(usize::from(query.maximum_results))
-            .map(|(_, entry)| search_candidate(entry))
+            .map(|hit| search_candidate(hit.entry))
             .collect();
         Ok(AiCapabilitySearchResult {
             index_fingerprint: self.fingerprint.clone(),
@@ -1005,12 +1004,15 @@ impl AiCapabilityIndexSet {
         &self,
         query: &AiCapabilitySearchQuery,
     ) -> Result<AiCapabilityIndexSetSearchResult, AiError> {
-        let candidates = self
-            .ranked_matches(query)?
-            .into_iter()
-            .take(usize::from(query.maximum_results))
-            .map(|candidate| candidate.candidate())
-            .collect();
+        query.validate(self.maximum_search_results)?;
+        let candidates = ranked_entries(
+            self.indexes.values().map(Arc::as_ref),
+            query,
+            Some(usize::from(query.maximum_results)),
+        )
+        .into_iter()
+        .map(|hit| search_candidate(hit.entry))
+        .collect();
         Ok(AiCapabilityIndexSetSearchResult {
             index_set_fingerprint: self.fingerprint.clone(),
             candidates,
@@ -1035,10 +1037,15 @@ impl AiCapabilityIndexSet {
         query: &AiCapabilitySearchQuery,
     ) -> Result<Vec<AiCapabilityRankedMatch<'_>>, AiError> {
         query.validate(self.maximum_search_results)?;
-        Ok(rank_entries(self.indexes.values().map(Arc::as_ref), query)
-            .into_iter()
-            .map(|(index, entry)| AiCapabilityRankedMatch { index, entry })
-            .collect())
+        Ok(
+            ranked_entries(self.indexes.values().map(Arc::as_ref), query, None)
+                .into_iter()
+                .map(|hit| AiCapabilityRankedMatch {
+                    index: hit.index,
+                    entry: hit.entry,
+                })
+                .collect(),
+        )
     }
 
     /// Ranks every executable root that matches one query, each on its own
@@ -1412,7 +1419,7 @@ const FIELD_RELATIONSHIPS: u16 = 1 << 7;
 const FIELD_SCALARS: u16 = 1 << 8;
 
 /// Fixed weight of each root field.
-const ROOT_FIELD_WEIGHTS: [(u16, u16); 7] = [
+const ROOT_FIELD_WEIGHTS: [(u16, u8); 7] = [
     (FIELD_ID, 12),
     (FIELD_NAME, 11),
     (FIELD_OPERATION, 10),
@@ -1483,6 +1490,8 @@ struct SearchTermIndex {
     entries: Vec<EntrySearchKeys>,
     /// Entry position by identifier.
     positions: BTreeMap<AiToolId, u32>,
+    /// Exact public namespaces of this view, which may differ from its target ID.
+    namespaces: BTreeSet<String>,
     /// Whether entry positions also resolve their IDs in the source map.
     /// A standalone deserialized index may not yet have passed admission.
     ids_match_keys: bool,
@@ -1509,8 +1518,12 @@ impl SearchTermIndex {
         let mut keys = Vec::with_capacity(entries.len());
         let mut positions = BTreeMap::new();
         let mut ids_match_keys = true;
+        let mut namespaces = BTreeSet::new();
         for (position, (id, entry)) in entries.iter().enumerate() {
             ids_match_keys &= id == &entry.id;
+            if !namespaces.contains(&entry.namespace) {
+                namespaces.insert(entry.namespace.clone());
+            }
             let position = u32::try_from(position).unwrap_or(u32::MAX);
             let mut own = BTreeMap::<String, u16>::new();
             add_terms(&mut own, search_terms(entry.id.as_str()), FIELD_ID);
@@ -1619,6 +1632,7 @@ impl SearchTermIndex {
             postings,
             entries: keys,
             positions,
+            namespaces,
             ids_match_keys,
         }
     }
@@ -1646,12 +1660,11 @@ impl SearchTerms {
     }
 
     /// Posting lists of the query terms, in term order.
-    fn posting_lists<'a>(&self, searchable: &'a SearchTermIndex) -> Vec<&'a [Posting]> {
+    fn lists<'a>(&self, searchable: &'a SearchTermIndex) -> impl Iterator<Item = &'a [Posting]> {
         self.terms
             .iter()
-            .filter_map(|term| searchable.dictionary.get(term))
-            .map(|id| searchable.postings[*id as usize].as_slice())
-            .collect()
+            .filter_map(move |term| searchable.dictionary.get(term))
+            .map(move |id| searchable.postings[*id as usize].as_slice())
     }
 
     /// Rank of one entry counting only admitted grouped operations, or
@@ -1664,26 +1677,31 @@ impl SearchTerms {
         query: &AiCapabilitySearchQuery,
         admits: &dyn Fn(usize) -> bool,
     ) -> Option<SearchRank> {
-        let mut root_semantics = 0_u64;
-        let mut nested_semantics = 0_u64;
-        for term in &self.terms {
-            let Some(id) = searchable.dictionary.get(term) else {
-                continue;
-            };
-            let postings = &searchable.postings[*id as usize];
-            if let Ok(found) = postings.binary_search_by_key(&position, |posting| posting.entry) {
-                let (root, nested) = field_weights(postings[found].fields(admits));
-                root_semantics += root;
-                nested_semantics += nested;
-            }
-        }
         self.filtered_rank(
             &searchable.entries[position as usize],
             entry,
             query,
-            (root_semantics, nested_semantics),
+            Self::score_at(self.lists(searchable), position, |posting| {
+                posting.fields(admits)
+            }),
             admits,
         )
+    }
+
+    fn score_at<'a>(
+        lists: impl IntoIterator<Item = &'a [Posting]>,
+        position: u32,
+        fields: impl Fn(&Posting) -> u16,
+    ) -> (u32, u32) {
+        let mut score = (0, 0);
+        for list in lists {
+            if let Ok(found) = list.binary_search_by_key(&position, |posting| posting.entry) {
+                let (root, nested) = field_weights(fields(&list[found]));
+                score.0 += root;
+                score.1 += nested;
+            }
+        }
+        score
     }
 
     fn filtered_rank(
@@ -1691,7 +1709,7 @@ impl SearchTerms {
         keys: &EntrySearchKeys,
         entry: &AiCapabilityIndexEntry,
         query: &AiCapabilitySearchQuery,
-        (root_semantics, nested_semantics): (u64, u64),
+        (root_semantics, nested_semantics): (u32, u32),
         admits: &dyn Fn(usize) -> bool,
     ) -> Option<SearchRank> {
         let admitted_operations = || {
@@ -1728,19 +1746,39 @@ impl SearchTerms {
     }
 }
 
+// Every possible combination of the nine posting fields. Each field adds
+// its fixed weight once, even if several roots contributed it.
+const FIELD_WEIGHTS: [(u8, u8); 1 << 9] = {
+    let mut weights = [(0, 0); 1 << 9];
+    let mut mask = 0;
+    while mask < weights.len() {
+        let mut field = 0;
+        while field < ROOT_FIELD_WEIGHTS.len() {
+            let (bit, weight) = ROOT_FIELD_WEIGHTS[field];
+            if mask & bit as usize != 0 {
+                weights[mask].0 += weight;
+            }
+            field += 1;
+        }
+        field = 0;
+        while field < NESTED_FIELD_WEIGHTS.len() {
+            let (bit, weight) = NESTED_FIELD_WEIGHTS[field];
+            if mask & bit as usize != 0 {
+                weights[mask].1 += weight;
+            }
+            field += 1;
+        }
+        mask += 1;
+    }
+    weights
+};
+
 /// Summed fixed root and nested weights of a field mask.
-fn field_weights(fields: u16) -> (u64, u64) {
-    let root = ROOT_FIELD_WEIGHTS
-        .iter()
-        .filter(|(field, _)| fields & field != 0)
-        .map(|(_, weight)| u64::from(*weight))
-        .sum();
-    let nested = NESTED_FIELD_WEIGHTS
-        .iter()
-        .filter(|(field, _)| fields & field != 0)
-        .map(|(_, weight)| u64::from(*weight))
-        .sum();
-    (root, nested)
+fn field_weights(fields: u16) -> (u32, u32) {
+    #[cfg(test)]
+    WEIGHED_SEARCH_POSTINGS.with(|count| count.set(count.get() + 1));
+    let (root, nested) = FIELD_WEIGHTS[usize::from(fields)];
+    (u32::from(root), u32::from(nested))
 }
 
 /// Executable roots of one index, each a standalone entry: every
@@ -1823,8 +1861,10 @@ impl Eq for SearchTermCache {}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SearchRank {
-    root_semantics: u64,
-    nested_semantics: u64,
+    // The validated query contains at most 1,024 bytes, so the total
+    // fixed field weights across all of its terms fit in u32.
+    root_semantics: u32,
+    nested_semantics: u32,
     shape: u8,
 }
 
@@ -1834,32 +1874,21 @@ impl SearchRank {
     }
 }
 
-/// Ranks every matching entry of `indexes` against one query, counting
-/// every grouped operation of an entity entry.
-///
-/// Only the query text is tokenised. Each entry is scored from the postings
-/// of the query's terms, precomputed when its index was compiled, with fixed
-/// per-field weights. An entry's score depends only on the query and that
-/// entry's own metadata, never on any other entry.
-fn rank_entries<'a>(
-    indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
-    query: &AiCapabilitySearchQuery,
-) -> Vec<(&'a AiCapabilityIndex, &'a AiCapabilityIndexEntry)> {
-    ranked_entries(indexes, query)
-        .into_iter()
-        .map(|(_, index, entry)| (index, entry))
-        .collect()
+struct RankedEntry<'a> {
+    rank: SearchRank,
+    index: &'a AiCapabilityIndex,
+    entry: &'a AiCapabilityIndexEntry,
+    // Entry ordinal in the owning view, or MAX for a deserialized index
+    // with mismatched entry keys, which must compare the resolved IDs.
+    ordinal: u32,
 }
 
-type RankedEntry<'a> = (
-    SearchRank,
-    &'a AiCapabilityIndex,
-    &'a AiCapabilityIndexEntry,
-);
-
+/// Scores the matching postings with fixed per-field weights. An entry's
+/// score depends only on its own metadata and grouped operations.
 fn ranked_entries<'a>(
     indexes: impl IntoIterator<Item = &'a AiCapabilityIndex>,
     query: &AiCapabilitySearchQuery,
+    maximum: Option<usize>,
 ) -> Vec<RankedEntry<'a>> {
     let terms = SearchTerms::parse(query);
     let mut ranked = Vec::new();
@@ -1873,7 +1902,7 @@ fn ranked_entries<'a>(
             &mut ranked,
         );
     }
-    sort_ranked(&mut ranked);
+    sort_ranked(&mut ranked, maximum);
     ranked
 }
 
@@ -1885,16 +1914,57 @@ fn rank_view<'a>(
     searchable: &SearchTermIndex,
     ranked: &mut Vec<RankedEntry<'a>>,
 ) {
-    let postings = terms.posting_lists(searchable);
-    let mut push_rank = |keys: &EntrySearchKeys, entry: &'a AiCapabilityIndexEntry, score| {
+    if searchable.ids_match_keys
+        && query
+            .namespace
+            .as_ref()
+            .is_some_and(|namespace| !searchable.namespaces.contains(namespace))
+    {
+        return;
+    }
+    let postings = terms.lists(searchable).collect::<Vec<_>>();
+    let mut push_rank = |position, entry: &'a AiCapabilityIndexEntry, score| {
+        let keys = &searchable.entries[position as usize];
         if let Some(rank) = terms.filtered_rank(keys, entry, query, score, &|_| true) {
-            ranked.push((rank, index, entry));
+            ranked.push(RankedEntry {
+                rank,
+                index,
+                entry,
+                ordinal: if searchable.ids_match_keys {
+                    position
+                } else {
+                    u32::MAX
+                },
+            });
         }
     };
+    if postings.is_empty() {
+        return;
+    }
     if searchable.ids_match_keys
-        && !postings.is_empty()
         && postings.iter().map(|list| list.len()).sum::<usize>() >= entries.len().div_ceil(2)
     {
+        if let Some(name) = &terms.name_key {
+            // An exact name can match the entity, its own operation or any
+            // grouped root. Test those keys before reading broad postings.
+            for (position, keys) in searchable.entries.iter().enumerate() {
+                if (&keys.operation_key == name
+                    || keys.entity_key.as_ref() == Some(name)
+                    || keys.operation_keys.contains(name))
+                    && let Some(entry) = entries.get(&keys.id)
+                {
+                    let position = position as u32;
+                    push_rank(
+                        position,
+                        entry,
+                        SearchTerms::score_at(postings.iter().copied(), position, |posting| {
+                            posting.all
+                        }),
+                    );
+                }
+            }
+            return;
+        }
         // The dense path walks the same BTree order used to assign positions.
         // Its score buffer is local to this index. Sparse matches still avoid
         // visiting the rest of the index.
@@ -1905,13 +1975,13 @@ fn rank_view<'a>(
             score.0 += root;
             score.1 += nested;
         }
-        for ((keys, entry), score) in searchable.entries.iter().zip(entries.values()).zip(scores) {
+        for (position, (entry, score)) in entries.values().zip(scores).enumerate() {
             if score != (0, 0) {
-                push_rank(keys, entry, score);
+                push_rank(position as u32, entry, score);
             }
         }
     } else {
-        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
+        let mut scores = BTreeMap::<u32, (u32, u32)>::new();
         for posting in postings.into_iter().flatten() {
             let (root, nested) = field_weights(posting.all);
             let score = scores.entry(posting.entry).or_default();
@@ -1921,19 +1991,34 @@ fn rank_view<'a>(
         for (position, score) in scores {
             let keys = &searchable.entries[position as usize];
             if let Some(entry) = entries.get(&keys.id) {
-                push_rank(keys, entry, score);
+                push_rank(position, entry, score);
             }
         }
     }
 }
 
-fn sort_ranked(ranked: &mut [RankedEntry<'_>]) {
-    ranked.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.2.id.cmp(&right.2.id))
-    });
+fn sort_ranked(ranked: &mut Vec<RankedEntry<'_>>, maximum: Option<usize>) {
+    let compare = |left: &RankedEntry<'_>, right: &RankedEntry<'_>| {
+        right.rank.cmp(&left.rank).then_with(|| {
+            if left.ordinal != u32::MAX
+                && right.ordinal != u32::MAX
+                && std::ptr::eq(left.index, right.index)
+            {
+                left.ordinal.cmp(&right.ordinal)
+            } else {
+                left.entry.id.cmp(&right.entry.id)
+            }
+        })
+    };
+    // Only index-only search supplies a limit. Broker callers must receive
+    // the complete ordered ranking before asking the host for decisions.
+    if let Some(maximum) = maximum
+        && maximum < ranked.len()
+    {
+        ranked.select_nth_unstable_by(maximum, compare);
+        ranked.truncate(maximum);
+    }
+    ranked.sort_unstable_by(compare);
 }
 
 /// Ranks every executable root of `indexes` on its own metadata
@@ -1955,10 +2040,10 @@ fn rank_operation_entries<'a>(
             &mut ranked,
         );
     }
-    sort_ranked(&mut ranked);
+    sort_ranked(&mut ranked, None);
     ranked
         .into_iter()
-        .map(|(_, index, entry)| (index, entry))
+        .map(|hit| (hit.index, hit.entry))
         .collect()
 }
 
@@ -2800,6 +2885,7 @@ thread_local! {
     /// Number of entries an index-set compilation measured on this thread,
     /// for tests that prove a set reuses each member index's measurements.
     static MEASURED_SET_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WEIGHED_SEARCH_POSTINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn search_tokens(value: &str) -> Vec<String> {
@@ -3561,8 +3647,8 @@ mod tests {
         terms: &BTreeSet<String>,
         shape_intent: Option<AiCapabilityOperationShape>,
     ) -> SearchRank {
-        let mut root_semantics = 0_u64;
-        let mut nested_semantics = 0_u64;
+        let mut root_semantics = 0_u32;
+        let mut nested_semantics = 0_u32;
         let id = search_terms(entry.id.as_str());
         let name = search_terms(&entry.name);
         let mut operation = search_terms(&entry.operation_name);
@@ -3597,15 +3683,15 @@ mod tests {
             if search_shape_term(term) {
                 continue;
             }
-            root_semantics += u64::from(id.contains(term)) * 12;
-            root_semantics += u64::from(name.contains(term)) * 11;
-            root_semantics += u64::from(operation.contains(term)) * 10;
-            root_semantics += u64::from(entity.contains(term)) * 9;
-            root_semantics += u64::from(target.contains(term)) * 8;
-            root_semantics += u64::from(namespace.contains(term)) * 8;
-            root_semantics += u64::from(description.contains(term)) * 7;
-            nested_semantics += u64::from(relationships.contains(term)) * 3;
-            nested_semantics += u64::from(fields.contains(term)) * 2;
+            root_semantics += u32::from(id.contains(term)) * 12;
+            root_semantics += u32::from(name.contains(term)) * 11;
+            root_semantics += u32::from(operation.contains(term)) * 10;
+            root_semantics += u32::from(entity.contains(term)) * 9;
+            root_semantics += u32::from(target.contains(term)) * 8;
+            root_semantics += u32::from(namespace.contains(term)) * 8;
+            root_semantics += u32::from(description.contains(term)) * 7;
+            nested_semantics += u32::from(relationships.contains(term)) * 3;
+            nested_semantics += u32::from(fields.contains(term)) * 2;
         }
         SearchRank {
             root_semantics,
@@ -3728,6 +3814,7 @@ mod tests {
         let decoded: AiCapabilityIndex = serde_json::from_str(&encoded).expect("decode");
         assert!(decoded.search_terms.0.get().is_none());
         assert_eq!(decoded, compiled);
+        assert_eq!(serde_json::to_string(&decoded).expect("re-encode"), encoded);
         assert_eq!(decoded.fingerprint(), compiled.fingerprint());
         assert_eq!(
             decoded.search(&query("warehouse")).expect("decoded search"),
@@ -3797,6 +3884,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn complete_ranking_and_bounded_prefix_break_ties_by_capability_id() {
+        let compile = |target: &str, ids: [&str; 2]| {
+            AiCapabilityIndex::compile(
+                GraphqlExecutionTargetId::parse(target).expect("target"),
+                "schema-v1",
+                &semantic_catalogue(),
+                None,
+                None,
+                None,
+                ids.map(|id| descriptor(id, "Reconcile archived invoices.", 0)),
+                "policy-v1",
+                AiCapabilityIndexLimits::default(),
+            )
+            .expect("index")
+        };
+        let first = compile("alpha", ["records.a", "audit.d"]);
+        let second = compile("beta", ["audit.b", "records.c"]);
+        let set = AiCapabilityIndexSet::compile([first, second]).expect("set");
+        let mut query = query("reconcile");
+        query.maximum_results = 2;
+        for (namespace, expected) in [
+            (None, vec!["audit.b", "audit.d", "records.a", "records.c"]),
+            (Some("audit"), vec!["audit.b", "audit.d"]),
+        ] {
+            query.namespace = namespace.map(str::to_owned);
+            let ranked = set.ranked_matches(&query).expect("ranked matches");
+            assert_eq!(
+                ranked
+                    .iter()
+                    .map(|entry| entry.entry().id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let bounded = set.search(&query).expect("bounded search");
+            assert_eq!(bounded.index_set_fingerprint, set.fingerprint());
+            assert_eq!(
+                bounded.candidates,
+                ranked
+                    .iter()
+                    .take(2)
+                    .map(|entry| entry.candidate())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_scope_scores_only_matching_entry_postings() {
+        let index = synthetic_entity_index(40);
+        let set = AiCapabilityIndexSet::compile([Arc::new(index)]).expect("set");
+        let mut query = query("list inventory records");
+        query.namespace = Some("inventory".to_owned());
+        query.entity_or_operation = Some("synthetic014keyset".to_owned());
+
+        let expected = reference_ranking(&[set.indexes().next().expect("index")], &query);
+        assert_eq!(expected.len(), 1, "grouped operation must match the name");
+        WEIGHED_SEARCH_POSTINGS.with(|count| count.set(0));
+        let ranked = set.ranked_matches(&query).expect("ranked matches");
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|entry| entry.entry().id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(WEIGHED_SEARCH_POSTINGS.with(std::cell::Cell::get) <= 2);
     }
 
     #[test]
@@ -4122,22 +4278,22 @@ mod tests {
             "count Synthetic002aggregate",
         ] {
             let query = query(text);
-            let small_ranks = ranked_entries([&small], &query)
+            let small_ranks = ranked_entries([&small], &query, None)
                 .into_iter()
-                .map(|(rank, _, entry)| (entry.id.clone(), rank))
+                .map(|hit| (hit.entry.id.clone(), hit.rank))
                 .collect::<Vec<_>>();
-            let large_ranks = ranked_entries([&large], &query)
+            let large_ranks = ranked_entries([&large], &query, None)
                 .into_iter()
-                .map(|(rank, _, entry)| (entry.id.clone(), rank))
+                .map(|hit| (hit.entry.id.clone(), hit.rank))
                 .collect::<BTreeMap<_, _>>();
             assert!(!small_ranks.is_empty(), "{text:?}");
             for (id, rank) in &small_ranks {
                 assert_eq!(large_ranks.get(id), Some(rank), "{text:?} {id:?}");
             }
             let small_order = small_ranks.iter().map(|(id, _)| id).collect::<Vec<_>>();
-            let large_order = ranked_entries([&large], &query)
+            let large_order = ranked_entries([&large], &query, None)
                 .into_iter()
-                .map(|(_, _, entry)| &entry.id)
+                .map(|hit| &hit.entry.id)
                 .filter(|id| small.entries.contains_key(*id))
                 .collect::<Vec<_>>();
             assert_eq!(

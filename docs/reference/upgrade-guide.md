@@ -68,6 +68,8 @@ changelog to decide.
 
 ### Unreleased
 
+- **No action** — AI tool profiles 0.40.0 (#551). Scoped discovery and bounded index search do less ranking work. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0400-capability-discovery-ranking)
+
 - **No action** — AI 0.178.0 (#551). Discovery allocates less while constructing ordered host-policy batches. [Migration](../../crates/graphql-orm-ai/MIGRATION.md#internal-discovery-batching-551)
 - **No action** — AI tool profiles 0.39.0 (#551). Broad discovery uses dense score accumulation and grouped root metadata uses one lookup per entity. [Migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0390-discovery-ranking)
 

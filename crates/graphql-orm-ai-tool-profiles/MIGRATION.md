@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.40.0 capability discovery ranking
+
+**No action.** Index searches compute the same fixed scores and select the
+same candidates. The broker receives the complete ordered match list for
+current policy, including grouped roots. Serialized indexes and fingerprints
+are compatible. No data migration is needed.
+
 ## 0.39.0 discovery ranking
 
 **No action.** Discovery uses dense scores for broad posting lists. Fixed

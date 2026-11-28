@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.40.0
+
+- Use entry ordinals to break search ties within each target, skip irrelevant
+  postings for exact scopes, and select the bounded prefix for index-only
+  search (#551). [Migration](MIGRATION.md#0400-capability-discovery-ranking)
+
 ## Unreleased - 0.39.0
 
 - Discovery uses dense scores for broad posting lists and reads each
