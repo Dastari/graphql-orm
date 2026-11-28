@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+[explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
 Version 0.242.0 shares field-policy checks and output handling for
 ordinary generated entity objects.
 [Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).

@@ -72,6 +72,10 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.241.0**; **`graphql-orm-macros` 0.241.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
+- **No action** — ORM/macros 0.243.0 and operation catalogue 0.18.0 add
+  opt-in handwritten relationship registrations for resolver catalogue v1
+  (#934). [Migration](../../MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
+
 - **No action** — ORM/macros 0.242.0 reduce compile cost for ordinary generated entity fields (#677, #358). [Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
 
 - **No action** — ORM/macros 0.241.0 add opt-in `time::OffsetDateTime` entity fields with backend timestamp clocks for upserts and PostgreSQL session time-zone handling for filters and text reads (#768). [Migration](../../MIGRATION.md#02410-opt-in-host-timestamps-with-time)
