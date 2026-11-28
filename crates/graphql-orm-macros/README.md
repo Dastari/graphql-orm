@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.244.0 aligns with
+[ORM 0.244.0](../../MIGRATION.md#02440-orm-compiler-diagnostics).
+
 Version 0.241.0 adds `#[graphql_orm(time_offset_datetime)]` for persisted
 `time::OffsetDateTime` and `Option<time::OffsetDateTime>` fields when the ORM
 `time` feature is enabled. See the

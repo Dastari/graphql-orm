@@ -1491,7 +1491,7 @@ fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_gra
         .map_err(|_| committed_error("mutation_payload_failed"))?;
     prepared
         .response_bytes
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
             used.checked_add(bytes).filter(|total| *total <= maximum)
         })
         .map_err(|_| committed_error("mutation_payload_failed"))?;

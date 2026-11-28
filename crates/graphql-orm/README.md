@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.244.0 resolves two Rust 1.99 diagnostics while retaining support for
+Rust 1.97.1. [Migration](../../MIGRATION.md#02440-orm-compiler-diagnostics).
+
 Version 0.240.0 shares the field-policy checks for generated GraphQL upsert
 and create on upsert-enabled entities.
 [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).

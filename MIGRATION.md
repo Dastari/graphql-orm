@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.244.0: ORM compiler diagnostics
+
+**No action.** Upgrade ORM and macros together. The ORM removes a needless
+borrow in authorized pagination and uses `AtomicUsize::try_update` to reserve
+runtime mutation response bytes. Rust 1.97.1 remains the supported baseline.
+
 ## 0.241.0: Opt-in host timestamps with `time`
 
 **No action** for existing entities. The `chrono` feature is implied by
