@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased - ORM/macros 0.244.0
+
+- **No action** (refs #107). Remove two Rust 1.99 diagnostics in authorized
+  pagination and runtime mutation response accounting.
+  [Migration](MIGRATION.md#02440-orm-compiler-diagnostics)
+
 ## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
 
 - **No action** (refs #934). Hosts can explicitly register handwritten

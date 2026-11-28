@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.244.0 resolves two Rust 1.99 diagnostics while retaining support for
+Rust 1.97.1. [Migration](../../MIGRATION.md#02440-orm-compiler-diagnostics).
+
 Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
 [explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
 
