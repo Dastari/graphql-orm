@@ -72,6 +72,7 @@ Changes merged to main after the latest workspace release.
 
 Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.241.0**; **`graphql-orm-macros` 0.241.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
+- **No action** — AI 0.169.0 reorganizes operational telemetry source files and preserves existing exporter APIs (#506). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01680-to-01690-operational-telemetry)
 - **No action** — ORM/macros 0.243.0 and operation catalogue 0.18.0 add
   opt-in handwritten relationship registrations for resolver catalogue v1
   (#934). [Migration](../../MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
