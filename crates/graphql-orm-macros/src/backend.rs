@@ -171,6 +171,14 @@ pub(crate) fn backend_current_text_timestamp_expr(backend: BackendKind) -> &'sta
     }
 }
 
+pub(crate) fn backend_current_offset_datetime_expr(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Postgres => "NOW()",
+        BackendKind::Mssql => "SYSDATETIMEOFFSET()",
+        BackendKind::Sqlite => backend_current_text_timestamp_expr(backend),
+    }
+}
+
 pub(crate) fn backend_quote_identifier(backend: BackendKind, identifier: &str) -> String {
     if backend != BackendKind::Mssql || backend_is_one_delimited_identifier(backend, identifier) {
         identifier.to_string()

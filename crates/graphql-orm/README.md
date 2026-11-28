@@ -10,6 +10,22 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
+[explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
+
+Version 0.242.0 shares field-policy checks and output handling for
+ordinary generated entity objects.
+[Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields).
+
+Version 0.240.0 shares the field-policy checks for generated GraphQL upsert
+and create on upsert-enabled entities.
+[Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies).
+
+Version 0.238.0 shares the SQL of nested closure read predicates over stable
+filters and relations. Handwritten SQL shares evaluation sites only with an
+explicit host guarantee.
+[Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets).
+
 Version 0.237.0 derives the authority of a generated GraphQL write from the
 entity's configuration, issues it only after target admission and binds it to
 one request, operation and `Database`. Generated mutations are unchanged.
@@ -21,11 +37,11 @@ See the [migration guide](../../MIGRATION.md#10-validate-default-sorts-against-p
 
 SQL Server index introspection and migration plans distinguish covering
 indexes from their plain-key equivalents.
-See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
+See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02440).
 
 In the next breaking ORM/macros release, SQL Server pools with native temporal
 text binding enabled reject generated keyset orders on String-valued temporal
-fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
+fields. See the [migration guide](../../MIGRATION.md#breaking-release-unreleased-ormmacros-02440).
 
 Version 0.235.0 preserves authorized direct queries for generated
 relations without a compatible registered loader. See
@@ -1108,6 +1124,38 @@ select `TransactionMode::StateMachine` automatically; an upsert composed inside
 decision is fenced across every backend. See [runtime writes and repository
 operations](../../docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
 
+### Host timestamps with `time`
+
+Add `"time"` to the ORM dependency's features alongside your backend (for
+example, `features = ["postgres", "time"]`) and add
+`time = { version = "0.3", features = ["serde"] }` for entity serialization.
+The ORM feature enables the SQLx and async-graphql `time` integrations.
+PostgreSQL and SQL Server continue to imply the ORM's `chrono` feature.
+Both host features can be enabled together. Hosts that expose chrono scalars
+continue selecting async-graphql's `chrono` feature directly.
+
+```rust
+use graphql_orm::prelude::*;
+use time::OffsetDateTime;
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "reservations", plural = "Reservations", lifetime(field = "expires_at"))]
+struct Reservation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    #[graphql_orm(time_offset_datetime)]
+    expires_at: Option<OffsetDateTime>,
+}
+```
+
+The attribute selects `TIMESTAMPTZ` on PostgreSQL, `DATETIMEOFFSET` on
+SQL Server, and RFC 3339 `TEXT` on SQLite. Fields without the attribute
+keep their previous column mapping. An opted-in field can declare
+`rfc3339_utc` lifetime metadata. See the
+[migration notes](../../MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+for storage, precision and GraphQL wire behavior.
+
 ## Read snapshot transactions
 
 Pass `TransactionMode::ReadSnapshot` to `Database::transaction` or
@@ -1206,6 +1254,9 @@ schema_roots! {
     entities: [Account],
 }
 ```
+
+The `plural` override also contributes to the Rust type names for
+generated bulk mutation results, such as `UpdateAccountsResult`.
 
 This declares the types and schema builders. Connect a
 `Database::<SqliteBackend>`, choose whether to validate/plan/apply schema, and

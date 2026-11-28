@@ -86,7 +86,7 @@ changelog to decide.
 - **No action** — AI 0.172.0 (#551). The capability context benchmark adds deterministic question-to-execute measurements at 400 and 40,000 entries. [Benchmark](../../crates/graphql-orm-ai/docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark)
 
 - **Action needed** — AI 0.171.0 and AI tool profiles 0.36.0 (#551). Fixed-broker sessions can opt in to generated subscriptions as durable waits (`with_brokered_subscriptions`, routed to `register_wait` with `with_capability_delivery` on a wait service built `with_capability_broker`, which re-admits the wait at every claim, delivery and resumption). Configure a broker revocation version and implement final admission on checkpoint adapters. Host-driven turns must apply final admission before dispatch. The discover and execute broker fingerprints change, rule allowlists admit subscriptions by capability fingerprint, a removed or replaced subscription or broker entry closes its wait as `capability_stale` (also recorded by the coordinators at resumption), and an unreachable loaded reference is `selection_stale`. This completes the #551 broker scope. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#generated-subscriptions-through-the-capability-broker-551)
-- **Action needed** — ORM/macros 0.238.0 validate `default_sort` against persisted columns. Regenerate catalogues and refresh pinned interpretation fingerprints. SQL Server hosts must also refresh generated runtime schema documents and references that use the old inferred default-order field IDs (#542, #942). [Migration](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942)
+- **Action needed** — ORM/macros 0.244.0 validate `default_sort` against persisted columns. Regenerate catalogues and refresh pinned interpretation fingerprints. SQL Server hosts must also refresh generated runtime schema documents and references that use the old inferred default-order field IDs (#542, #942). [Migration](../../MIGRATION.md#10-validate-default-sorts-against-persisted-columns-542-942)
 - **Action needed** — AI 0.170.0. Fixed-broker discover and describe drop `indexFingerprint` and `candidateFingerprint`; describe requires `capabilityId` and a run-bound `candidateReference`, the describe definition fingerprint changes, the discovery cache no longer spans runs, `capability_stale` follows only what the principal is shown, and the discovery ceiling counts only the admitted view. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#run-bound-discover-candidate-references)
 - **Action needed** — AI tool profiles 0.35.0. Capabilities and index entries gain `contract_fingerprint`; index, index-set and entry fingerprints change once. [AI tool profiles migration](../../crates/graphql-orm-ai-tool-profiles/MIGRATION.md#0340-capability-contract-fingerprints)
 - **Action needed** — AI 0.170.0 (#880). Review and explicitly authorize replacement of a customized SQL Server covering legacy approval index. [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#sql-server-covering-approval-lookup-index)
@@ -101,7 +101,45 @@ changelog to decide.
 
 Changes merged to main after the latest workspace release.
 
-Versions on main (bold where they differ from the latest release): `graphql-orm` 0.236.0; `graphql-orm-macros` 0.236.0; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+Versions on main (bold where they differ from the latest release): **`graphql-orm` 0.243.0**; **`graphql-orm-macros` 0.243.0**; **`graphql-orm-operation-catalog` 0.18.0**; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+
+- **No action** — AI 0.169.0 reorganizes operational telemetry source files and preserves existing exporter APIs (#506). [AI migration](../../crates/graphql-orm-ai/MIGRATION.md#01680-to-01690-operational-telemetry)
+- **No action** — ORM/macros 0.243.0 and operation catalogue 0.18.0 add
+  opt-in handwritten relationship registrations for resolver catalogue v1
+  (#934). [Migration](../../MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
+
+### workspace-2026.11.28.1
+
+Commit `b7c834b546dc` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.28.1)
+
+Packages (changed in bold): **`graphql-orm` 0.242.0**; **`graphql-orm-macros` 0.242.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+
+- **No action** — ORM/macros 0.242.0 reduce compile cost for ordinary generated entity fields (#677, #358). [Migration](../../MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
+- **No action** — ORM/macros 0.241.0 add opt-in `time::OffsetDateTime` entity fields with backend timestamp clocks for upserts and PostgreSQL session time-zone handling for filters and text reads (#768). [Migration](../../MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+
+### workspace-2026.11.27.4
+
+Commit `5f2f668bebd1` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.27.4)
+
+Packages (changed in bold): **`graphql-orm` 0.240.0**; **`graphql-orm-macros` 0.240.0**; `graphql-orm-operation-catalog` 0.17.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+
+- **No action** — ORM/macros 0.240.0 share the generated GraphQL create and upsert field-policy checks for upsert-enabled entities (#677, #724). [Migration](../../MIGRATION.md#02400-shared-create-and-upsert-field-policies)
+- **No action** — ORM/macros 0.239.0 report invalid plural overrides on the attribute value (#542). [Migration](../../MIGRATION.md#02390-plural-name-diagnostics)
+
+### workspace-2026.11.27.3
+
+Commit `c15eb4f11c4e` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.27.3)
+
+Packages (changed in bold): **`graphql-orm` 0.238.0**; **`graphql-orm-macros` 0.238.0**; **`graphql-orm-operation-catalog` 0.17.0**; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
+
+- **No action** — ORM/macros 0.238.0 share nested read-predicate closure SQL for stable filters and relations. Handwritten SQL keeps its evaluation sites by default (#785). [Migration](../../MIGRATION.md#02370-to-02380-nested-closure-targets)
+- **No action** — Operation catalogue 0.17.0 adds opt-in receiver binding for reviewed resolver catalogue v1 exports (#934). [Migration](../../MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
+
+### workspace-2026.11.27.2
+
+Commit `a0ca62a03a2b` · [release notes](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.11.27.2)
+
+Packages (changed in bold): **`graphql-orm` 0.237.0**; **`graphql-orm-macros` 0.237.0**; `graphql-orm-operation-catalog` 0.16.0; `graphql-orm-storage` 0.20.0; `graphql-orm-backup` 0.33.0; `graphql-orm-ai-tool-profiles` 0.32.0; `graphql-orm-ai` 0.168.0; `graphql-orm-router-protocol` 0.4.0; `graphql-orm-router` 0.22.0.
 
 - **No action** — ORM/macros 0.237.0 derive the generated write authority from the entity's configuration, issue it only after target admission and bind it to one request, invocation, operation, `Database`, transaction and the admitted rows (#921). A generated write always enforces its own root field's assurance requirement, and a single-row update's `Before` hook id is the stored key. **Action needed** only for a custom resolver that calls a generated mutation resolver method, or host code that calls the hidden write-pipeline functions. [Migration](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority)
 - **No action** — ORM/macros 0.237.0 refuse a denied conflict-field write on an inserting upsert even when the field policy opts into omission (#921). [Migration](../../MIGRATION.md#02360-to-02370-bound-generated-write-authority)

@@ -1097,6 +1097,7 @@ pub trait GraphqlCustomOperationMetadata {
 
 /// Local declaration provenance for semantic catalogue composition by `schema_roots!`.
 #[doc(hidden)]
+#[derive(Clone, Copy)]
 pub struct GraphqlSemanticEntitySource {
     metadata: &'static GraphqlEntitySemanticMetadata,
     type_id: Option<TypeId>,
@@ -1116,6 +1117,11 @@ impl GraphqlSemanticEntitySource {
     /// Returns the original declaration before schema-level bindings.
     pub const fn metadata(&self) -> &'static GraphqlEntitySemanticMetadata {
         self.metadata
+    }
+
+    /// Returns the Rust type name when this declaration captured a concrete type.
+    pub fn rust_type_name(&self) -> Option<&'static str> {
+        self.type_id.map(|_| self.source_name)
     }
 }
 

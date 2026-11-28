@@ -497,6 +497,15 @@ pub fn date_filter_matches_at(
     date_filter_truth_at(value, filter, today) == Some(true)
 }
 
+/// Encode an opted-in SQLite timestamp as the SQLx text binder does.
+#[cfg(all(feature = "sqlite", feature = "time"))]
+#[doc(hidden)]
+pub fn sqlite_offset_datetime_text(value: &time::OffsetDateTime) -> Option<String> {
+    value
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
 /// Evaluate a date filter with SQL's true/false/unknown semantics.
 #[doc(hidden)]
 pub fn date_filter_truth_at(
@@ -568,10 +577,10 @@ pub fn date_filter_truth_at(
         }
     }
 
-    if date_filter_has_calendar_predicate(filter) {
+    if filter.has_calendar_predicate() {
         use crate::temporal;
 
-        let Some(value) = temporal::parse_calendar(value) else {
+        let Some((value, _)) = temporal::parse_calendar(value) else {
             return Some(false);
         };
         let value = value.ordering_key();
@@ -636,17 +645,7 @@ fn date_filter_has_value_predicate(filter: &crate::graphql::filters::DateFilter)
         || filter.gt.is_some()
         || filter.gte.is_some()
         || filter.between.is_some()
-        || date_filter_has_calendar_predicate(filter)
-}
-
-fn date_filter_has_calendar_predicate(filter: &crate::graphql::filters::DateFilter) -> bool {
-    filter.in_past == Some(true)
-        || filter.in_future == Some(true)
-        || filter.is_today == Some(true)
-        || filter.recent_days.is_some()
-        || filter.within_days.is_some()
-        || filter.gte_relative.is_some()
-        || filter.lte_relative.is_some()
+        || filter.has_calendar_predicate()
 }
 
 fn calendar_day(date: chrono::NaiveDate, days: i32) -> Option<(i64, u32)> {

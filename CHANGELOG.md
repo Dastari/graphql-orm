@@ -14,7 +14,7 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## Unreleased - ORM/macros 0.238.0 (breaking release)
+## Unreleased - ORM/macros 0.244.0 (breaking release)
 
 - **Fixed (#942).** Batched relation loads preserve default ordering by
   columns whose names contain escaped identifier delimiters. On SQL Server,
@@ -39,7 +39,7 @@ for historical context.
   `ReadSnapshot` variant runs the same policy-aware, read-only transaction
   as the dedicated snapshot methods. The general callback supports generated
   transaction keysets and refuses access to the underlying pool.
-  See the [migration guide](MIGRATION.md#breaking-release-unreleased-ormmacros-02380).
+  See the [migration guide](MIGRATION.md#breaking-release-unreleased-ormmacros-02440).
 
 - **Breaking (#521):** SQL Server pools that opt into native temporal text
   binding refuse generated keyset orders on String-valued temporal fields.
@@ -50,6 +50,55 @@ for historical context.
   with a literal dot must be explicitly delimited as a single identifier.
   Generated DDL, reads, writes and row decoding use that column. Conditional
   indexes on literal dotted predicate columns round-trip on SQLite and PostgreSQL.
+
+## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
+
+- **No action** (refs #934). Hosts can explicitly register handwritten
+  relationship fields in resolver catalogue v1. Composition rejects invalid,
+  ambiguous, duplicate or conflicting registrations.
+  [Migration](MIGRATION.md#02430-handwritten-resolver-registrations-operation-catalogue-0180)
+
+## Unreleased - ORM/macros 0.242.0
+
+- **No action** (refs #677, #358). Ordinary generated entity objects share
+  GraphQL field dispatch, schema registration and field-policy handling to
+  reduce the amount of code compiled per entity.
+  [Migration](MIGRATION.md#02420-shared-dispatch-for-generated-entity-fields)
+
+## Unreleased - ORM/macros 0.241.0
+
+- **No action** (refs #768). Hosts can enable `time` and opt individual
+  `OffsetDateTime` fields into timestamp mapping and lifetime metadata.
+  [Migration](MIGRATION.md#02410-opt-in-host-timestamps-with-time)
+
+## Unreleased - ORM/macros 0.240.0
+
+- **No action** (refs #677, #724). Generated GraphQL upserts and creates on
+  the same entity share the declaration-ordered field-policy checks to reduce
+  generated code. [Migration](MIGRATION.md#02400-shared-create-and-upsert-field-policies)
+
+## Unreleased - ORM/macros 0.239.0
+
+- **No action** (refs #542). `GraphQLOperations` reports invalid plural
+  overrides at the attribute value when they prevent generation of bulk
+  mutation result types.
+
+## Unreleased - ORM/macros 0.238.0
+
+- **No action** (closes #785). Nested read-predicate closures share the
+  inner target's SQL for stable column tests, generated filters, and
+  relations. In nested closures, handwritten fragments keep their existing
+  evaluation sites unless the host supplies a stability guarantee. The
+  composition limits are measured on the rendered SQL, so some nested
+  compositions previously refused with `AUTHORIZATION_MISCONFIGURED` now build.
+  [Migration](MIGRATION.md#02370-to-02380-nested-closure-targets)
+
+## Unreleased - operation catalogue 0.17.0
+
+- **No action** (refs #934, item 3). Add an opt-in receiver pin for resolver
+  catalogue v1 exports and descriptor extensions. The pin rejects missing,
+  unsupported, stale or mismatched catalogues.
+  [Migration](MIGRATION.md#0160-to-0170-resolver-catalogue-receiver-binding)
 
 ## Unreleased - ORM/macros 0.237.0
 

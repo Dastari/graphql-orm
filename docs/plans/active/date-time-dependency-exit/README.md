@@ -517,6 +517,7 @@ legacy spellings.
 The `humantime` exception now identifies its dependency path.
 
 The maintainer approved the separate host features and explicit
-`OffsetDateTime` mapping on 2026-11-24. That opt-in host API is the next
-additive step. The `TemporalKind` and `CalendarDate` changes follow on
+`OffsetDateTime` mapping on 2026-11-24. ORM/macros 0.241.0 adds the host
+features, opt-in mapping, and lifetime metadata. The `TemporalKind` and
+`CalendarDate` changes follow on
 `next/breaking`. The dependency exceptions retain their 2027-02-17 review.

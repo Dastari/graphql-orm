@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.178.0 (breaking release)
+## Unreleased - 0.179.0 (breaking release)
 
 - Discovery presizes policy batches and processes contiguous ranked slices,
   reducing temporary allocations before applying the result limit (#551).
@@ -263,6 +263,13 @@ supersedes: []
   triggers a forced tree kill, and attempted writes retire their request IDs.
   The protocol actor still allowlists lifecycle metadata in thread and turn
   snapshots and user-message echoes. No data migration is needed.
+
+## Unreleased - 0.169.0
+
+- Split operational telemetry into modules for provider and tool calls and
+  runtime lifecycle observations. Move its three unit tests out of production
+  source files. Export paths, event names, and payloads stay the same (#506).
+  [Migration](MIGRATION.md#01680-to-01690-operational-telemetry)
 
 ## Unreleased - 0.168.0
 

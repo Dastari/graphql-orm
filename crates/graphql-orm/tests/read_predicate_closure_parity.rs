@@ -12,7 +12,9 @@
 //! identical sets. The rows cover cycles, self-loops, chains longer than the
 //! bound, unreachable and partially NULL pointers, roots, UNKNOWN targets and
 //! non-unique (fan-out) composite keys. The cases cover both quantifiers,
-//! `not()`, several bounds and nested closures.
+//! `not()`, several bounds and nested closures, and closures whose target
+//! holds a closure beside or inside a relation, a hand-written fragment or a
+//! generated filter with a relation predicate.
 //!
 //! The run prints a fingerprint of every admitted set, which is the same on
 //! every backend.
@@ -27,7 +29,9 @@ mod owned_mssql;
 #[allow(dead_code)]
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
+use graphql_orm::graphql::orm::{FilterExpression, RelationFilterBudget};
 use graphql_orm::prelude::*;
+use std::collections::BTreeMap;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -57,6 +61,7 @@ struct ClosureParityNode {
     #[sortable]
     id: i64,
     parent_id: Option<i64>,
+    #[filterable(type = "number")]
     score: Option<i64>,
     key_a: Option<i64>,
     key_b: Option<i64>,
@@ -64,6 +69,16 @@ struct ClosureParityNode {
     ptr_b: Option<i64>,
     name: Option<String>,
     label: Option<String>,
+    /// The row this one points at, for generated relation filters.
+    #[relation(
+        target = "ClosureParityNode",
+        from = "parent_id",
+        to = "id",
+        multiple,
+        filter,
+        emit_fk = false
+    )]
+    parents: Vec<ClosureParityNode>,
 }
 
 /// Text pointers and keys under declared collations. `ptr`/`tag` pair a
@@ -154,11 +169,129 @@ enum Target {
     And(Box<Target>, Box<Target>),
     Or(Box<Target>, Box<Target>),
     Closure(ReadPredicateQuantifier, Keys, Box<Target>, u32),
+    /// The inner target (column tests, `And` and `Or`) written by hand: a
+    /// tree of `__gom_self.<column>` fragments.
+    Written(Box<Target>),
+    /// `ReadPredicate::related` over the same table: some row whose key
+    /// equals this row's pointer matches the target.
+    Related(Keys, Box<Target>),
+    /// A generated where input with a relation predicate: some parent has
+    /// `score >= .0`, and this row has `score < .1` when given.
+    ParentFilter(i32, Option<i32>),
+    /// SQLite only: the hand-written `score & 4`, which is 4 (TRUE, and not
+    /// 1) for score 5, 0 for score 1 and NULL for a NULL score.
+    #[cfg(feature = "sqlite")]
+    ScoreBit,
 }
-use Target::{And, AtLeast, Below, Closure, Not, Or, ScoreIsNull};
+use Target::{And, AtLeast, Below, Closure, Not, Or, ParentFilter, Related, ScoreIsNull, Written};
+
+/// A hand-written filter over the nodes: an expression of fragments.
+struct Fragment(FilterExpression, bool);
+impl DatabaseFilter for Fragment {
+    fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
+        unreachable!("the filter returns its own expression")
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+impl ReadVisibilityFilter for Fragment {
+    fn entity_type_id() -> std::any::TypeId {
+        std::any::TypeId::of::<Node>()
+    }
+    fn backend() -> DatabaseBackend {
+        B::DIALECT
+    }
+    fn table_name() -> Option<&'static str> {
+        Some(Node::TABLE_NAME)
+    }
+    fn is_stable_for_closure(&self) -> bool {
+        self.1
+    }
+    fn to_row_bound_filter_expression(&self) -> Option<FilterExpression> {
+        Some(self.0.clone())
+    }
+}
+
+/// The generated where inputs behind [`Target::ParentFilter`], prepared with
+/// a request context as a resolver prepares them.
+const PARENT_FILTERS: [(i32, Option<i32>); 3] = [(5, None), (5, Some(5)), (1, None)];
+static PREPARED_FILTERS: std::sync::OnceLock<
+    BTreeMap<(i32, Option<i32>), ClosureParityNodeWhereInput>,
+> = std::sync::OnceLock::new();
+
+struct PrepareFilters;
+#[async_graphql::Object]
+impl PrepareFilters {
+    async fn prepare(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<bool> {
+        let mut prepared = BTreeMap::new();
+        for (at_least, below) in PARENT_FILTERS {
+            let score = |filter| Some(filter);
+            let mut filter = ClosureParityNodeWhereInput {
+                score: below.and_then(|below| {
+                    score(IntFilter {
+                        lt: Some(below),
+                        ..Default::default()
+                    })
+                }),
+                parents: Some(vec![ClosureParityNodeWhereInput {
+                    score: score(IntFilter {
+                        gte: Some(at_least),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            filter
+                .__gom_prepare_read(ctx, 0, &mut RelationFilterBudget::new())
+                .await?;
+            prepared.insert((at_least, below), filter);
+        }
+        // Every fixture prepares the same clauses.
+        let _ = PREPARED_FILTERS.set(prepared);
+        Ok(true)
+    }
+}
 
 impl Target {
+    /// This target as a hand-written filter expression.
+    fn fragment(&self) -> FilterExpression {
+        let score = |test: &str, values| {
+            FilterExpression::trusted_fragment(
+                format!(
+                    "__gom_self.{} {test}",
+                    B::DIALECT.delimited_column_identifier("score")
+                ),
+                values,
+            )
+        };
+        match self {
+            AtLeast(value) => score(">= ?", vec![SqlValue::Int(*value)]),
+            Below(value) => score("< ?", vec![SqlValue::Int(*value)]),
+            ScoreIsNull => score("IS NULL", Vec::new()),
+            #[cfg(feature = "sqlite")]
+            Target::ScoreBit => score("& 4", Vec::new()),
+            And(left, right) => FilterExpression::And(vec![left.fragment(), right.fragment()]),
+            Or(left, right) => FilterExpression::Or(vec![left.fragment(), right.fragment()]),
+            other => panic!("not a hand-written shape: {other:?}"),
+        }
+    }
+
     fn predicate(&self, legacy: bool) -> ReadPredicate {
+        self.build(legacy).unwrap()
+    }
+
+    /// The predicate, or the refusal of a composition over a budget.
+    fn build(&self, legacy: bool) -> async_graphql::Result<ReadPredicate> {
+        // The original rendering of every closure composed from the leaf.
+        let original = |predicate: ReadPredicate| {
+            if legacy {
+                predicate.__gom_original_closure_rendering()
+            } else {
+                predicate
+            }
+        };
         let score = |op, comparison, value| {
             if legacy {
                 closure_legacy::predicate::<B, Node>("score", comparison, SqlValue::Int(value))
@@ -166,23 +299,40 @@ impl Target {
                 ReadPredicate::column::<B, Node>("score", op, SqlValue::Int(value)).unwrap()
             }
         };
-        match self {
+        Ok(match self {
             AtLeast(value) => score(ReadPredicateOp::Gte, ">=", *value),
             Below(value) => score(ReadPredicateOp::Lt, "<", *value),
+            ScoreIsNull if legacy => closure_legacy::null_test::<B, Node>("score", true),
             ScoreIsNull => ReadPredicate::is_null::<B, Node>("score").unwrap(),
-            Not(target) => target.predicate(legacy).not().unwrap(),
-            And(left, right) => left.predicate(legacy).and(right.predicate(legacy)).unwrap(),
-            Or(left, right) => left.predicate(legacy).or(right.predicate(legacy)).unwrap(),
+            Written(target) => original(
+                ReadPredicate::from_filter::<B, _>(&Fragment(target.fragment(), true)).unwrap(),
+            ),
+            #[cfg(feature = "sqlite")]
+            Target::ScoreBit => original(
+                ReadPredicate::from_filter::<B, _>(&Fragment(self.fragment(), true)).unwrap(),
+            ),
+            Related(keys, target) => {
+                ReadPredicate::related::<B, Node, Node>(keys.columns(), target.build(legacy)?)?
+            }
+            ParentFilter(at_least, below) => original(
+                ReadPredicate::from_filter::<B, _>(
+                    &PREPARED_FILTERS.get().expect("the fixture prepares them")
+                        [&(*at_least, *below)],
+                )
+                .unwrap(),
+            ),
+            Not(target) => target.build(legacy)?.not()?,
+            And(left, right) => left.build(legacy)?.and(right.build(legacy)?)?,
+            Or(left, right) => left.build(legacy)?.or(right.build(legacy)?)?,
             Closure(quantifier, keys, target, depth) => {
                 ReadPredicate::related_closure_within::<B, Node>(
                     *quantifier,
                     keys.columns(),
-                    target.predicate(legacy),
+                    target.build(legacy)?,
                     *depth,
-                )
-                .unwrap()
+                )?
             }
-        }
+        })
     }
 
     /// The reference evaluator, per row: Kleene logic, `None` is UNKNOWN.
@@ -192,6 +342,48 @@ impl Target {
             AtLeast(value) => each(&|row| row.score.map(|score| score >= *value)),
             Below(value) => each(&|row| row.score.map(|score| score < *value)),
             ScoreIsNull => each(&|row| Some(row.score.is_none())),
+            Written(target) => target.truths(rows),
+            #[cfg(feature = "sqlite")]
+            Target::ScoreBit => each(&|row| row.score.map(|score| score & 4 != 0)),
+            // UNKNOWN with a NULL key column; otherwise the greatest truth
+            // among the related rows, and FALSE when there is none.
+            Related(keys, target) => {
+                let truths = target.truths(rows);
+                each(&|row| {
+                    let pointer = keys.pointer(row);
+                    if pointer.iter().any(Option::is_none) {
+                        return None;
+                    }
+                    let related = rows
+                        .iter()
+                        .zip(&truths)
+                        .filter(|(candidate, _)| keys.key(candidate) == pointer)
+                        .map(|(_, truth)| *truth)
+                        .collect::<Vec<_>>();
+                    if related.contains(&Some(true)) {
+                        Some(true)
+                    } else if related.contains(&None) {
+                        None
+                    } else {
+                        Some(false)
+                    }
+                })
+            }
+            // The generated relation clause is a plain `EXISTS`: TRUE or
+            // FALSE, never UNKNOWN. The row's own comparison is three-valued.
+            ParentFilter(at_least, below) => each(&|row| {
+                let parent = rows.iter().any(|candidate| {
+                    Some(candidate.id) == row.parent_id
+                        && candidate
+                            .score
+                            .is_some_and(|score| score >= i64::from(*at_least))
+                });
+                match below.map(|below| row.score.map(|score| score < i64::from(below))) {
+                    _ if !parent => Some(false),
+                    Some(own) => own,
+                    None => Some(true),
+                }
+            }),
             Not(target) => target
                 .truths(rows)
                 .into_iter()
@@ -319,6 +511,7 @@ fn rows() -> Vec<Node> {
         ptr_b: pointer.1,
         name: (id % 3 != 0).then(|| if id % 2 == 0 { "abc" } else { "ABC" }.to_owned()),
         label: (id % 5 != 0).then(|| "abc ".to_owned()),
+        parents: Vec::new(),
     };
     for id in 1..=85_i64 {
         let parent = match id {
@@ -455,6 +648,133 @@ fn composed_cases() -> Vec<(String, Target)> {
     cases
 }
 
+/// Closures whose target holds a closure together with a hand-written
+/// fragment, a relation or a generated filter with a relation predicate.
+/// Each is two closures deep, and each also runs negated.
+fn target_shape_cases() -> Vec<(String, Target)> {
+    use ReadPredicateQuantifier::{All, Any};
+    let mut cases = Vec::new();
+    for outer in [Any, All] {
+        for inner in [Any, All] {
+            let walk =
+                |keys, target, depth| Box::new(Closure(inner, keys, Box::new(target), depth));
+            let written = |target| Written(Box::new(target));
+            let related = |keys, target| Box::new(Related(keys, target));
+            let shapes = [
+                // A hand-written fragment as the inner closure's target,
+                // beside the inner closure, and under negations.
+                (
+                    "written",
+                    Keys::Parent,
+                    *walk(Keys::Composite, written(AtLeast(5)), 3),
+                ),
+                (
+                    "written tree and walk",
+                    Keys::FanOut,
+                    And(
+                        Box::new(written(Or(Box::new(Below(5)), Box::new(ScoreIsNull)))),
+                        walk(Keys::Parent, AtLeast(5), 2),
+                    ),
+                ),
+                (
+                    "not walk over not written",
+                    Keys::Parent,
+                    Not(walk(Keys::Parent, Not(Box::new(written(Below(5)))), 2)),
+                ),
+                // A relation around the inner closure: its truth is
+                // aggregated over the related rows.
+                (
+                    "related",
+                    Keys::Parent,
+                    *related(Keys::Parent, walk(Keys::FanOut, AtLeast(5), 2)),
+                ),
+                (
+                    "not related",
+                    Keys::Composite,
+                    Not(related(Keys::Composite, walk(Keys::Parent, Below(5), 1))),
+                ),
+                (
+                    "related or column",
+                    Keys::Parent,
+                    Or(
+                        related(Keys::FanOut, walk(Keys::Parent, AtLeast(5), 2)),
+                        Box::new(Below(5)),
+                    ),
+                ),
+                (
+                    "related and not related written",
+                    Keys::Parent,
+                    And(
+                        related(Keys::Parent, walk(Keys::Parent, AtLeast(5), 1)),
+                        Box::new(Not(related(
+                            Keys::Composite,
+                            Box::new(written(ScoreIsNull)),
+                        ))),
+                    ),
+                ),
+                (
+                    "related twice",
+                    Keys::FanOut,
+                    *related(
+                        Keys::Parent,
+                        related(Keys::Composite, walk(Keys::Parent, AtLeast(5), 1)),
+                    ),
+                ),
+                // The inner closure's own target is a relation.
+                (
+                    "walk over related",
+                    Keys::Parent,
+                    *walk(
+                        Keys::Parent,
+                        Related(Keys::Composite, Box::new(Below(5))),
+                        2,
+                    ),
+                ),
+                // A generated filter with a relation predicate.
+                (
+                    "filter",
+                    Keys::Parent,
+                    *walk(Keys::Parent, ParentFilter(5, None), 2),
+                ),
+                (
+                    "filter and walk",
+                    Keys::Composite,
+                    And(
+                        Box::new(ParentFilter(5, Some(5))),
+                        walk(Keys::Parent, AtLeast(5), 1),
+                    ),
+                ),
+                (
+                    "not filter or walk",
+                    Keys::Parent,
+                    Or(
+                        Box::new(Not(Box::new(ParentFilter(1, None)))),
+                        walk(Keys::FanOut, Below(5), 2),
+                    ),
+                ),
+                (
+                    "related filter and walk",
+                    Keys::Parent,
+                    *related(
+                        Keys::Parent,
+                        Box::new(And(
+                            Box::new(ParentFilter(5, None)),
+                            walk(Keys::Parent, ScoreIsNull, 1),
+                        )),
+                    ),
+                ),
+            ];
+            for (name, keys, target) in shapes {
+                let label = format!("shape {outer:?}({name}) {inner:?} {keys:?}");
+                let closure = Closure(outer, keys, Box::new(target), 2);
+                cases.push((format!("not {label}"), Not(Box::new(closure.clone()))));
+                cases.push((label, closure));
+            }
+        }
+    }
+    cases
+}
+
 #[cfg(feature = "sqlite")]
 struct FixtureOwner;
 #[cfg(feature = "sqlite")]
@@ -556,6 +876,17 @@ async fn fixture() -> (Database, FixtureOwner) {
         "INSERT INTO closure_parity_nodes (id, parent_id, score, key_a, key_b, ptr_a, ptr_b, name, label) VALUES {values}"
     ))
     .await;
+    let prepare = async_graphql::Schema::build(
+        PrepareFilters,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .data(db.clone())
+    .data(AuthSubject::builder("reader").build())
+    .finish()
+    .execute("{ prepare }")
+    .await;
+    assert!(prepare.errors.is_empty(), "{:?}", prepare.errors);
     (db, owner)
 }
 
@@ -574,6 +905,9 @@ async fn every_backend_admits_the_reference_sets() {
     let mut cases = cases();
     let first_composed_case = cases.len();
     cases.extend(composed_cases());
+    let first_shape_case = cases.len();
+    cases.extend(target_shape_cases());
+    let mut refused_originals = Vec::new();
     for (index, (name, target)) in cases.iter().enumerate() {
         let expected = rows
             .iter()
@@ -595,7 +929,10 @@ async fn every_backend_admits_the_reference_sets() {
             let sql = text.0.lock().unwrap();
             assert!(sql.contains("AS __gom_closure_2_i"), "{name}: {sql}");
             if B::DIALECT == DatabaseBackend::Mssql {
-                assert!(sql.contains("(__gom_truth) FROM (VALUES "), "{name}: {sql}");
+                assert!(
+                    index >= first_shape_case || sql.contains("(__gom_truth) FROM (VALUES "),
+                    "{name}: {sql}"
+                );
             }
         }
         admitted.sort();
@@ -607,6 +944,50 @@ async fn every_backend_admits_the_reference_sets() {
                 "{name}: admitted {admitted:?}, expected {expected:?}"
             ));
         }
+
+        if index >= first_shape_case {
+            let candidate_sql = text.0.lock().unwrap().clone();
+            // A relation directly in the outer target is aggregated.
+            let Closure(_, _, outer_target, _) = (match target {
+                Not(closure) => closure.as_ref(),
+                closure => closure,
+            }) else {
+                unreachable!("every shape is a closure")
+            };
+            let holds_relation = |target: &Target| match target {
+                Related(..) => true,
+                Not(inner) => matches!(**inner, Related(..)),
+                And(left, right) | Or(left, right) => {
+                    matches!(**left, Related(..)) || matches!(**right, Related(..))
+                }
+                _ => false,
+            };
+            assert_eq!(
+                candidate_sql.contains("(SELECT MAX(__gom_visibility_"),
+                holds_relation(outer_target),
+                "{name}: {candidate_sql}"
+            );
+            // The original rendering admits the same rows from more SQL,
+            // where it fits the composition budgets at all.
+            let Ok(original) = target.build(true) else {
+                refused_originals.push(name.as_str());
+                continue;
+            };
+            let mut original = EntityQuery::<Node>::new()
+                .with_read_visibility(&ReadVisibility::Complete(original))
+                .unwrap()
+                .fetch_all(&db)
+                .await
+                .unwrap_or_else(|error| panic!("original {name}: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>();
+            original.sort();
+            assert_eq!(admitted, original, "{name}");
+            let original_sql = text.0.lock().unwrap();
+            assert!(!original_sql.contains("AS __gom_closure_2_i"), "{name}");
+            assert_nested_rendering(name, &original_sql, &candidate_sql);
+        }
     }
     eprintln!(
         "closure parity on {:?}: {} cases, fingerprint {fingerprint:016x}",
@@ -614,10 +995,437 @@ async fn every_backend_admits_the_reference_sets() {
         cases.len()
     );
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    // SQL Server allows nine relations in one predicate. The original
+    // rendering writes a relation around a closure eight times, so some
+    // shapes build only with the shared rendering there.
+    eprintln!(
+        "original rendering refused for {} shape cases: {refused_originals:?}",
+        refused_originals.len()
+    );
+    assert_eq!(
+        refused_originals.len(),
+        if B::DIALECT == DatabaseBackend::Mssql {
+            40
+        } else {
+            0
+        },
+        "{refused_originals:?}"
+    );
     // The cases are not vacuous: they admit and refuse rows in both forms.
     let admits = |target: &Target| target.truths(&rows).contains(&Some(true));
-    assert!(cases.iter().filter(|(_, target)| admits(target)).count() > cases.len() / 2);
+    for group in [&cases[..first_shape_case], &cases[first_shape_case..]] {
+        assert!(group.iter().filter(|(_, target)| admits(target)).count() > group.len() / 2);
+    }
     owner.cleanup().unwrap();
+}
+
+/// SQLite accepts any value as a condition. A hand-written `score & 4` is 4
+/// for score 5: TRUE, though not the number 1. The shared rendering turns a
+/// target's truth into a number once per row, and must read that fragment as
+/// the original rendering's `CASE WHEN` does.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_fragments_that_are_true_without_being_one_keep_their_truth() {
+    use ReadPredicateQuantifier::{All, Any};
+    let (db, _) = fixture().await;
+    let text = SqlText::default();
+    let db = db.with_read_query_observer(text.clone());
+    let rows = rows();
+    let bit = || Box::new(Target::ScoreBit);
+    let mut decisive = 0;
+    for outer in [Any, All] {
+        let walk = || Box::new(Closure(All, Keys::Parent, Box::new(AtLeast(1)), 2));
+        for target in [
+            // The fragment alone under a relation, beside a closure.
+            Or(
+                Box::new(Related(Keys::Parent, bit())),
+                Box::new(Not(walk())),
+            ),
+            // The fragment as a leaf beside a relation that holds a closure.
+            And(bit(), Box::new(Related(Keys::Parent, walk()))),
+            And(
+                Box::new(Not(bit())),
+                Box::new(Not(Box::new(Related(Keys::FanOut, walk())))),
+            ),
+        ] {
+            for case in [
+                Closure(outer, Keys::Parent, Box::new(target.clone()), 3),
+                Not(Box::new(Closure(outer, Keys::Parent, Box::new(target), 3))),
+            ] {
+                let expected = rows
+                    .iter()
+                    .zip(case.truths(&rows))
+                    .filter(|(_, truth)| *truth == Some(true))
+                    .map(|(row, _)| row.id)
+                    .collect::<Vec<_>>();
+                for legacy in [false, true] {
+                    let mut admitted = EntityQuery::<Node>::new()
+                        .with_read_visibility(&ReadVisibility::Complete(case.predicate(legacy)))
+                        .unwrap()
+                        .fetch_all(&db)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<_>>();
+                    admitted.sort();
+                    assert_eq!(admitted, expected, "{case:?}, original {legacy}");
+                    assert_eq!(
+                        text.0.lock().unwrap().contains("AS __gom_closure_2_i"),
+                        !legacy,
+                        "{case:?}"
+                    );
+                }
+                decisive += usize::from(!expected.is_empty() && expected.len() < rows.len());
+            }
+        }
+    }
+    // Most cases admit some rows and refuse others.
+    assert!(decisive >= 8, "{decisive}");
+}
+
+fn fragment_predicate(expression: FilterExpression, stable: bool) -> ReadPredicate {
+    ReadPredicate::from_filter::<B, _>(&Fragment(expression, stable)).unwrap()
+}
+
+fn parent_closure(quantifier: ReadPredicateQuantifier, target: ReadPredicate) -> ReadPredicate {
+    ReadPredicate::related_closure_within::<B, Node>(quantifier, Keys::Parent.columns(), target, 2)
+        .unwrap()
+}
+
+fn closure_sql(predicate: ReadPredicate) -> String {
+    EntityQuery::<Node>::new()
+        .with_read_visibility(&ReadVisibility::Complete(predicate))
+        .unwrap()
+        .build_delete_sql()
+        .0
+}
+
+#[cfg(feature = "postgres")]
+fn alternating_postgres_target() -> ReadPredicate {
+    fragment_predicate(
+        FilterExpression::trusted_fragment(
+            "nextval('closure_truth_calls') % ? = ? AND __gom_self.id IS NOT NULL",
+            vec![SqlValue::Int(2), SqlValue::Int(0)],
+        ),
+        false,
+    )
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_standalone_volatile_target_keeps_pre_pr_sql_sites() {
+    use ReadPredicateQuantifier::Any;
+
+    let inner = parent_closure(Any, alternating_postgres_target());
+    let render = |predicate| {
+        EntityQuery::<Node>::new()
+            .with_read_visibility(&ReadVisibility::Complete(predicate))
+            .unwrap()
+            .try_build_delete_sql()
+            .unwrap()
+    };
+    let (sql, binds) = render(inner.clone());
+    // Before #785, PostgreSQL encoded the native Boolean verdict once in
+    // the anchor and again in the recursive step, in that order.
+    let target = "nextval('closure_truth_calls')";
+    assert_eq!(sql.matches(target).count(), 2, "{sql}");
+    assert_eq!(sql.matches("COALESCE(2 *").count(), 2, "{sql}");
+    assert!(
+        sql.contains(&format!(
+            r#"{target} % $1 = $2 AND "closure_parity_nodes".id IS NOT NULL"#
+        )) && sql.contains(&format!(
+            "{target} % $3 = $4 AND __gom_closure_1_t.id IS NOT NULL"
+        )),
+        "{sql}"
+    );
+    let expected_binds = |sites| {
+        [2, 0]
+            .repeat(sites)
+            .into_iter()
+            .map(SqlValue::Int)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(binds, expected_binds(2));
+
+    // Composition still uses the inner closure's separate TRUE and FALSE
+    // sites, with the inner binds replayed at each outer evaluation site.
+    let (nested, binds) = render(parent_closure(Any, inner));
+    assert_eq!(nested.matches(target).count(), 16, "{nested}");
+    assert!(!nested.contains("COALESCE(2 *"), "{nested}");
+    assert_eq!(binds, expected_binds(16));
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "owned database lane"]
+async fn postgres_standalone_volatile_target_evaluates_once_per_walk_row() {
+    use ReadPredicateQuantifier::Any;
+    let (db, mut owner) = fixture().await;
+    for sql in [
+        "CREATE SEQUENCE closure_truth_calls",
+        "INSERT INTO closure_parity_nodes (id, parent_id) VALUES (1001, 1002), (1002, NULL)",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    // The anchor's FALSE is followed by a TRUE at its parent. Evaluating
+    // NOT(target) again for the FALSE anchor consumes that parent's TRUE.
+    let admitted = EntityQuery::<Node>::new()
+        .where_clause("id = ?", SqlValue::Int(1001))
+        .with_read_visibility(&ReadVisibility::Complete(parent_closure(
+            Any,
+            alternating_postgres_target(),
+        )))
+        .unwrap()
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let calls: i64 = graphql_orm::sqlx::query_scalar("SELECT last_value FROM closure_truth_calls")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    owner.cleanup().unwrap();
+    assert_eq!((admitted, calls), (vec![1001], 2));
+}
+
+#[test]
+fn handwritten_volatile_fragments_keep_original_sites() {
+    use ReadPredicateQuantifier::{All, Any};
+
+    let condition = match B::DIALECT {
+        DatabaseBackend::Postgres => "random() > 0.5",
+        DatabaseBackend::Mssql => "CHECKSUM(NEWID()) > 0",
+        _ => "random() > 0",
+    };
+    let fragment = || {
+        fragment_predicate(
+            FilterExpression::And(vec![FilterExpression::trusted_fragment(condition, vec![])]),
+            false,
+        )
+    };
+    let inner = || parent_closure(All, Target::AtLeast(5).predicate(false));
+
+    // The volatile fragment may be inside the inner walk or behind a
+    // relation next to it. Both still use the legacy TRUE and FALSE sites.
+    for target in [
+        parent_closure(
+            All,
+            fragment().and(Target::AtLeast(5).predicate(false)).unwrap(),
+        ),
+        inner()
+            .or(
+                ReadPredicate::related::<B, Node, Node>(Keys::Parent.columns(), fragment())
+                    .unwrap(),
+            )
+            .unwrap(),
+    ] {
+        let expected = closure_sql(
+            parent_closure(Any, target.clone().__gom_original_closure_rendering())
+                .not()
+                .unwrap(),
+        );
+        let actual = closure_sql(parent_closure(Any, target).not().unwrap());
+        assert!(
+            actual == expected,
+            "volatile target changed its evaluation sites"
+        );
+        assert!(actual.matches(condition).count() >= 4);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn prepared_relation_filter_keeps_its_handwritten_policy_sites() {
+    struct VolatilePolicy;
+
+    impl RowPolicy for VolatilePolicy {
+        fn read_visibility<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+        ) -> futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+            Box::pin(async {
+                Ok(ReadVisibility::Complete(fragment_predicate(
+                    FilterExpression::trusted_fragment("random() > 0", vec![]),
+                    false,
+                )))
+            })
+        }
+
+        fn can_read_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            unreachable!("preparation uses complete SQL visibility")
+        }
+
+        fn can_write_row<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            _: &'static str,
+            _: Option<&'static str>,
+            _: EntityAccessSurface,
+            _: &'a (dyn std::any::Any + Send + Sync),
+        ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            unreachable!("preparation does not write")
+        }
+    }
+
+    struct Prepare;
+    #[async_graphql::Object]
+    impl Prepare {
+        async fn check(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<bool> {
+            use ReadPredicateQuantifier::{All, Any};
+
+            let mut filter = ClosureParityNodeWhereInput {
+                and: Some(vec![ClosureParityNodeWhereInput {
+                    parents: Some(vec![ClosureParityNodeWhereInput::default()]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            filter
+                .__gom_prepare_read(ctx, 0, &mut RelationFilterBudget::new())
+                .await?;
+            let filter = ReadPredicate::from_filter::<B, _>(&filter)?;
+            let inner = parent_closure(Any, AtLeast(5).predicate(false));
+            let target = inner.or(filter)?;
+            let legacy = parent_closure(All, target.clone().__gom_original_closure_rendering());
+            let candidate = parent_closure(All, target);
+            let sql = closure_sql(candidate);
+            Ok(sql.contains("random() > 0") && sql == closure_sql(legacy))
+        }
+    }
+
+    let (mut db, _) = fixture().await;
+    db.set_row_policy(VolatilePolicy);
+    let response = async_graphql::Schema::build(
+        Prepare,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .data(db)
+    .data(AuthSubject::builder("reader").build())
+    .finish()
+    .execute("{ check }")
+    .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(response.data, async_graphql::value!({ "check": true }));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_singleton_fragment_compositions_keep_numeric_truth() {
+    use ReadPredicateQuantifier::Any;
+    let (db, _) = fixture().await;
+    let leaf = || Target::ScoreBit.fragment();
+    let rows = rows();
+    let expected = rows
+        .iter()
+        .zip(
+            Closure(
+                Any,
+                Keys::Parent,
+                Box::new(Or(
+                    Box::new(Target::ScoreBit),
+                    Box::new(Closure(Any, Keys::Parent, Box::new(AtLeast(100)), 2)),
+                )),
+                2,
+            )
+            .truths(&rows),
+        )
+        .filter(|(_, truth)| *truth == Some(true))
+        .map(|(row, _)| row.id)
+        .collect::<Vec<_>>();
+    assert!(!expected.is_empty() && expected.len() < rows.len());
+    for expression in [
+        FilterExpression::And(vec![leaf()]),
+        FilterExpression::Or(vec![leaf()]),
+    ] {
+        let target = ReadPredicate::related::<B, Node, Node>(
+            &[("id", "id")],
+            fragment_predicate(expression, true),
+        )
+        .unwrap()
+        .or(parent_closure(Any, AtLeast(100).predicate(false)))
+        .unwrap();
+        let candidate = parent_closure(Any, target);
+        assert!(closure_sql(candidate.clone()).contains("AS __gom_closure_2_i"));
+        assert_eq!(admitted_ids(&db, candidate).await, expected);
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "owned database lane"]
+async fn postgres_untyped_truth_literal_uses_boolean_context() {
+    use ReadPredicateQuantifier::{All, Any};
+    let (db, mut owner) = fixture().await;
+    let leaf = || fragment_predicate(FilterExpression::trusted_fragment("'t'", vec![]), true);
+    let standalone = parent_closure(Any, leaf());
+    let relation = ReadPredicate::related::<B, Node, Node>(&[("id", "id")], leaf()).unwrap();
+    let target = relation
+        .and(parent_closure(Any, AtLeast(5).predicate(false)))
+        .unwrap();
+    let candidate = parent_closure(All, target.clone());
+    let original = parent_closure(All, target.__gom_original_closure_rendering());
+    assert!(closure_sql(candidate.clone()).contains("AS __gom_closure_2_i"));
+    assert_eq!(admitted_ids(&db, standalone).await.len(), rows().len());
+    let expected = admitted_ids(&db, original).await;
+    assert!(!expected.is_empty() && expected.len() < rows().len());
+    assert_eq!(admitted_ids(&db, candidate).await, expected);
+    owner.cleanup().unwrap();
+}
+
+#[cfg(feature = "mssql")]
+#[tokio::test]
+#[ignore = "owned database lane"]
+async fn mssql_empty_disjunction_beside_closure_keeps_deny_and_refuses_negation() {
+    use ReadPredicateQuantifier::{All, Any};
+    let (db, mut owner) = fixture().await;
+    let deny = fragment_predicate(FilterExpression::Or(vec![]), true);
+    let inner = parent_closure(Any, AtLeast(5).predicate(false));
+    let denied = parent_closure(All, inner.clone().and(deny.clone()).unwrap());
+    let either = parent_closure(Any, inner.clone().or(deny).unwrap());
+    for candidate in [&denied, &either] {
+        assert!(!closure_sql(candidate.clone()).contains("FROM (VALUES )"));
+        assert!(candidate.clone().not().is_err());
+    }
+    assert!(admitted_ids(&db, denied).await.is_empty());
+    let expected = admitted_ids(&db, parent_closure(Any, inner)).await;
+    assert!(!expected.is_empty() && expected.len() < rows().len());
+    assert_eq!(admitted_ids(&db, either).await, expected);
+    owner.cleanup().unwrap();
+}
+
+async fn admitted_ids(db: &Database, predicate: ReadPredicate) -> Vec<i64> {
+    let mut ids = EntityQuery::<Node>::new()
+        .with_read_visibility(&ReadVisibility::Complete(predicate))
+        .unwrap()
+        .fetch_all(db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
 }
 
 fn assert_nested_rendering(name: &str, original: &str, candidate: &str) {

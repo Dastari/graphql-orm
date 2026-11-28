@@ -678,36 +678,16 @@ impl RecordMutations {
             let sql = Record::__gom_rebind_sql("INSERT INTO records (id, title) VALUES (?, ?)", 1);
             let mut bind_values: ::std::vec::Vec<::graphql_orm::graphql::orm::SqlValue> =
                 ::std::vec::Vec::new();
-            if true {
-                db.ensure_writable_field(
-                    ctx,
-                    "Record",
-                    "id",
-                    ::std::option::Option::None,
-                    ::std::option::Option::None,
-                    ::std::option::Option::Some(
-                        &input.id
-                            as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
-                    ),
-                )
-                .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-            }
-            if true {
-                db.ensure_writable_field(
-                    ctx,
-                    "Record",
-                    "title",
-                    ::std::option::Option::None,
-                    ::std::option::Option::None,
-                    ::std::option::Option::Some(
-                        &input.title
-                            as &(dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync),
-                    ),
-                )
-                .await
-                .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-            }
+            ::graphql_orm::graphql::orm::__apply_generated_create_fields(
+                db,
+                ctx,
+                "Record",
+                &mut input,
+                &__gom_client_supplied,
+                Record::__GOM_CREATE_FIELDS,
+                ::graphql_orm::graphql::orm::GeneratedCreateFieldMode::Create { nested: false },
+            )
+            .await?;
             bind_values.push(::graphql_orm::graphql::orm::SqlValue::String(
                 (&input.id).to_string(),
             ));
@@ -851,68 +831,19 @@ impl RecordMutations {
                 .__lookup_upsert_target::<Record>(ctx, &mut hook_ctx, &input)
                 .await?;
             __gom_write.__admit_upsert_target::<Record>(ctx).await?;
-            #[allow(unused_mut)]
-            let mut __gom_denied_upsert_columns: ::std::vec::Vec<&'static str> =
-                ::std::vec::Vec::new();
-            if true {
-                if current_entity.is_none() {
-                    db.ensure_writable_field(
-                        ctx,
-                        "Record",
-                        "id",
-                        ::std::option::Option::None,
-                        ::std::option::Option::None,
-                        ::std::option::Option::Some(
-                            &input.id
-                                as &(
-                                     dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync
-                                 ),
-                        ),
-                    )
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                }
-            }
-            if true {
-                if let ::std::option::Option::Some(current_entity) = current_entity.as_ref() {
-                    db.ensure_writable_field(
-                        ctx,
-                        "Record",
-                        "title",
-                        ::std::option::Option::None,
-                        ::std::option::Option::Some(
-                            current_entity
-                                as &(
-                                     dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync
-                                 ),
-                        ),
-                        ::std::option::Option::Some(
-                            &input.title
-                                as &(
-                                     dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync
-                                 ),
-                        ),
-                    )
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                } else {
-                    db.ensure_writable_field(
-                        ctx,
-                        "Record",
-                        "title",
-                        ::std::option::Option::None,
-                        ::std::option::Option::None,
-                        ::std::option::Option::Some(
-                            &input.title
-                                as &(
-                                     dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync
-                                 ),
-                        ),
-                    )
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                }
-            }
+            let __gom_denied_upsert_columns =
+                ::graphql_orm::graphql::orm::__apply_generated_create_fields(
+                    db,
+                    ctx,
+                    "Record",
+                    &mut input,
+                    &__gom_client_supplied,
+                    Record::__GOM_CREATE_FIELDS,
+                    ::graphql_orm::graphql::orm::GeneratedCreateFieldMode::Upsert {
+                        current: current_entity.as_ref().map(|row| row as _),
+                    },
+                )
+                .await?;
             let created_pk = input.id.clone();
             let action = if current_entity.is_some() {
                 ::graphql_orm::graphql::orm::ChangeAction::Updated
@@ -940,13 +871,14 @@ impl RecordMutations {
                             .filter(|(column, _)| !__gom_denied_upsert_columns.contains(column))
                             .map(|(_, rendered)| *rendered)
                             .collect();
-                    ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
+                    ::graphql_orm::graphql::orm::render_upsert_sql_with_clock(
+                        ::graphql_orm::graphql::orm::DatabaseBackend::Sqlite,
                         "records",
                         &["id", "title"],
                         &["?", "?"],
                         &["id"],
                         &__gom_update_columns,
-                        false,
+                        ::std::option::Option::None,
                         ::std::option::Option::None,
                     )
                 },
