@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.245.0 shares forward and bidirectional transaction keyset execution.
+[Migration](../../MIGRATION.md#02450-shared-transaction-keyset-pagination).
+
 Version 0.244.0 resolves two Rust 1.99 diagnostics while retaining support for
 Rust 1.97.1. [Migration](../../MIGRATION.md#02440-orm-compiler-diagnostics).
 

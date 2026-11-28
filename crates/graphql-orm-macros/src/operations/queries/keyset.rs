@@ -407,77 +407,9 @@ pub(in crate::operations) fn keyset(
                         filter: Self::Filter,
                         page: ::graphql_orm::graphql::pagination::KeysetPageInput,
                     ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::std::result::Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
-                        ::std::boxed::Box::pin(async move {
-                            use ::graphql_orm::graphql::orm::DatabaseFilter;
-                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
-                                #(#order_tokens),*
-                            ];
-                            const FINGERPRINT: &str = #fingerprint;
-                            let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
-                                ::std::option::Option::Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
-                                FINGERPRINT,
-                                &filter.keyset_filter_identity().into_iter().collect::<::std::vec::Vec<_>>(),
-                            );
-                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
-                                return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
-                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
-                                ));
-                            }
-                            let config = hook_ctx.database().pagination_config();
-                            // A transaction read is trusted Rust code: its limit is exact or refused.
-                            if let ::std::option::Option::Some(requested) = page.limit {
-                                config.checked_explicit_limit(requested)?;
-                            }
-                            let resolved = config.resolve_page(
-                                ::std::option::Option::Some(&::graphql_orm::graphql::orm::PageInput { limit: page.limit, offset: ::std::option::Option::Some(0) }),
-                                true,
-                            );
-                            let limit = resolved.limit.unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT).max(0);
-                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
-                            let total_count = if page.include_total_count {
-                                ::std::option::Option::Some(query.clone().count_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
-                            } else {
-                                ::std::option::Option::None
-                            };
-                            if let ::std::option::Option::Some(cursor) = page.after.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
-                                let (predicate, binds) = ::graphql_orm::graphql::orm::render_keyset_after(
-                                    <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                    ORDER,
-                                    &values,
-                                    query.values.len() + 1,
-                                )?;
-                                query = query.where_values(&predicate, binds);
-                            }
-                            query.order_clauses = ORDER.iter().map(|column| column.order_sql()).collect();
-                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
-                                limit: ::std::option::Option::Some(limit.saturating_add(1)),
-                                offset: ::std::option::Option::Some(0),
-                            });
-                            let mut entities = query.fetch_all_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
-                            let has_next_page = entities.len() > limit as usize;
-                            if has_next_page { entities.truncate(limit as usize); }
-                            let edges = entities
-                                .into_iter()
-                                .map(|entity| {
-                                    let values = ::std::vec![#(#cursor_tokens),*];
-                                    ::graphql_orm::graphql::pagination::Edge {
-                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(&bound_fingerprint, values),
-                                        node: entity,
-                                    }
-                                })
-                                .collect::<::std::vec::Vec<_>>();
-                            ::std::result::Result::Ok(::graphql_orm::graphql::pagination::Connection {
-                                page_info: ::graphql_orm::graphql::pagination::PageInfo {
-                                    has_next_page,
-                                    has_previous_page: page.after.is_some(),
-                                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
-                                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
-                                    total_count,
-                                },
-                                edges,
-                            })
-                        })
+                        ::graphql_orm::graphql::orm::__gom_transaction_keyset::<Self, #backend_marker, _>(
+                            hook_ctx, filter, ::graphql_orm::graphql::orm::GeneratedTransactionKeyset::Forward(page),
+                        )
                     }
                 }
 
@@ -489,109 +421,9 @@ pub(in crate::operations) fn keyset(
                         filter: Self::Filter,
                         page: ::graphql_orm::graphql::pagination::KeysetConnectionInput,
                     ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::std::result::Result<::graphql_orm::graphql::pagination::Connection<Self>, ::graphql_orm::graphql::errors::OrmPublicError>> {
-                        ::std::boxed::Box::pin(async move {
-                            use ::graphql_orm::graphql::orm::DatabaseFilter;
-                            const ORDER: &[::graphql_orm::graphql::orm::KeysetOrderColumn] = &[
-                                #(#order_tokens),*
-                            ];
-                            const FINGERPRINT: &str = #fingerprint;
-                            let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
-                                ::std::option::Option::Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
-                                FINGERPRINT,
-                                &filter.keyset_filter_identity().into_iter().collect::<::std::vec::Vec<_>>(),
-                            );
-                            if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
-                                return ::std::result::Result::Err(::graphql_orm::graphql::errors::OrmPublicError::new(
-                                    ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
-                                ));
-                            }
-                            let requested = page.first.or(page.last);
-                            let validated = page.validate(
-                                ::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT,
-                                i64::MAX,
-                            )?;
-                            let config = hook_ctx.database().pagination_config();
-                            // A transaction read is trusted Rust code: its limit is exact or refused.
-                            if let ::std::option::Option::Some(requested) = requested {
-                                config.checked_explicit_limit(requested)?;
-                            }
-                            let resolved = config.resolve_page(
-                                ::std::option::Option::Some(&::graphql_orm::graphql::orm::PageInput {
-                                    limit: ::std::option::Option::Some(validated.limit),
-                                    offset: ::std::option::Option::Some(0),
-                                }),
-                                true,
-                            );
-                            let limit = resolved
-                                .limit
-                                .unwrap_or(::graphql_orm::graphql::orm::PaginationConfig::DEFAULT_LIMIT)
-                                .max(1);
-                            let backward = validated.direction
-                                == ::graphql_orm::graphql::pagination::KeysetWindowDirection::Backward;
-                            let had_cursor = validated.cursor.is_some();
-                            let mut query = ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new().filter(&filter);
-                            let total_count = if validated.include_total_count {
-                                ::std::option::Option::Some(query.clone().count_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?)
-                            } else {
-                                ::std::option::Option::None
-                            };
-                            if let ::std::option::Option::Some(cursor) = validated.cursor.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
-                                let (predicate, binds) = if backward {
-                                    ::graphql_orm::graphql::orm::render_keyset_before(
-                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                        ORDER,
-                                        &values,
-                                        query.values.len() + 1,
-                                    )?
-                                } else {
-                                    ::graphql_orm::graphql::orm::render_keyset_after(
-                                        <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
-                                        ORDER,
-                                        &values,
-                                        query.values.len() + 1,
-                                    )?
-                                };
-                                query = query.where_values(&predicate, binds);
-                            }
-                            query.order_clauses = if backward {
-                                ORDER.iter().map(|column| column.reversed().order_sql()).collect()
-                            } else {
-                                ORDER.iter().map(|column| column.order_sql()).collect()
-                            };
-                            query = query.paginate(&::graphql_orm::graphql::orm::PageInput {
-                                limit: ::std::option::Option::Some(limit.saturating_add(1)),
-                                offset: ::std::option::Option::Some(0),
-                            });
-                            let mut entities = query.fetch_all_in_transaction(hook_ctx).await.map_err(::graphql_orm::graphql::errors::OrmPublicError::from)?;
-                            let has_more = entities.len() > limit as usize;
-                            if has_more {
-                                entities.truncate(limit as usize);
-                            }
-                            if backward {
-                                entities.reverse();
-                            }
-                            let edges = entities
-                                .into_iter()
-                                .map(|entity| {
-                                    let values = ::std::vec![#(#cursor_tokens),*];
-                                    ::graphql_orm::graphql::pagination::Edge {
-                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(&bound_fingerprint, values),
-                                        node: entity,
-                                    }
-                                })
-                                .collect::<::std::vec::Vec<_>>();
-                            ::std::result::Result::Ok(::graphql_orm::graphql::pagination::Connection {
-                                page_info: ::graphql_orm::graphql::pagination::PageInfo {
-                                    has_next_page: if backward { had_cursor } else { has_more },
-                                    has_previous_page: if backward { has_more } else { had_cursor },
-                                    start_cursor: edges.first().map(|edge| edge.cursor.clone()),
-                                    end_cursor: edges.last().map(|edge| edge.cursor.clone()),
-                                    total_count,
-                                },
-                                edges,
-                            })
-                        })
+                        ::graphql_orm::graphql::orm::__gom_transaction_keyset::<Self, #backend_marker, _>(
+                            hook_ctx, filter, ::graphql_orm::graphql::orm::GeneratedTransactionKeyset::Connection(page),
+                        )
                     }
                 }
             },

@@ -2,6 +2,11 @@ mod delete_effect_guard;
 pub use delete_effect_guard::{DependentDeleteEffect, DependentDeleteGuard};
 mod generated_filter;
 mod generated_read;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod generated_transaction_keyset;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub use generated_transaction_keyset::{__gom_transaction_keyset, GeneratedTransactionKeyset};
 mod guarded_updates;
 #[doc(hidden)]
 pub use generated_filter::*;

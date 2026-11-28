@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.245.0: Shared transaction keyset pagination
+
+**No action.** Upgrade ORM and macros together. Generated forward and
+bidirectional transaction keyset reads use one shared implementation. Existing
+cursors remain valid, and no schema or data migration is required.
+
 ## 0.244.0: ORM compiler diagnostics
 
 **No action.** Upgrade ORM and macros together. The ORM removes a needless
