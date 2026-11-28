@@ -4909,7 +4909,7 @@ where
         Self::check_repository_candidates(db, &visibility, &nodes).await?;
         let has_more = nodes.len() > limit as usize;
         nodes.truncate(limit as usize);
-        let opposite = if let Some(values) = nodes.first().map(&values_for).transpose()?.or(after) {
+        let opposite = if let Some(values) = nodes.first().map(values_for).transpose()?.or(after) {
             let probe = base
                 .clone()
                 .keyset_bound_with_order(order, &values, !backward, nodes.is_empty())?

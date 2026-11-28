@@ -20,6 +20,12 @@ for historical context.
   keyset reads share pagination execution to reduce per-entity compile cost.
   [Migration](MIGRATION.md#02450-shared-transaction-keyset-pagination)
 
+## Unreleased - ORM/macros 0.244.0
+
+- **No action** (refs #107). Remove two Rust 1.99 diagnostics in authorized
+  pagination and runtime mutation response accounting.
+  [Migration](MIGRATION.md#02440-orm-compiler-diagnostics)
+
 ## Unreleased - ORM/macros 0.243.0, operation catalogue 0.18.0
 
 - **No action** (refs #934). Hosts can explicitly register handwritten

@@ -13,6 +13,9 @@ supersedes: []
 Version 0.245.0 delegates generated transaction keyset execution to the ORM.
 [Migration](../../MIGRATION.md#02450-shared-transaction-keyset-pagination).
 
+Version 0.244.0 aligns with
+[ORM 0.244.0](../../MIGRATION.md#02440-orm-compiler-diagnostics).
+
 Version 0.243.0 adds `graphql_orm_resolver_catalog_with_registrations` for
 [explicit handwritten relationship registrations](../graphql-orm-operation-catalog/README.md#register-a-handwritten-relationship-field).
 

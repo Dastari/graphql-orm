@@ -16,6 +16,12 @@ supersedes: []
 bidirectional transaction keyset reads use one shared implementation. Existing
 cursors remain valid, and no schema or data migration is required.
 
+## 0.244.0: ORM compiler diagnostics
+
+**No action.** Upgrade ORM and macros together. The ORM removes a needless
+borrow in authorized pagination and uses `AtomicUsize::try_update` to reserve
+runtime mutation response bytes. Rust 1.97.1 remains the supported baseline.
+
 ## 0.243.0: Handwritten resolver registrations (operation catalogue 0.18.0)
 
 **No action.** Upgrade ORM and macros together. Hosts that want to export
