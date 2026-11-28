@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.177.0 (breaking release)
+## Unreleased - 0.178.0 (breaking release)
+
+- Discovery presizes policy batches and processes contiguous ranked slices,
+  reducing temporary allocations before applying the result limit (#551).
 
 - Ordinary fixed-broker descriptions can include a bounded, compiler-checked
   `ungroupedCount` example for one admitted generated aggregate (#551).

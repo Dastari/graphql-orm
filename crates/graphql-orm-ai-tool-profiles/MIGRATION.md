@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.39.0 discovery ranking
+
+**No action.** Discovery uses dense scores for broad posting lists. Fixed
+weights and capability ID tie-breaking still apply. Host policy decides which
+grouped roots may be disclosed. No data migration is needed.
+
 ## 0.38.0 capability plan compilation
 
 **No action.** Plan compilation reuses the semantic catalogue validated at

@@ -1547,7 +1547,7 @@ impl AiCapabilityDiscoveryBroker {
         let mut kept = Vec::new();
         let mut position = 0;
         while position < ranked.len() {
-            let mut chunk = Vec::new();
+            let start = position;
             let mut decisions = 0_usize;
             let mut entities = BTreeSet::new();
             while let Some(candidate) = ranked.get(position) {
@@ -1558,17 +1558,25 @@ impl AiCapabilityDiscoveryBroker {
                 } else {
                     candidate.entry().operations.len()
                 };
-                if !chunk.is_empty() && decisions + size > batch_size {
+                if position > start && decisions + size > batch_size {
                     break;
                 }
                 if per_root && let Some(entity) = candidate.entity() {
                     entities.insert(entity.entry().id.clone());
                 }
-                chunk.push(*candidate);
                 decisions += size;
                 position += 1;
             }
-            kept.extend(Box::pin(self.admit_matches(principal, run, &chunk, per_root)).await?);
+            kept.extend(
+                Box::pin(self.admit_matches(
+                    principal,
+                    run,
+                    &ranked[start..position],
+                    per_root,
+                    decisions,
+                ))
+                .await?,
+            );
             if self
                 .maximum_discovery_authorizations
                 .is_some_and(|maximum| authorized_view_size(&kept, per_root) > maximum)
@@ -1602,11 +1610,12 @@ impl AiCapabilityDiscoveryBroker {
         run: &AiCapabilityRunBinding,
         ranked: &[AiCapabilityRankedMatch<'a>],
         per_root: bool,
+        decisions_capacity: usize,
     ) -> Result<Vec<(AiCapabilityRankedMatch<'a>, BTreeSet<AiToolId>)>, AiError> {
         // One policy batch decides every match together with the entries it
         // depends on: an entity entry's grouped roots follow it, and in
         // per-root ranking a root's entity entry precedes its first root.
-        let mut batch = Vec::new();
+        let mut batch = Vec::with_capacity(decisions_capacity);
         let mut slots = Vec::with_capacity(ranked.len());
         let mut entity_slots = BTreeMap::<AiToolId, usize>::new();
         for candidate in ranked {
@@ -4605,7 +4614,9 @@ impl AiCapabilityDiscoveryBroker {
             if chunk.is_empty() {
                 break;
             }
-            for admitted in Box::pin(self.admit_matches(&principal, run, &chunk, false)).await? {
+            for admitted in
+                Box::pin(self.admit_matches(&principal, run, &chunk, false, decisions)).await?
+            {
                 if parsed.level == BrowseLevel::Namespaces {
                     found_namespaces.insert(admitted.0.entry().namespace.as_str());
                 }

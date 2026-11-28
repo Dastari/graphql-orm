@@ -12,6 +12,12 @@ supersedes: []
 
 ## Breaking release (unreleased)
 
+### Internal discovery batching (#551)
+
+**No action.** Discovery uses presized buffers for the same ordered policy
+batches. Each request still evaluates current policy before applying the result
+limit. No data migration is needed.
+
 ### Ungrouped count examples in capability descriptions (#551)
 
 **No action.** An ordinary describe result can include `ungroupedCount`

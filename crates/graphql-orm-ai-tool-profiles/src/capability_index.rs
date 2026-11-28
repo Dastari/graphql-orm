@@ -587,8 +587,10 @@ impl AiCapabilityIndex {
                 .map(|entry| (entry.id.clone(), entry.clone()))
                 .chain(
                     self.operation_entries()
+                        .by_entity
                         .iter()
-                        .map(|(id, (_, entry))| (id.clone(), entry.clone())),
+                        .flat_map(|(_, roots)| roots)
+                        .map(|entry| (entry.id.clone(), entry.clone())),
                 )
                 .collect::<BTreeMap<_, _>>();
             let terms = SearchTermIndex::compile(&self.target_id, &entries);
@@ -596,23 +598,31 @@ impl AiCapabilityIndex {
         })
     }
 
-    /// Root entries of every entity entry's members, keyed by root ID, each
-    /// with the ID of the entity entry that holds it.
-    fn operation_entries(&self) -> &BTreeMap<AiToolId, (AiToolId, AiCapabilityIndexEntry)> {
+    /// Roots in operation order within each entity, with a separate index
+    /// for exact root ID lookups.
+    fn operation_entries(&self) -> &OperationEntries {
         self.operation_entries.0.get_or_init(|| {
-            Arc::new(
-                self.entries
-                    .values()
-                    .flat_map(|entity| {
-                        entity.operations.iter().map(|member| {
-                            (
-                                member.capability_id.clone(),
-                                (entity.id.clone(), member_entry(entity, member)),
-                            )
-                        })
+            let mut entries = OperationEntries::default();
+            for entity in self
+                .entries
+                .values()
+                .filter(|entry| !entry.operations.is_empty())
+            {
+                let position = entries.by_entity.len();
+                let roots = entity
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, member)| {
+                        entries
+                            .by_root
+                            .insert(member.capability_id.clone(), (position, offset));
+                        member_entry(entity, member)
                     })
-                    .collect(),
-            )
+                    .collect();
+                entries.by_entity.push((entity.id.clone(), roots));
+            }
+            Arc::new(entries)
         })
     }
 
@@ -1247,13 +1257,17 @@ impl<'a> AiCapabilityRankedMatch<'a> {
     /// The matches carry index metadata. Each root still requires its own
     /// current host policy decision before disclosure.
     pub fn iter_grouped_roots(&self) -> impl Iterator<Item = AiCapabilityRankedMatch<'a>> + '_ {
-        // Admission proves that top-level and grouped root IDs are distinct.
-        self.entry.operations.iter().filter_map(|member| {
-            let (_, entry) = self.index.operation_entries().get(&member.capability_id)?;
-            Some(AiCapabilityRankedMatch {
-                index: self.index,
-                entry,
-            })
+        let roots: &[AiCapabilityIndexEntry] = if self.entry.operations.is_empty() {
+            &[]
+        } else {
+            let groups = &self.index.operation_entries().by_entity;
+            groups
+                .binary_search_by(|(entity, _)| entity.cmp(&self.entry.id))
+                .map_or(&[], |position| groups[position].1.as_slice())
+        };
+        roots.iter().map(|entry| AiCapabilityRankedMatch {
+            index: self.index,
+            entry,
         })
     }
 
@@ -1424,6 +1438,8 @@ struct Posting {
     entry: u32,
     /// Fields of the entry's own metadata that hold the term.
     own: u16,
+    /// Union of the entry's fields and every grouped root's fields.
+    all: u16,
     /// For an entity entry, each grouped operation (by position in
     /// `operations`) whose operation name or description holds the term,
     /// with those fields. A grouped operation contributes only when the
@@ -1457,7 +1473,7 @@ struct EntrySearchKeys {
 ///
 /// Terms are interned per index. A query resolves each of its terms once and
 /// scores only the entries in those terms' posting lists, so a search costs
-/// O(matching postings) instead of O(entries).
+/// O(matching postings) for sparse matches.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SearchTermIndex {
     dictionary: BTreeMap<String, u32>,
@@ -1467,6 +1483,9 @@ struct SearchTermIndex {
     entries: Vec<EntrySearchKeys>,
     /// Entry position by identifier.
     positions: BTreeMap<AiToolId, u32>,
+    /// Whether entry positions also resolve their IDs in the source map.
+    /// A standalone deserialized index may not yet have passed admission.
+    ids_match_keys: bool,
 }
 
 fn add_terms(fields: &mut BTreeMap<String, u16>, terms: BTreeSet<String>, field: u16) {
@@ -1489,7 +1508,9 @@ impl SearchTermIndex {
         let target = search_terms(target_id.as_str());
         let mut keys = Vec::with_capacity(entries.len());
         let mut positions = BTreeMap::new();
-        for (position, entry) in entries.values().enumerate() {
+        let mut ids_match_keys = true;
+        for (position, (id, entry)) in entries.iter().enumerate() {
+            ids_match_keys &= id == &entry.id;
             let position = u32::try_from(position).unwrap_or(u32::MAX);
             let mut own = BTreeMap::<String, u16>::new();
             add_terms(&mut own, search_terms(entry.id.as_str()), FIELD_ID);
@@ -1569,10 +1590,16 @@ impl SearchTermIndex {
                         id
                     }
                 };
+                let own = own.get(&term).copied().unwrap_or(0);
+                let operations = grouped.remove(&term).unwrap_or_default().into_boxed_slice();
+                let all = operations
+                    .iter()
+                    .fold(own, |fields, (_, root)| fields | root);
                 postings[id as usize].push(Posting {
                     entry: position,
-                    own: own.get(&term).copied().unwrap_or(0),
-                    operations: grouped.remove(&term).unwrap_or_default().into_boxed_slice(),
+                    own,
+                    all,
+                    operations,
                 });
             }
             positions.insert(entry.id.clone(), position);
@@ -1592,6 +1619,7 @@ impl SearchTermIndex {
             postings,
             entries: keys,
             positions,
+            ids_match_keys,
         }
     }
 }
@@ -1617,22 +1645,13 @@ impl SearchTerms {
         }
     }
 
-    /// Scores of every entry of `searchable` with at least one posting for
-    /// the query, counting every grouped operation, keyed by entry position.
-    fn scores(&self, searchable: &SearchTermIndex) -> BTreeMap<u32, (u64, u64)> {
-        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
-        for term in &self.terms {
-            let Some(id) = searchable.dictionary.get(term) else {
-                continue;
-            };
-            for posting in &searchable.postings[*id as usize] {
-                let (root, nested) = field_weights(posting.fields(&|_| true));
-                let score = scores.entry(posting.entry).or_default();
-                score.0 += root;
-                score.1 += nested;
-            }
-        }
-        scores
+    /// Posting lists of the query terms, in term order.
+    fn posting_lists<'a>(&self, searchable: &'a SearchTermIndex) -> Vec<&'a [Posting]> {
+        self.terms
+            .iter()
+            .filter_map(|term| searchable.dictionary.get(term))
+            .map(|id| searchable.postings[*id as usize].as_slice())
+            .collect()
     }
 
     /// Rank of one entry counting only admitted grouped operations, or
@@ -1749,8 +1768,22 @@ impl Eq for RootSearchCache {}
 /// Lazily built, never serialized, never compared cache of the root entries
 /// that entity entries group.
 #[derive(Clone, Debug, Default)]
-#[allow(clippy::type_complexity)]
-struct OperationEntryCache(OnceLock<Arc<BTreeMap<AiToolId, (AiToolId, AiCapabilityIndexEntry)>>>);
+struct OperationEntryCache(OnceLock<Arc<OperationEntries>>);
+
+#[derive(Debug, Default)]
+struct OperationEntries {
+    // Admission checks that source map keys match their entity IDs.
+    by_entity: Vec<(AiToolId, Vec<AiCapabilityIndexEntry>)>,
+    by_root: BTreeMap<AiToolId, (usize, usize)>,
+}
+
+impl OperationEntries {
+    fn get(&self, id: &AiToolId) -> Option<(&AiToolId, &AiCapabilityIndexEntry)> {
+        let &(entity, root) = self.by_root.get(id)?;
+        let (id, roots) = &self.by_entity[entity];
+        Some((id, &roots[root]))
+    }
+}
 
 impl PartialEq for OperationEntryCache {
     fn eq(&self, _: &Self) -> bool {
@@ -1852,13 +1885,44 @@ fn rank_view<'a>(
     searchable: &SearchTermIndex,
     ranked: &mut Vec<RankedEntry<'a>>,
 ) {
-    for (position, score) in terms.scores(searchable) {
-        let keys = &searchable.entries[position as usize];
-        let Some(entry) = entries.get(&keys.id) else {
-            continue;
-        };
+    let postings = terms.posting_lists(searchable);
+    let mut push_rank = |keys: &EntrySearchKeys, entry: &'a AiCapabilityIndexEntry, score| {
         if let Some(rank) = terms.filtered_rank(keys, entry, query, score, &|_| true) {
             ranked.push((rank, index, entry));
+        }
+    };
+    if searchable.ids_match_keys
+        && !postings.is_empty()
+        && postings.iter().map(|list| list.len()).sum::<usize>() >= entries.len().div_ceil(2)
+    {
+        // The dense path walks the same BTree order used to assign positions.
+        // Its score buffer is local to this index. Sparse matches still avoid
+        // visiting the rest of the index.
+        let mut scores = vec![(0, 0); entries.len()];
+        for posting in postings.into_iter().flatten() {
+            let (root, nested) = field_weights(posting.all);
+            let score = &mut scores[posting.entry as usize];
+            score.0 += root;
+            score.1 += nested;
+        }
+        for ((keys, entry), score) in searchable.entries.iter().zip(entries.values()).zip(scores) {
+            if score != (0, 0) {
+                push_rank(keys, entry, score);
+            }
+        }
+    } else {
+        let mut scores = BTreeMap::<u32, (u64, u64)>::new();
+        for posting in postings.into_iter().flatten() {
+            let (root, nested) = field_weights(posting.all);
+            let score = scores.entry(posting.entry).or_default();
+            score.0 += root;
+            score.1 += nested;
+        }
+        for (position, score) in scores {
+            let keys = &searchable.entries[position as usize];
+            if let Some(entry) = entries.get(&keys.id) {
+                push_rank(keys, entry, score);
+            }
         }
     }
 }
@@ -3733,6 +3797,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn broad_search_preserves_exact_id_lookup_for_deserialized_entries() {
+        let index = synthetic_entity_index(4);
+        let id = index.entries().next().expect("entry").id.as_str();
+        let mut encoded = serde_json::to_value(&index).expect("encoded index");
+        let entries = encoded["entries"].as_object_mut().expect("entries");
+        let moved = entries.remove(id).expect("original key");
+        entries.insert("inventory.renamed_entity".to_owned(), moved);
+        let decoded: AiCapabilityIndex = serde_json::from_value(encoded).expect("decoded index");
+
+        let query = query("records");
+        let expected = index
+            .search(&query)
+            .expect("original results")
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.id.as_str() != id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected.len(),
+            3,
+            "broad term should match the other entries"
+        );
+        assert_eq!(
+            decoded.search(&query).expect("decoded search").candidates,
+            expected
+        );
     }
 
     /// Groups the synthetic per-root entries of every entity into entity

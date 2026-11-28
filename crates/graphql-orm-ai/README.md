@@ -29,6 +29,9 @@ handles. Fixed-broker sessions rebind once.
 [Question-to-execute benchmark](docs/capability-discovery-and-execution.md#question-to-execute-acceptance-benchmark) ·
 [migration](MIGRATION.md#capability-broker-version-3-551)
 
+AI 0.178.0 reduces allocations while building discovery policy batches.
+[Migration guide](MIGRATION.md#internal-discovery-batching-551)
+
 AI 0.176.0 lets fixed-broker hosts opt in to bounded discovery descriptions
 for scoped list and keyset ID reads.
 [Scoped discovery descriptions](docs/capability-discovery-and-execution.md#scoped-discovery-descriptions)

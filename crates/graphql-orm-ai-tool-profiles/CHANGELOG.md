@@ -10,7 +10,10 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.38.0
+## Unreleased - 0.39.0
+
+- Discovery uses dense scores for broad posting lists and reads each
+  entity’s grouped roots in operation order from one lookup (#551).
 
 - Reuse validated semantic catalogues when compiling capability plans and
   avoid repeated type-name lookups when rendering signatures (#551).
